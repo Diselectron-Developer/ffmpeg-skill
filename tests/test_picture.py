@@ -2985,6 +2985,7 @@ class MultiLineDrawtextTests(unittest.TestCase):
         """Text mode writes each line break as CRLF on Windows, and drawtext from FFmpeg 6.1 draws
         that as a blank line plus a line break (a wrapped title came out at twice its height)."""
         import _common
+        OUT.mkdir(parents=True, exist_ok=True)
         tmp = tempfile.mkdtemp(dir=str(OUT))
         opts = _common.drawtext_text_opts("one\ntwo\nthree", tmpdir=tmp)
         path = os.path.join(tmp, re.search(r"(t_[0-9a-f]+\.txt)", opts).group(1))

@@ -2092,6 +2092,28 @@ class EditingTests(MediaFixtures):
         self.assertIn("--transcribe", err["message"])
         self.assertFalse(out.exists())
 
+    def test_filler_auto_language_in_a_words_file_is_no_language(self):
+        """A --words document that says "auto" names no language: it keeps the English list, as a
+        document with no language field does, rather than being refused as the language "au"."""
+        doc = OUT / "words_lang_auto.json"
+        doc.write_text(json.dumps({"language": "auto", "words": [
+            {"word": "So", "start": 0.2, "end": 0.5}, {"word": "um", "start": 0.6, "end": 0.8}]}), encoding="utf-8")
+        fil = json.loads(script("silence.py", self._gappy(), "--filler", "--words", doc, "--filler-list",
+                                "--json").stdout)["filler"]
+        self.assertEqual((fil["lang"], fil["removed_words"]), ("en", ["um"]))
+
+    def test_filler_custom_list_reports_the_language_it_heard(self):
+        """With --filler-words the run goes ahead on a language with no built-in list, and says which
+        language the transcript is in rather than the English default it did not use."""
+        doc = OUT / "words_lang_no.json"
+        doc.write_text(json.dumps({"language": "no", "words": [
+            {"word": "er", "start": 0.2, "end": 0.5}, {"word": "sant", "start": 0.6, "end": 0.8}]}), encoding="utf-8")
+        custom = OUT / "filler_words_no.txt"
+        custom.write_text("er\n", encoding="utf-8")
+        fil = json.loads(script("silence.py", self._gappy(), "--filler", "--words", doc, "--filler-words", custom,
+                                "--filler-list", "--json").stdout)["filler"]
+        self.assertEqual((fil["lang"], fil["removed_words"]), ("no", ["er"]))
+
     def test_filler_refuses_a_segment_only_transcript(self):
         doc = OUT / "segments_only.json"
         doc.write_text(json.dumps({"language": "en", "segments": [
