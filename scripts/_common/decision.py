@@ -337,14 +337,49 @@ def _vt_args(codec: str, crf: int, meta: Optional[Dict[str, Any]], keep_bt709: b
         (_vt_bt709("hevc") if keep_bt709 else [])
 
 
+# An LGPL ffmpeg (the kind a desktop app ships) has VideoToolbox but neither libx264 nor libx265.
+# There the CPU line cannot run at all, so VideoToolbox is the only encoder there is and takes the
+# job without --hw (#314). Only when the encoder list was read and lacks the CPU encoder, and only
+# where --hw would run; a build that has libx264 never gets here (docs/design-decisions.md).
+_VT_FOR_CPU = {"libx264": "h264_videotoolbox", "libx265": "hevc_videotoolbox"}
+
+
+def _vt_in_place_of(cpu_encoder: Optional[str]) -> Optional[str]:
+    """The VideoToolbox encoder that takes over from `cpu_encoder` because this ffmpeg build lacks
+    it, else None: not when --hw already decided, nor under an explicit --no-hw (the caller asked
+    for the CPU), nor on a machine VideoToolbox cannot run on. The platform is asked before the
+    encoder list, so Linux and Windows never read it for this. An empty list (ffmpeg's could not
+    be read) proves nothing is missing."""
+    vt = _VT_FOR_CPU.get(cpu_encoder or "")
+    if vt is None or STATE.hw or STATE.hw_source == "flag" or hw_platform_reason() is not None:
+        return None
+    have = ffmpeg_encoders()
+    return vt if have and cpu_encoder not in have and vt in have else None
+
+
+def _note_vt_in_place_of(cpu_encoder: str, vt: str) -> None:
+    if cpu_encoder not in STATE.hw_auto:
+        STATE.hw_auto.append(cpu_encoder)
+    note = f"{cpu_encoder} is not in this ffmpeg build, so this encode ran on {vt} (VideoToolbox) instead"
+    if note not in STATE.hw_notes:
+        STATE.hw_notes.append(note)
+
+
 def _maybe_hw(codec: str, crf: int, meta: Optional[Dict[str, Any]], keep_bt709: bool, cpu: List[str]) -> List[str]:
-    """`cpu` unchanged unless --hw / $FFMPEG_SKILL_HW is on and VideoToolbox can take `codec`; the
-    swap is remembered so run() can put the CPU line back if the GPU refuses the job."""
-    if not STATE.hw:
+    """`cpu` unchanged unless --hw / $FFMPEG_SKILL_HW is on and VideoToolbox can take `codec`, or
+    unless the build has no CPU encoder for it (_vt_in_place_of); the --hw swap is remembered so
+    run() can put the CPU line back if the GPU refuses the job. A build without the CPU encoder
+    has no line to put back, so nothing is remembered for it."""
+    cpu_encoder = cpu[cpu.index("-c:v") + 1] if "-c:v" in cpu else None
+    vt_name = _vt_in_place_of(cpu_encoder)
+    if not STATE.hw and vt_name is None:
         return cpu
     vt = _vt_args(codec, crf, meta, keep_bt709)
     if vt is None:
         return cpu
+    if vt_name:
+        _note_vt_in_place_of(cpu_encoder or "", vt_name)
+        return vt
     # a copy: a caller that edits the returned line in place (export.py strips -movflags) must
     # not edit the recorded slice with it, or restate_last_swap() never sees the line as built
     STATE.hw_swaps.append((list(vt), cpu))
@@ -357,6 +392,8 @@ _CPU_TO_CODEC = {"libx264": "h264", "libx265": "hevc", "prores_ks": "prores"}
 def hw_preset_video(video: List[str], meta: Optional[Dict[str, Any]], *, bt709: bool) -> List[str]:
     """export.py's fixed-preset encoder line moved to VideoToolbox (same codec, the preset's -crf
     mapped to -q:v, its -r kept); unchanged -- with the reason noted -- when that cannot apply.
+    Called under --hw, and for a preset whose libx264/libx265 this build lacks (_vt_in_place_of),
+    where it is the only encoder there is; otherwise it returns `video` untouched.
 
     `bt709`: whether export.py tags this preset's CPU line BT.709 (every fixed preset but prores,
     whose master keeps the source's tags). The VideoToolbox line writes the format the CPU preset
@@ -367,6 +404,9 @@ def hw_preset_video(video: List[str], meta: Optional[Dict[str, Any]], *, bt709: 
     codec = _CPU_TO_CODEC.get(enc or "")
     if codec is None:
         return video
+    vt_name = _vt_in_place_of(enc)
+    if not STATE.hw and vt_name is None:
+        return video
     crf = int(video[video.index("-crf") + 1]) if "-crf" in video else 18
     vt = _vt_args(codec, crf, meta if codec == "prores" else None, bt709)
     if vt is None:
@@ -374,6 +414,9 @@ def hw_preset_video(video: List[str], meta: Optional[Dict[str, Any]], *, bt709: 
     vt = strip_movflags(vt)  # export adds it
     if "-r" in video:
         vt += ["-r", video[video.index("-r") + 1]]
+    if vt_name:
+        _note_vt_in_place_of(enc or "", vt_name)
+        return vt
     # the CPU line export would have written: the preset's own options plus the BT.709 tags export
     # adds to it (only to the CPU line), so a GPU->CPU fallback is tagged exactly like a CPU run
     STATE.hw_swaps.append((list(vt), list(video) + (bt709_tag_args(enc) if bt709 else [])))

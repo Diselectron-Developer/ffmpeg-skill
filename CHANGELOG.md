@@ -4,7 +4,10 @@
 
 ## Unreleased
 
-(nothing yet)
+### Added
+
+- **A build without libx264/libx265 encodes on VideoToolbox by itself (#314).** An LGPL ffmpeg such as the one a desktop app ships has `h264_videotoolbox`/`hevc_videotoolbox` and no x264/x265, so every H.264/HEVC line (`fit`, `cut --accurate`, the other re-encoding tools, and `export.py`'s `youtube`/`reels`/`h265`/... presets) failed with "Unknown encoder". When `ffmpeg -encoders` lacks the CPU encoder, has the matching VideoToolbox one, and the machine is Apple Silicon (the check `--hw` uses), the tool now uses VideoToolbox without `--hw`, built as under `--hw`. The result's `hw` is `{requested: false, source: "auto", used, ...}` with a note naming the missing and the used encoder, plus the usual not-CRF-equivalent `notes` line (without the `--no-hw` advice). A build that has libx264/libx265 is unchanged, and so are `--no-hw` (still the CPU), `FFMPEG_SKILL_HW` (still does not move `export.py`'s presets) and AV1/ProRes.
+- **`doctor` agrees.** A missing `encoder:libx264`/`encoder:libx265` whose VideoToolbox encoder is in the build, on a machine that can run it, is left out of `available`/`missing`/`missing_optional` and named in the new `covered_by` (`{}` otherwise), so `ok` and each tool's `usable` describe what will run; a tool that needs it also carries `covered_by`, and `notes` says the output is not CRF-equivalent. The contract's capability lists are unchanged.
 
 ## 2.8.3
 

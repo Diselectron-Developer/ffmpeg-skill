@@ -192,7 +192,7 @@ class Context:
     """
 
     __slots__ = ("dry_run", "json", "json_brief", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written", "preexisting", "plan", "plan_written", "plan_inputs", "codec",
-                 "hw", "hw_source", "hw_notes", "hw_swaps", "hw_fallback", "hw_env_ignored", "hw_stages")
+                 "hw", "hw_source", "hw_notes", "hw_swaps", "hw_fallback", "hw_env_ignored", "hw_stages", "hw_auto")
 
     def __init__(self) -> None:
         self.reset()
@@ -220,6 +220,7 @@ class Context:
         self.hw_fallback = False                     # run() re-encoded a job VideoToolbox refused on the CPU (or a stage reported one)
         self.hw_env_ignored = False                  # $FFMPEG_SKILL_HW=1 was set but this tool's delivery preset does not take it (export.py)
         self.hw_stages: List[Dict[str, Any]] = []    # render.py: the `hw` facts each stage (a child process) reported
+        self.hw_auto: List[str] = []                 # CPU encoders (libx264/libx265) this ffmpeg build lacks, whose encodes ran on VideoToolbox without --hw
 
 
 STATE = Context()
@@ -297,7 +298,7 @@ def apply_common(args: "argparse.Namespace") -> None:
     if STATE.fast and getattr(args, "preset", None) in X264_PRESETS:
         args.preset = "veryfast"
     STATE.codec = getattr(args, "codec", None) or None
-    STATE.hw_notes, STATE.hw_swaps, STATE.hw_fallback, STATE.hw_env_ignored, STATE.hw_stages = [], [], False, False, []
+    STATE.hw_notes, STATE.hw_swaps, STATE.hw_fallback, STATE.hw_env_ignored, STATE.hw_stages, STATE.hw_auto = [], [], False, False, [], []
     flag = hw_flag(args)
     if flag is not None:
         STATE.hw, STATE.hw_source = bool(flag), "flag"
@@ -457,7 +458,7 @@ def _fail(cmd: Sequence[str], returncode: int, stderr: str, ctx: "Optional[Conte
     ctx = ctx or STATE
     tail = "\n".join(stderr.strip().splitlines()[-15:])
     what, extra = str(cmd[0]), {}
-    enc = video_encoder_of(cmd) if ctx.hw else None
+    enc = video_encoder_of(cmd) if ctx.hw or ctx.hw_auto else None
     if enc:
         on_gpu = enc.endswith("_videotoolbox")
         why = videotoolbox_failure(stderr) if on_gpu else None

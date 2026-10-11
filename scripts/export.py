@@ -202,9 +202,11 @@ def main() -> int:
         video[video.index("-preset") + 1] = "veryfast"
     # a fixed preset's line is tagged BT.709 (prores, an editing master, keeps the source's tags)
     tag_bt709 = args.preset not in ("prores",) and not p.get("codec")
-    if STATE.hw and not p.get("codec") and video:
+    if not p.get("codec") and video:
         # --hw (never $FFMPEG_SKILL_HW here) puts a fixed preset on VideoToolbox: the same codec,
-        # its CRF mapped to -q:v, the preset's frame rate kept; tags come with the VT line itself
+        # its CRF mapped to -q:v, the preset's frame rate kept; tags come with the VT line itself.
+        # A build without libx264/libx265 has no other encoder, so it goes there without --hw too
+        # (hw_preset_video returns the line untouched in every other case)
         video = hw_preset_video(video, meta, bt709=tag_bt709)
     cmd += video
     if args.preset != "copy":

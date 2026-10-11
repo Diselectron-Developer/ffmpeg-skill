@@ -835,12 +835,43 @@ not a new file format this tool would have to maintain.
   intermediate is the place for speed; a file that is uploaded is the place for bytes. So
   `FFMPEG_SKILL_HW=1` changes every re-encoding tool's default but not `export.py`'s delivery
   presets, and `render.py --hw` is the one switch that puts a whole project, export included, on
-  the GPU. It is never switched on by anything else (not `--fast`, not a detected GPU). An
+  the GPU. It is never switched on by anything else (not `--fast`, not a detected GPU), with one
+  exception: a build that has no libx264/libx265 to choose instead (next entry). An
   `export.py` run under the variable says in `hw` (`requested: false`, `source: env`, a note) that
   the preset stayed on the CPU and that `--hw` moves it. Code: `_common.runner.apply_common`,
   `add_hw_orchestrator_args`. Tests: `HwResolutionTests`, `test_export_preset_needs_an_explicit_hw`
   (a dry run with VideoToolbox stood in, so it runs on every CI runner),
   `test_the_env_default_reaches_the_other_re_encoding_tools`.
+- **A build without libx264 or libx265 encodes on VideoToolbox without `--hw`, delivery presets
+  included (#314).** The reasons above are about a choice: speed against bytes. An LGPL ffmpeg (a
+  desktop app ships one) has `h264_videotoolbox`/`hevc_videotoolbox` and neither x264 nor x265, so
+  the CPU line is not a slower option, it fails ("Unknown encoder 'libx264'"), and "a file that is
+  uploaded is the place for bytes" and "never switched on by anything else" have nothing to protect.
+  So when the encoder list (`ffmpeg -encoders`) was read and lacks the CPU encoder the line would
+  name (libx264 for H.264, libx265 for HEVC, each on its own), the matching VideoToolbox encoder is
+  in it, and this machine passes `hw_platform_reason()` (Apple Silicon, the check `--hw` uses), every
+  re-encoding tool and every fixed `export.py` preset (`reels`, `youtube`, `h265`, ...) takes the
+  VideoToolbox line, built exactly as under `--hw`. The result says `hw: {requested: false, source:
+  "auto", used, ...}` with a note naming the encoder that was missing and the one that ran, and the
+  usual `notes` line that the quality is not CRF-equivalent (without the `--no-hw` advice: it has no
+  CPU encoder to go back to). What does not change: a build that has the CPU encoder takes exactly
+  the line it did (the platform is asked before the encoder list, so Linux and Windows read no list
+  for this, and the Mac reads it once per process); `FFMPEG_SKILL_HW=1` still does not move the
+  presets (the request to make it cover them was declined: with libx264 in the build the preset
+  stays where the first entry puts it, and without it the build decides, so the variable has nothing
+  left to add); an explicit `--no-hw` (or `render.py`/`batch.py --no-hw`) is the caller's choice of
+  the CPU and is not overridden, ffmpeg then refuses it as before; `FFMPEG_SKILL_HW=0` is no flag
+  and does not stop it; AV1 and ProRes are out of scope (their own missing-encoder refusals stand).
+  An unreadable encoder list (empty) proves nothing is missing and changes nothing. No CPU line is
+  recorded for it, so a job VideoToolbox refuses is a plain `kind: ffmpeg` failure naming
+  `h264_videotoolbox`, not a retry that could not run. `doctor` agrees: a missing
+  `encoder:libx264`/`libx265` whose VideoToolbox encoder is in the build, on a machine that passes the
+  same check, is listed under the additive `covered_by` and in neither `available` nor `missing`, so
+  `ok` and each tool's `usable` stand for what will run; the contract's `required`/`optional`
+  capability lists are unchanged. Code: `_common.decision._vt_in_place_of`, `_maybe_hw`,
+  `hw_preset_video`; `_contract._covered_by_videotoolbox`. Tests: `NoCpuEncoderTests`,
+  `test_a_build_without_libx264_is_usable_where_videotoolbox_takes_its_place`,
+  `test_libx264_stays_required_without_videotoolbox_or_off_apple_silicon`.
 - **CRF maps to VideoToolbox `-q:v` on the safe side, with a separate HDR curve.**
   `vt_quality` takes, at each CRF, the highest `-q:v` whose SSIM matched the CPU encode across
   `tests/bench_vt.py`'s clips (synthetic CG, fractal and grain, iPhone 17 Pro SDR and HLG at 30

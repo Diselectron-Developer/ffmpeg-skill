@@ -403,7 +403,7 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
             "dry_run": {"type": "boolean"}, "commands": {"type": "array", "items": {"type": "string"}, "description": "every ffmpeg command line planned or run"},
             "probe": {"type": "object", "description": "probe of the output when a file was written"},
             "encoder": {"type": "string", "description": "the video encoder the last ffmpeg command used (after any GPU->CPU fallback; under --dry-run the planned one; render.py and waveform.py: their stages' commands included), `copy` for a stream copy; absent when no command encoded video"},
-            "hw": {"type": "object", "description": "present when VideoToolbox was asked for (--hw, $FFMPEG_SKILL_HW, a render.py stage, a batch.py item) and on export.py when $FFMPEG_SKILL_HW=1 is set but its delivery preset does not take it: {requested: whether this run's encodes were asked onto VideoToolbox (false for that export), source: flag|env, used: true|false whether the encoder that ran last is VideoToolbox, null under --dry-run (nothing ran) and when this process ran no encode itself (batch.py: its stages are child processes; its top-level hw gathers the items' requested/source/fallback/notes and each results row carries its item's encoder and hw), fallback: a job VideoToolbox refused (encoder open or compression session failure; nothing else is retried) was re-encoded on the CPU, notes: why an encode stayed on or fell back to the CPU, and, when $FFMPEG_SKILL_HW chose the GPU and it ran, what that costs and that --no-hw opts out}. A VideoToolbox encode also adds a top-level notes line: its quality is not CRF-equivalent. A kind: ffmpeg failure under --hw / $FFMPEG_SKILL_HW carries encoder and hw too"},
+            "hw": {"type": "object", "description": "present when VideoToolbox was asked for (--hw, $FFMPEG_SKILL_HW, a render.py stage, a batch.py item), on export.py when $FFMPEG_SKILL_HW=1 is set but its delivery preset does not take it, and when this ffmpeg build has no libx264/libx265 and an encode ran on VideoToolbox instead: {requested: whether this run's encodes were asked onto VideoToolbox (false for that export, and for the build without libx264/libx265), source: flag|env|auto (auto: nobody asked, the build has no libx264/libx265 and this Apple Silicon machine ran VideoToolbox in its place), used: true|false whether the encoder that ran last is VideoToolbox, null under --dry-run (nothing ran) and when this process ran no encode itself (batch.py: its stages are child processes; its top-level hw gathers the items' requested/source/fallback/notes and each results row carries its item's encoder and hw), fallback: a job VideoToolbox refused (encoder open or compression session failure; nothing else is retried) was re-encoded on the CPU, notes: why an encode stayed on or fell back to the CPU, and, when $FFMPEG_SKILL_HW chose the GPU and it ran, what that costs and that --no-hw opts out}. A VideoToolbox encode also adds a top-level notes line: its quality is not CRF-equivalent. A kind: ffmpeg failure under --hw / $FFMPEG_SKILL_HW carries encoder and hw too"},
             "plan": {"type": "string", "description": "with --plan FILE: the plan document written (the run itself is a dry run)"},
             "verified": {"type": "boolean", "description": "true only when the artifact was written, probed, and every self-check the tool ran (verification) met its target; false under --dry-run"},
             "verification": {"type": "array", "items": {"type": "object", "properties": {"step": {"type": "string"}, "ok": {"type": "boolean"}}}, "description": "what the tool itself verified: probe, plus loudness (loudness.py, export platform presets) or check (render)"}}
@@ -690,6 +690,24 @@ def _gpu_encoders(encoders_listing: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "parsed", "present": present}
 
 
+# What the tools do about a build without libx264 / libx265 (_common.decision._vt_in_place_of)
+_VIDEOTOOLBOX_FOR = {"encoder:libx264": "encoder:h264_videotoolbox", "encoder:libx265": "encoder:hevc_videotoolbox"}
+
+
+def _covered_by_videotoolbox(encoders_listing: Dict[str, Any]) -> Dict[str, str]:
+    """`{"encoder:libx264": "encoder:h264_videotoolbox", ...}` for each CPU encoder the (read) listing
+    lacks while the matching VideoToolbox encoder is listed and this machine can run it: the tools
+    encode with the latter there without --hw, so the former does not block anything. Empty
+    otherwise -- an unread listing proves nothing, and a build that has the CPU encoder needs no cover."""
+    if encoders_listing["status"] != "parsed":
+        return {}
+    from _common.runner import hw_platform_reason
+    if hw_platform_reason() is not None:
+        return {}
+    have = set(encoders_listing["names"])
+    return {cap: alt for cap, alt in _VIDEOTOOLBOX_FOR.items() if cap[8:] not in have and alt[8:] in have}
+
+
 def _version_line(binary: str) -> Optional[str]:
     exe = _exe(binary)
     if not exe:
@@ -863,11 +881,19 @@ def doctor() -> Dict[str, Any]:
     `missing` (a filter that exists is not reported absent) nor into `available` (a failed detection
     is not a pass). `ok` is true only when nothing required is missing or unknown.
 
+    One exception to "missing blocks": `encoder:libx264` / `encoder:libx265` absent from the build
+    while the matching VideoToolbox encoder is present and this machine can run it (Apple Silicon).
+    The tools use VideoToolbox there without --hw (#314), so the capability is neither `available`
+    (it is not in the build) nor `missing` (nothing is blocked): it is left out of both lists, named
+    in `covered_by`, and a tool that needs it stays usable. A build that has libx264 reports exactly
+    what it did before.
+
     `gpu_encoders` is a separate, honest answer to a question none of the required/optional
     capabilities above ask: which GPU-backed encoders (nvenc, videotoolbox, qsv, vaapi, amf) this
     ffmpeg BUILD carries, from `-encoders` alone. No tool requires one -- every tool runs on CPU
     x264/x265 unless `--hw` / FFMPEG_SKILL_HW=1 puts it on VideoToolbox (Apple Silicon only) -- so
-    `gpu_encoders` never affects `ok` or any tool's `usable`. It
+    `gpu_encoders` never affects `ok` or any tool's `usable` (`covered_by` is the one place a
+    VideoToolbox encoder counts: for a libx264/libx265 the build lacks, see above). It
     only proves the build shipped the capability, never that the GPU/driver on this machine will
     actually accept a job (that needs a real encode, which this introspection never runs).
 
@@ -886,6 +912,7 @@ def doctor() -> Dict[str, Any]:
     sets = {k: set(v["names"]) for k, v in listings.items()}
     state: Dict[str, str] = {}  # capability -> available | missing | unknown
     wanted = required_capabilities()
+    covered = _covered_by_videotoolbox(listings["encoders"])
     drawtext_probe: Optional[Dict[str, Any]] = None
     drawtext_crashed = False  # listed but crashed (#100), as opposed to absent from the build
 
@@ -935,14 +962,16 @@ def doctor() -> Dict[str, Any]:
         else:
             state[cap] = "missing"
     available = sorted(c for c, st in state.items() if st == "available")
-    missing_required = sorted(c for c in wanted["required"] if state[c] == "missing")
-    missing_optional = sorted(c for c in wanted["optional"] if state[c] == "missing")
+    missing_required = sorted(c for c in wanted["required"] if state[c] == "missing" and c not in covered)
+    missing_optional = sorted(c for c in wanted["optional"] if state[c] == "missing" and c not in covered)
     unknown = sorted(c for c, st in state.items() if st == "unknown")
     unknown_required = [c for c in unknown if c in wanted["required"]]
     errors = [f"{k}: {v['detail']}" for k, v in listings.items() if v["status"] in ("unparsed", "failed")]
     if drawtext_probe is not None and drawtext_probe["status"] != "available":
         errors.append(f"filter:drawtext: {drawtext_probe['detail']}")
     notes = [f"filter:drawtext: {drawtext_probe['note']}"] if drawtext_probe and drawtext_probe.get("note") else []
+    notes += [f"{cap}: not in this ffmpeg build; the tools that need it encode with {alt[8:]} (VideoToolbox) instead, so their output is "
+              "not CRF-equivalent (the result's `encoder`/`hw` say so)" for cap, alt in sorted(covered.items())]
     return {
         "version": skill_version(),
         "python": ".".join(str(x) for x in sys.version_info[:3]),
@@ -957,7 +986,8 @@ def doctor() -> Dict[str, Any]:
         "errors": errors,
         **({"notes": notes} if notes else {}),
         "ok": not missing_required and not unknown_required,
-        "tools": _tool_usability(state, drawtext_crashed),
+        "tools": _tool_usability(state, drawtext_crashed, covered),
+        "covered_by": covered,
         "gpu_encoders": _gpu_encoders(listings["encoders"]),
         "hw": _hw_default(),
         "fonts": _fonts_capability(probe=True),
@@ -1079,15 +1109,17 @@ def _capability_fix_hint(cap: str, drawtext_crashed: bool = False) -> str:
     return f"'{cap}' is not available; see docs/contract.md"
 
 
-def _tool_usability(state: Dict[str, str], drawtext_crashed: bool = False) -> Dict[str, Dict[str, Any]]:
+def _tool_usability(state: Dict[str, str], drawtext_crashed: bool = False, covered: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, Any]]:
     """Per-tool usable/missing/unknown, folded from the same capability `state` doctor already
     computed. Answers "can I run this tool on this machine today", not just "what capabilities
     exist" -- a caller reading only `available`/`missing` still has to cross-reference each tool's
-    own required-capability list by hand to answer that."""
+    own required-capability list by hand to answer that. A required capability in `covered`
+    (libx264 replaced by VideoToolbox on this machine) blocks nothing; the tool lists it in `covered_by`."""
+    covered = covered or {}
     tools: Dict[str, Dict[str, Any]] = {}
     for name, meta in TOOL_META.items():
         required = list(meta["required"])
-        missing = [c for c in required if state.get(c) == "missing"]
+        missing = [c for c in required if state.get(c) == "missing" and c not in covered]
         unknown = [c for c in required if state.get(c) == "unknown"]
         entry: Dict[str, Any] = {"usable": "no" if missing else ("unknown" if unknown else "yes")}
         if missing:
@@ -1095,6 +1127,9 @@ def _tool_usability(state: Dict[str, str], drawtext_crashed: bool = False) -> Di
             entry["fix"] = "; ".join(dict.fromkeys(_capability_fix_hint(c, drawtext_crashed) for c in missing))
         if unknown:
             entry["unknown"] = unknown
+        via = {c: covered[c] for c in required if c in covered}
+        if via:
+            entry["covered_by"] = via
         tools[name] = entry
     return tools
 
@@ -1547,6 +1582,8 @@ def main() -> int:
             print(f"missing optional: {', '.join(d['missing_optional']) or 'none'}")
             if d["unknown"]:
                 print(f"unknown (detection failed, not proven missing): {', '.join(d['unknown'])}")
+            for cap, alt in sorted(d["covered_by"].items()):
+                print(f"{cap} is not in this build; VideoToolbox ({alt[8:]}) encodes in its place (not CRF-equivalent)")
             not_usable = sorted(name for name, t in d["tools"].items() if t["usable"] != "yes")
             if not_usable and d["ok"]:
                 print(f"note: overall 'ok' means nothing REQUIRED BY EVERY TOOL is missing -- {len(not_usable)} tool(s) still can't run today: {', '.join(not_usable)} (see doctor --json .tools for why)")

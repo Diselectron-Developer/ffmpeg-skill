@@ -28,7 +28,7 @@ def die(msg: str, code: int = 1, kind: str = "input", *, ctx: "Optional[Context]
     ctx.plan = None  # a failed run plans nothing (the exit hook must not write a plan for it)
     STATE.plan = None  # the hook falls back to STATE when nothing passed a ctx; a failed run plans nothing there either
     sys.stderr.write(f"error: {msg}\n" + (f"hint: {hint}\n" if hint else ""))
-    if kind == "ffmpeg" and "hw" not in extra and (ctx.hw or ctx.hw_stages or ctx.hw_env_ignored):
+    if kind == "ffmpeg" and "hw" not in extra and (ctx.hw or ctx.hw_stages or ctx.hw_env_ignored or ctx.hw_auto):
         # a tool's own ffmpeg failure (cut.py runs run(check=False) and dies itself; render.py
         # re-raises a stage's) carries `encoder` and `hw` as run()'s _fail() does: under --hw /
         # $FFMPEG_SKILL_HW two encoders may have run, and a caller must know whose failure it is
@@ -116,6 +116,8 @@ def hw_report(ctx: "Context", enc: Optional[str]) -> Dict[str, Any]:
     source = ctx.hw_source if ctx.hw else next((st.get("source") for st in stages if st.get("requested")), None)
     if not requested and ctx.hw_env_ignored:
         source = "env"
+    if not requested and ctx.hw_auto:
+        source = "auto"  # nobody asked: this build has no libx264/libx265, so VideoToolbox was the only encoder
     # a stage that reported its source without asking (export.py under the variable: requested
     # false, source env) still names where the request came from
     source = source or next((st.get("source") for st in stages if st.get("source")), None)
@@ -128,14 +130,15 @@ def hw_report(ctx: "Context", enc: Optional[str]) -> Dict[str, Any]:
         # the machine default, not this call, chose the GPU: say what it costs and how to opt out
         # (once: a stage that ran on it already said so)
         notes.append(ENV_HW_NOTE)
-    if ctx.hw_env_ignored and enc not in (None, "copy"):
+    if ctx.hw_env_ignored and enc not in (None, "copy") and not vt:
         notes.append(env_not_for_delivery_note())
     return {"requested": requested, "source": source, "used": used,
             "fallback": bool(ctx.hw_fallback) or any(st.get("fallback") for st in stages), "notes": notes}
 
 
-def hw_quality_note(enc: Optional[str], line: Optional[str]) -> Optional[str]:
-    """The `notes` line every VideoToolbox encode carries: its quality is not the CRF encode's."""
+def hw_quality_note(enc: Optional[str], line: Optional[str], no_cpu_encoder: bool = False) -> Optional[str]:
+    """The `notes` line every VideoToolbox encode carries: its quality is not the CRF encode's.
+    `no_cpu_encoder`: the build has no libx264/libx265, so `--no-hw` is no remedy and is not offered."""
     import re as _re
     if not enc or not enc.endswith("_videotoolbox"):
         return None
@@ -147,7 +150,7 @@ def hw_quality_note(enc: Optional[str], line: Optional[str]) -> Optional[str]:
     return (f"{enc}{' -q:v ' + m.group(1) if m else ''} is not CRF-equivalent: --quality (or the preset's CRF) is mapped "
             "to -q:v by an approximate SSIM fit (docs/design-decisions.md), so size and detail differ from the x264/x265 "
             "encode (~1.1-3.5x the bytes at matched SSIM); `verified` covers the output's measured properties, not quality "
-            "parity with the CPU encode; --no-hw for the CRF encode")
+            "parity with the CPU encode" + ("" if no_cpu_encoder else "; --no-hw for the CRF encode"))
 
 
 def _encoder_report(ctx: "Context") -> Dict[str, Any]:
@@ -157,7 +160,7 @@ def _encoder_report(ctx: "Context") -> Dict[str, Any]:
     $FFMPEG_SKILL_HW, a stage's, or the variable a delivery preset does not take)."""
     enc, _line = _video_encoders(ctx.commands)
     out: Dict[str, Any] = {"encoder": enc} if enc else {}
-    if ctx.hw or ctx.hw_stages or ctx.hw_env_ignored:
+    if ctx.hw or ctx.hw_stages or ctx.hw_env_ignored or ctx.hw_auto:
         out["hw"] = hw_report(ctx, enc)
     return out
 
@@ -167,7 +170,8 @@ def _hw_notes_for(ctx: "Context") -> List[str]:
     and (render.py) every stage that ran on VideoToolbox."""
     enc, line = _video_encoders(ctx.commands)
     out: List[str] = []
-    for note in [hw_quality_note(enc, line)] + [st.get("quality_note") for st in ctx.hw_stages]:
+    cpu = {"h264_videotoolbox": "libx264", "hevc_videotoolbox": "libx265"}.get(enc or "")
+    for note in [hw_quality_note(enc, line, cpu in ctx.hw_auto)] + [st.get("quality_note") for st in ctx.hw_stages]:
         if note and note not in out:
             out.append(note)
     return out
@@ -186,7 +190,7 @@ def absorb_stage_hw(stage: str, doc: Any, ctx: "Optional[Context]" = None) -> No
         if n not in ctx.hw_notes and not any(existing.endswith(": " + n) for existing in ctx.hw_notes):
             ctx.hw_notes.append(f"{stage}: {n}")
     enc, line = _video_encoders([str(c) for c in (doc.get("commands") or [])])
-    quality = hw_quality_note(enc, line) if hw.get("used") else None
+    quality = hw_quality_note(enc, line, hw.get("source") == "auto") if hw.get("used") else None
     ctx.hw_stages.append({"stage": stage, "requested": bool(hw.get("requested")), "source": hw.get("source"),
                           "used": hw.get("used"), "fallback": bool(hw.get("fallback")), "quality_note": quality})
 
