@@ -148,9 +148,15 @@ def resolve_filler(args, meta):
         # no built-in list is refused, as --filler-lang names it: the English list would cut real
         # words of that language (Norwegian "er" is "is"), and a transcript with no language at all
         # (or one that says "auto", which is no language either) keeps the English list it always had
+        # the ISO 639-2 spellings of the languages that have a built-in list (the mux tag uses them)
+        iso3 = {"eng": "en", "spa": "es", "deu": "de", "ger": "de", "fra": "fr", "fre": "fr",
+                "ita": "it", "jpn": "ja", "por": "pt"}
+
         def _code(value) -> str:
             value = str(value or "").strip().lower()
-            return "" if value in ("", "auto") else value[:2]
+            if value in ("", "auto"):
+                return ""
+            return iso3.get(value, value[:2])
         spoken = _code((raw or {}).get("language")) if isinstance(raw, dict) else ""
         spoken = spoken or _code(transcription.get("language") or transcription.get("detected_language"))
         if spoken and spoken not in FILLER_WORDS and not args.filler_words:

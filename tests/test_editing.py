@@ -2102,6 +2102,16 @@ class EditingTests(MediaFixtures):
                                 "--json").stdout)["filler"]
         self.assertEqual((fil["lang"], fil["removed_words"]), ("en", ["um"]))
 
+    def test_filler_iso_639_2_codes_name_the_language_with_a_built_in_list(self):
+        """A --words document may say "jpn" (ISO 639-2): that is Japanese, which has a built-in list,
+        not the two letters "jp" that have none."""
+        doc = OUT / "words_lang_jpn.json"
+        doc.write_text(json.dumps({"language": "jpn", "words": [
+            {"word": "えー", "start": 0.2, "end": 0.5}, {"word": "今日", "start": 0.6, "end": 0.8}]}), encoding="utf-8")
+        fil = json.loads(script("silence.py", self._gappy(), "--filler", "--words", doc, "--filler-list",
+                                "--json").stdout)["filler"]
+        self.assertEqual((fil["lang"], fil["removed_words"]), ("ja", ["えー"]))
+
     def test_filler_custom_list_reports_the_language_it_heard(self):
         """With --filler-words the run goes ahead on a language with no built-in list, and says which
         language the transcript is in rather than the English default it did not use."""
