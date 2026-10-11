@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from typing import Dict, Optional
 from _common.decision import escape_filter_path
-from _common.runner import STATE, _DRAWTEXT_PENDING, _drawtext_tmpdir, ffmpeg_version
+from _common.runner import STATE, _DRAWTEXT_PENDING, _drawtext_tmpdir, ffmpeg_exe, ffmpeg_version
 
 
 def drawtext_boxborderw(vertical: int, horizontal: int) -> str:
@@ -43,7 +43,7 @@ def drawtext_shaping() -> "Dict[str, bool]":
     if _SHAPING_BUILD_CACHE:
         return dict(_SHAPING_BUILD_CACHE)
     text = ""
-    exe = shutil.which("ffmpeg")
+    exe = ffmpeg_exe("ffmpeg")[0]
     if exe:
         for flag in ("-buildconf", "-version"):
             try:

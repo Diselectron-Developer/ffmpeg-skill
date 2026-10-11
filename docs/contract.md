@@ -418,6 +418,15 @@ capabilities by hand to answer "can I run `caption.py` on this machine right now
 passing overall does not mean every tool is usable (a plain Homebrew `ffmpeg` on macOS is `ok`
 for tools that don't need `subtitles`/`drawtext`/`zscale`, but `caption.usable` is `"no"`).
 
+`doctor`'s `ffmpeg_path`, `ffmpeg_source`, `ffprobe_path` and `ffprobe_source` name the binary the
+tools actually run (`null` when none is on PATH). `*_source` is `"path"` (what PATH resolves) or
+`"homebrew-ffmpeg-full"`: on macOS, when the binary PATH resolves is Homebrew's lean `ffmpeg` /
+`ffmpeg@N` formula (its real path is under `<prefix>/Cellar/ffmpeg…`) and the same prefix has the
+keg-only `opt/ffmpeg-full/bin/<name>`, the tools run that one (#317), because `brew install
+ffmpeg-full` does not put it on PATH and the lean build has no drawtext/subtitles/zscale. Nothing
+else is substituted. `ffmpeg` and `ffprobe` (version strings) keep their meaning; the four keys are
+additive.
+
 `doctor`'s `gpu_encoders` field reports GPU-backed encoders (`nvenc`, `videotoolbox`, `qsv`,
 `vaapi`, `amf`) present in this ffmpeg *build*, read from `-encoders` alone — `{"status":
 "parsed"|"unparsed"|"failed"|"missing", "present": [...]}`. It proves the build shipped the

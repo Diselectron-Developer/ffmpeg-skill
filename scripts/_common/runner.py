@@ -102,7 +102,7 @@ def ffmpeg_version() -> "Tuple[int, int]":
     if _FFMPEG_VERSION is None:
         _FFMPEG_VERSION = (0, 0)
         try:
-            out = subprocess.run(["ffprobe", "-version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
+            out = subprocess.run([ffmpeg_exe("ffprobe")[0] or "ffprobe", "-version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
                                  timeout=PROBE_TIMEOUT).stdout
             m = re.search(r"ffprobe version\s+n?(\d+)\.(\d+)", out)
             if m:
@@ -125,9 +125,43 @@ def ffmpeg_version() -> "Tuple[int, int]":
     return _FFMPEG_VERSION
 
 
+def _homebrew_full_build(path: str, name: str) -> str:
+    """On macOS, the keg-only `ffmpeg-full` binary that should replace `path`, or "".
+
+    Homebrew splits FFmpeg in two: the `ffmpeg` formula is lean (no freetype, libass, fontconfig,
+    harfbuzz, so no drawtext/subtitles/ass) and the keg-only `ffmpeg-full` is not linked onto
+    PATH. `brew install ffmpeg-full` therefore changes nothing for a user whose PATH still reaches
+    the lean one (#317). The swap happens only when `path` resolves into THIS Homebrew prefix's
+    Cellar as `ffmpeg` / `ffmpeg@N` and the same prefix has `opt/ffmpeg-full/bin/<name>`; a tap
+    build, MacPorts, a static download or a custom prefix is left exactly as the user put it."""
+    if platform.system() != "Darwin":
+        return ""
+    real = os.path.realpath(path)
+    prefix, sep, rest = real.partition("/Cellar/")
+    if not sep:
+        return ""
+    formula = rest.split("/", 1)[0]
+    if formula != "ffmpeg" and not re.fullmatch(r"ffmpeg@\d+", formula):
+        return ""
+    full = os.path.join(prefix, "opt", "ffmpeg-full", "bin", name)
+    return full if os.path.isfile(full) and os.access(full, os.X_OK) else ""
+
+
+def ffmpeg_exe(name: str) -> Tuple[str, str]:
+    """`(path, source)` of the ffmpeg/ffprobe the tools run; `("", "")` when none is on PATH.
+
+    `source` is "path" (what PATH resolves) or "homebrew-ffmpeg-full" (see _homebrew_full_build).
+    Not cached: PATH is read every time, as `shutil.which` was before this existed."""
+    found = shutil.which(name)
+    if not found:
+        return "", ""
+    full = _homebrew_full_build(found, name)
+    return (full, "homebrew-ffmpeg-full") if full else (found, "path")
+
+
 def require_tool(name: str) -> str:
     """Return the absolute path of ffmpeg/ffprobe or exit with install steps."""
-    path = shutil.which(name)
+    path = ffmpeg_exe(name)[0] if name in ("ffmpeg", "ffprobe") else shutil.which(name)
     if path:
         return path
     system = platform.system()
@@ -1297,7 +1331,7 @@ def ffmpeg_encoders() -> set:
         _ENCODERS = set()
         tool = "ffprobe" if STATE.dry_run else "ffmpeg"
         try:
-            out = subprocess.run([shutil.which(tool) or tool, "-hide_banner", "-encoders"], stdout=subprocess.PIPE,
+            out = subprocess.run([ffmpeg_exe(tool)[0] or tool, "-hide_banner", "-encoders"], stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=PROBE_TIMEOUT).stdout
             _ENCODERS = set(re.findall(r"^\s*[VAS][.\w]{5}\s+(\S+)", out, re.M))
         except (OSError, subprocess.SubprocessError):
