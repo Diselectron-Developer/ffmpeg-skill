@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Changed
+
+- **whisper.cpp transcripts are decoded with `-mc 0` (no previous-text context).** This is a decoding change for whisper.cpp users: `caption.py --transcribe` and `silence.py --filler --transcribe` pass `-mc 0` to the `whisper-cli` calls that write the SRT and the word timings (not to language detection), so a transcript can differ from 2.8.3's. Whisper conditions on its own previous text, and a hallucinated line can then repeat to the end of the file; in the measurement large-v3-turbo repeated one sentence ~300 times on two of six sets and lost about 7 minutes of speech on one. With `-mc 0` both loops are gone and every model's word-weighted WER over the six sets falls: base 19.87 to 18.33, small 17.07 to 15.42, large-v3-turbo 69.12 to 12.52. It is not better everywhere: gigaspeech is slightly worse for all three models, and some single sets are for some models. faster-whisper, openai-whisper and Parakeet are unchanged. Measured and proposed by [@rymalia](https://github.com/rymalia) in #318 (whisper.cpp 1.9.5, 58 min of English from the ESB test sets).
 
 ## 2.8.3
 

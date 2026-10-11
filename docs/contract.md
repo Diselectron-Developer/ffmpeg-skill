@@ -379,7 +379,9 @@ and no detector can name it, a Whisper engine that can run takes it (whisper.cpp
 `-l auto`: its own default is English). Parakeet then runs only on English *assumed* -- when no
 Whisper engine is installed, or every one failed, or `--model` names an English-only Parakeet
 model -- and the result's top-level `notes` says the transcript is wrong if the speech is not
-English; a multilingual (v3) Parakeet model assumes nothing and gets no note. The result's
+English; a multilingual (v3) Parakeet model assumes nothing and gets no note. Every whisper.cpp
+command that writes a transcript is also passed `-mc 0` (no previous-text context, so one
+hallucinated line is not repeated to the end of the file); its language detection is not. The result's
 `transcription` says which engine, model and routing decision produced the cues (in every
 `--mode`, `mux` included).
 Every engine transcribes on the machine running the skill, and the audio is never uploaded. The
