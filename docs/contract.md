@@ -359,9 +359,12 @@ Names: `ffmpeg`, `ffprobe`, `encoder:<name>`, `filter:<name>`, `bsf:<name>`,
 `optional` the union of the conditional ones. With detection (the default)
 `available`, `missing` and `missing_optional` are added from `doctor`, which reads
 `ffmpeg -encoders / -filters / -bsfs` and looks for a local whisper or Parakeet. Pass `--static`
-to omit detection. Nothing from the environment other than those lists and the
-ffmpeg/ffprobe/python versions is printed; no environment variables, no paths (`doctor`'s
-`hw.default_on` is a boolean derived from `FFMPEG_SKILL_HW`, never its value).
+to omit detection. Nothing from the environment other than those lists, the
+ffmpeg/ffprobe/python versions and the paths of the ffmpeg/ffprobe binaries the tools run
+(`ffmpeg_path`, `ffprobe_path`; a font file's path under `fonts` is the other one) is printed; no
+environment variables (`doctor`'s `hw.default_on` is a boolean derived from `FFMPEG_SKILL_HW`,
+never its value). The two binary paths can sit under a home directory, so read a pasted `doctor`
+before posting it.
 
 `external:whisper` is **optional** for two tools since 1.17: `caption.py`
 (`--transcribe`) and `silence.py` (`--filler --transcribe`). Neither requires
