@@ -153,10 +153,16 @@ def resolve_filler(args, meta):
                 "ita": "it", "jpn": "ja", "por": "pt"}
 
         def _code(value) -> str:
-            value = str(value or "").strip().lower()
+            value = str(value or "").strip().lower().replace("_", "-")
             if value in ("", "auto"):
                 return ""
-            return iso3.get(value, value[:2])
+            # a regional tag names its primary language (ja-JP is ja); a three-letter code that is not
+            # in the table stays as it is (est is Estonian, not the Spanish "es"); a word such as
+            # "english" is cut to its two-letter code
+            primary = value.split("-")[0]
+            if primary in iso3:
+                return iso3[primary]
+            return primary[:2] if len(primary) > 3 else primary
         spoken = _code((raw or {}).get("language")) if isinstance(raw, dict) else ""
         spoken = spoken or _code(transcription.get("language") or transcription.get("detected_language"))
         if spoken and spoken not in FILLER_WORDS and not args.filler_words:

@@ -2112,6 +2112,18 @@ class EditingTests(MediaFixtures):
                                 "--json").stdout)["filler"]
         self.assertEqual((fil["lang"], fil["removed_words"]), ("ja", ["えー"]))
 
+    def test_an_unlisted_three_letter_code_is_refused_not_read_as_its_two_letter_prefix(self):
+        """est is Estonian: it has no built-in list, so it is refused. Cutting it to "es" would run the
+        Spanish list on Estonian speech."""
+        doc = OUT / "words_lang_est.json"
+        doc.write_text(json.dumps({"language": "est", "words": [
+            {"word": "tere", "start": 0.2, "end": 0.5}]}), encoding="utf-8")
+        r = script("silence.py", self._gappy(), "--filler", "--words", doc, "--filler-list", "--json",
+                   expect_fail=True)
+        err = json.loads(r.stdout)["error"]
+        self.assertEqual(err["kind"], "input")
+        self.assertIn("est", err["message"])
+
     def test_filler_custom_list_reports_the_language_it_heard(self):
         """With --filler-words the run goes ahead on a language with no built-in list, and says which
         language the transcript is in rather than the English default it did not use."""
