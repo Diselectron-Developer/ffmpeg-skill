@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 2.8.2
+
+_Automated release: version and notes generated from pull requests merged since 2.8.1._
+
+- fix(install): macOS ffmpeg-full is keg-only, so say how to put it on PATH (#319)
+
 ## 2.8.1
 
 _Automated release: version and notes generated from pull requests merged since 2.8.0._
