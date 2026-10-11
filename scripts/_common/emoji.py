@@ -9,6 +9,7 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Tuple, Optional
 from _common.emit import die
+from _common.runner import ffmpeg_exe
 
 
 # --------------------------------------------------------------------------- emoji (1.15)
@@ -192,7 +193,7 @@ def _libass_color_probe() -> "Optional[bool]":
     the font listing: Noto Color Emoji installs happily on builds whose freetype/libass has no
     colour-bitmap path at all, and those render a monochrome outline instead (measured). ~80 ms.
     None means the probe could not be run (no ffmpeg, a failure) -- unknown, not false."""
-    exe = shutil.which("ffmpeg")
+    exe = ffmpeg_exe("ffmpeg")[0]
     if not exe:
         return None
     import tempfile

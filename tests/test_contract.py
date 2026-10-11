@@ -796,6 +796,86 @@ class ContractTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("Gyan.FFmpeg", readme)
 
+    def _brew_tree(self, formula="ffmpeg", full=True, other_prefix_full=False):
+        """A fake Homebrew prefix: PATH's bin/ffmpeg(+ffprobe) symlink into Cellar/<formula>, and
+        opt/ffmpeg-full/bin/* when `full`. Returns (prefix, bin_dir)."""
+        td = Path(tempfile.mkdtemp(prefix="brew-", dir=OUT))
+        self.addCleanup(shutil.rmtree, td, True)
+        prefix = td / "prefix"
+        for name in ("ffmpeg", "ffprobe"):
+            real = prefix / "Cellar" / formula / "7.1" / "bin" / name
+            real.parent.mkdir(parents=True, exist_ok=True)
+            real.write_text("#!/bin/sh\n")
+            real.chmod(0o755)
+            (prefix / "bin").mkdir(exist_ok=True)
+            (prefix / "bin" / name).symlink_to(real)
+            if full:
+                f = prefix / "opt" / "ffmpeg-full" / "bin" / name
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text("#!/bin/sh\n")
+                f.chmod(0o755)
+        if other_prefix_full:
+            f = td / "other" / "opt" / "ffmpeg-full" / "bin" / "ffmpeg"
+            f.parent.mkdir(parents=True)
+            f.write_text("#!/bin/sh\n")
+            f.chmod(0o755)
+        return prefix, prefix / "bin"
+
+    def _exe(self, name, bindir, system="Darwin"):
+        from unittest import mock
+        from _common.runner import ffmpeg_exe
+        with mock.patch("platform.system", return_value=system), mock.patch.dict(os.environ, {"PATH": str(bindir)}):
+            return ffmpeg_exe(name)
+
+    @unittest.skipIf(os.name == "nt", "symlinked fake Homebrew prefix")
+    def test_lean_homebrew_ffmpeg_is_replaced_by_ffmpeg_full_of_the_same_prefix(self):
+        """#317: brew install ffmpeg-full is keg-only, so PATH keeps the lean formula; both
+        binaries come from opt/ffmpeg-full, and the result says why."""
+        prefix, bindir = self._brew_tree()
+        for name in ("ffmpeg", "ffprobe"):
+            path, source = self._exe(name, bindir)
+            self.assertEqual((path, source), (str(prefix / "opt" / "ffmpeg-full" / "bin" / name), "homebrew-ffmpeg-full"))
+        _, bindir = self._brew_tree(formula="ffmpeg@7")
+        self.assertEqual(self._exe("ffmpeg", bindir)[1], "homebrew-ffmpeg-full")
+
+    @unittest.skipIf(os.name == "nt", "symlinked fake Homebrew prefix")
+    def test_ffmpeg_is_left_alone_unless_it_is_the_lean_homebrew_formula(self):
+        """Not macOS, no ffmpeg-full installed, a different formula, a binary outside any Cellar and
+        an ffmpeg-full of ANOTHER prefix all keep what PATH resolves."""
+        prefix, bindir = self._brew_tree()
+        self.assertEqual(self._exe("ffmpeg", bindir, system="Linux"), (str(bindir / "ffmpeg"), "path"))
+        _, bindir = self._brew_tree(full=False)
+        self.assertEqual(self._exe("ffmpeg", bindir)[1], "path")
+        _, bindir = self._brew_tree(formula="ffmpeg-custom")
+        self.assertEqual(self._exe("ffmpeg", bindir)[1], "path")
+        _, bindir = self._brew_tree(full=False, other_prefix_full=True)
+        self.assertEqual(self._exe("ffmpeg", bindir)[1], "path")
+        plain = Path(tempfile.mkdtemp(prefix="plain-", dir=OUT))
+        self.addCleanup(shutil.rmtree, plain, True)
+        (plain / "ffmpeg").write_text("#!/bin/sh\n")
+        (plain / "ffmpeg").chmod(0o755)
+        self.assertEqual(self._exe("ffmpeg", plain), (str(plain / "ffmpeg"), "path"))
+        self.assertEqual(self._exe("ffprobe", plain), ("", ""))
+
+    @unittest.skipIf(os.name == "nt", "symlinked fake Homebrew prefix")
+    def test_doctor_names_the_binary_it_will_run(self):
+        """doctor's additive keys, and its plain output, say which build runs and why."""
+        from unittest import mock
+        prefix, bindir = self._brew_tree()
+        with mock.patch("platform.system", return_value="Darwin"), mock.patch.dict(os.environ, {"PATH": str(bindir)}):
+            rep = _contract._exe_report()
+        self.assertEqual(rep["ffmpeg_path"], str(prefix / "opt" / "ffmpeg-full" / "bin" / "ffmpeg"))
+        self.assertEqual(rep["ffprobe_source"], "homebrew-ffmpeg-full")
+        d = json.loads(sh(sys.executable, SCRIPTS / "_contract.py", "doctor", "--json").stdout)
+        for key in ("ffmpeg_path", "ffmpeg_source", "ffprobe_path", "ffprobe_source"):
+            self.assertIn(key, d)
+
+    def test_drawtext_fix_hint_tells_an_absent_filter_from_a_crash(self):
+        absent = _contract._capability_fix_hint("filter:drawtext")
+        self.assertIn("no drawtext filter", absent)
+        self.assertNotIn("crashed", absent)
+        self.assertIn("crashed", _contract._capability_fix_hint("filter:drawtext", True))
+
     def test_macos_fix_hint_says_ffmpeg_full_is_keg_only(self):
         """Homebrew's ffmpeg-full is keg-only: `brew install ffmpeg-full` alone leaves the lean
         formula (or no ffmpeg) on PATH, so a hint that only says to install it sends the user

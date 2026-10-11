@@ -4,7 +4,10 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **macOS: a lean Homebrew `ffmpeg` on `PATH` no longer hides `ffmpeg-full`.** When the `ffmpeg` on `PATH` is Homebrew's `ffmpeg` / `ffmpeg@N` formula and the same prefix has the keg-only `ffmpeg-full`, every tool (and `doctor`) runs `ffmpeg-full`'s `ffmpeg` and `ffprobe`, so `brew install ffmpeg-full` is enough to get `drawtext`, `subtitles` and `zscale`. Any other `ffmpeg` on `PATH` is used unchanged. `doctor --json` gains `ffmpeg_path`, `ffmpeg_source`, `ffprobe_path` and `ffprobe_source`; the existing `ffmpeg` / `ffprobe` keys are unchanged (#317).
+- **`doctor` no longer says drawtext "crashed" when it is simply absent.** A build without the `drawtext` filter now gets the install hint; the crash wording (#100) is kept for a build that lists it and then crashes.
 
 ## 2.8.2
 

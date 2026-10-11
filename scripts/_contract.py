@@ -632,13 +632,20 @@ def _parse_ff_list(flag: str, text: str) -> List[str]:
     return names
 
 
+def _exe(binary: str) -> str:
+    """The ffmpeg/ffprobe the tools run (PATH, or Homebrew's keg-only ffmpeg-full over a lean one:
+    _common.runner.ffmpeg_exe), so doctor reports the build the tools will use, not the one PATH names."""
+    from _common.runner import ffmpeg_exe
+    return ffmpeg_exe(binary)[0]
+
+
 def _ff_listing(binary: str, flag: str) -> Dict[str, Any]:
     """`{"names": [...], "status": parsed | unparsed | failed | missing, "detail": str}` for `ffmpeg <flag>`.
 
     `parsed`: rows recognised. `unparsed`: ffmpeg ran but no row matched, so the capabilities it
     covers are unknown, not absent. `failed`: ffmpeg exited non-zero. `missing`: no binary on PATH.
     """
-    exe = shutil.which(binary)
+    exe = _exe(binary)
     if not exe:
         return {"names": [], "status": "missing", "detail": f"{binary} not on PATH"}
     try:
@@ -684,7 +691,7 @@ def _gpu_encoders(encoders_listing: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _version_line(binary: str) -> Optional[str]:
-    exe = shutil.which(binary)
+    exe = _exe(binary)
     if not exe:
         return None
     try:
@@ -694,6 +701,19 @@ def _version_line(binary: str) -> Optional[str]:
     first = (proc.stdout or proc.stderr).splitlines()[:1]
     m = re.match(rf"{binary} version (\S+)", first[0]) if first else None
     return m.group(1) if m else (first[0] if first else "unknown")
+
+
+def _exe_report() -> Dict[str, Any]:
+    """`ffmpeg_path` / `ffmpeg_source` / `ffprobe_path` / `ffprobe_source`: which binary the tools run
+    and why ("path": what PATH resolves; "homebrew-ffmpeg-full": macOS, a lean Homebrew ffmpeg on
+    PATH replaced by the keg-only ffmpeg-full of the same prefix, #317). None when not on PATH."""
+    from _common.runner import ffmpeg_exe
+    out: Dict[str, Any] = {}
+    for name in ("ffmpeg", "ffprobe"):
+        path, source = ffmpeg_exe(name)
+        out[f"{name}_path"] = path or None
+        out[f"{name}_source"] = source or None
+    return out
 
 
 def _whisper_available() -> bool:
@@ -742,7 +762,7 @@ def _drawtext_probe() -> Dict[str, Any]:
     fontfile= render works but a bare one crashes, drawtext stays available and the result
     carries a `note`: only a fontconfig lookup (`--font <family>` with no file) would crash.
     """
-    exe = shutil.which("ffmpeg")
+    exe = _exe("ffmpeg")
     if not exe:
         return {"status": "unknown", "detail": "ffmpeg not on PATH"}
     # Probe the way the tools call drawtext: with the fontfile= they pick by default (#298). On a
@@ -867,6 +887,7 @@ def doctor() -> Dict[str, Any]:
     state: Dict[str, str] = {}  # capability -> available | missing | unknown
     wanted = required_capabilities()
     drawtext_probe: Optional[Dict[str, Any]] = None
+    drawtext_crashed = False  # listed but crashed (#100), as opposed to absent from the build
 
     def _from(kind: str, name: str) -> str:
         lst = listings[kind]
@@ -878,9 +899,9 @@ def doctor() -> Dict[str, Any]:
 
     for cap in wanted["required"] + wanted["optional"]:
         if cap == "ffmpeg":
-            state[cap] = "available" if shutil.which("ffmpeg") else "missing"
+            state[cap] = "available" if _exe("ffmpeg") else "missing"
         elif cap == "ffprobe":
-            state[cap] = "available" if shutil.which("ffprobe") else "missing"
+            state[cap] = "available" if _exe("ffprobe") else "missing"
         elif cap.startswith("encoder:"):
             state[cap] = _from("encoders", cap[8:])
         elif cap == "filter:drawtext":
@@ -897,6 +918,7 @@ def doctor() -> Dict[str, Any]:
                     drawtext_probe = probe
                 if probe["status"] == "missing":
                     drawtext_probe = probe
+                    drawtext_crashed = True
                     state[cap] = "missing"
                 else:
                     state[cap] = "available"
@@ -926,6 +948,7 @@ def doctor() -> Dict[str, Any]:
         "python": ".".join(str(x) for x in sys.version_info[:3]),
         "ffmpeg": _version_line("ffmpeg"),
         "ffprobe": _version_line("ffprobe"),
+        **_exe_report(),
         "available": available,
         "missing": missing_required,
         "missing_optional": missing_optional,
@@ -934,7 +957,7 @@ def doctor() -> Dict[str, Any]:
         "errors": errors,
         **({"notes": notes} if notes else {}),
         "ok": not missing_required and not unknown_required,
-        "tools": _tool_usability(state),
+        "tools": _tool_usability(state, drawtext_crashed),
         "gpu_encoders": _gpu_encoders(listings["encoders"]),
         "hw": _hw_default(),
         "fonts": _fonts_capability(probe=True),
@@ -1006,7 +1029,7 @@ def _fonts_summary_line(fonts: Dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def _capability_fix_hint(cap: str) -> str:
+def _capability_fix_hint(cap: str, drawtext_crashed: bool = False) -> str:
     """One-line, plain-language remedy for a single missing/unknown capability."""
     if cap in ("ffmpeg", "ffprobe"):
         from _common import INSTALL_HINTS
@@ -1026,6 +1049,8 @@ def _capability_fix_hint(cap: str) -> str:
         full_hint = "install/build ffmpeg with it enabled"
     if cap.startswith("encoder:"):
         return f"this ffmpeg build has no {cap[8:]} encoder; {full_hint}"
+    if cap == "filter:drawtext" and not drawtext_crashed:
+        return f"this ffmpeg build has no drawtext filter (no freetype); {full_hint}"
     if cap == "filter:drawtext":
         return ("drawtext crashed instead of rendering a frame (see errors[] for the exit detail) -- "
                  "every drawtext tool already resolves a concrete font file automatically when one can "
@@ -1054,7 +1079,7 @@ def _capability_fix_hint(cap: str) -> str:
     return f"'{cap}' is not available; see docs/contract.md"
 
 
-def _tool_usability(state: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+def _tool_usability(state: Dict[str, str], drawtext_crashed: bool = False) -> Dict[str, Dict[str, Any]]:
     """Per-tool usable/missing/unknown, folded from the same capability `state` doctor already
     computed. Answers "can I run this tool on this machine today", not just "what capabilities
     exist" -- a caller reading only `available`/`missing` still has to cross-reference each tool's
@@ -1067,7 +1092,7 @@ def _tool_usability(state: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
         entry: Dict[str, Any] = {"usable": "no" if missing else ("unknown" if unknown else "yes")}
         if missing:
             entry["missing"] = missing
-            entry["fix"] = "; ".join(dict.fromkeys(_capability_fix_hint(c) for c in missing))
+            entry["fix"] = "; ".join(dict.fromkeys(_capability_fix_hint(c, drawtext_crashed) for c in missing))
         if unknown:
             entry["unknown"] = unknown
         tools[name] = entry
@@ -1507,6 +1532,9 @@ def main() -> int:
         else:
             print(f"ffmpeg-skill {d['version']} (this installed copy; re-run `npx ffmpeg-skill` to refresh it -- copies are not updated automatically)")
             print(f"python {d['python']}; ffmpeg {d['ffmpeg'] or 'MISSING'}; ffprobe {d['ffprobe'] or 'MISSING'}")
+            for name in ("ffmpeg", "ffprobe"):
+                if d[f"{name}_source"] == "homebrew-ffmpeg-full":
+                    print(f"{name} runs from {d[f'{name}_path']}: Homebrew's keg-only ffmpeg-full, used because the {name} on PATH is the lean formula (no drawtext/subtitles)")
             # counts, not the full capability list: the names of the ~60 available capabilities
             # answer no question a caller has (they are in `doctor --json .available` when one
             # does), while what is MISSING is the whole reason to run doctor (1.11.0 token diet).
