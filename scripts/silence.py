@@ -141,9 +141,38 @@ def resolve_filler(args, meta):
                 "pass the result with --words.", kind="input")
 
     lang = args.filler_lang
+    reported_lang = lang
     if lang == "auto":
-        lang = str((raw or {}).get("language") or "").lower()[:2] if isinstance(raw, dict) else ""
-        lang = lang if lang in FILLER_WORDS else "en"
+        # the language the transcript says it is in: a --words document's own field, else what the
+        # engine was told or detected for this run (`--transcribe`). A language that is known and has
+        # no built-in list is refused, as --filler-lang names it: the English list would cut real
+        # words of that language (Norwegian "er" is "is"), and a transcript with no language at all
+        # (or one that says "auto", which is no language either) keeps the English list it always had
+        # the ISO 639-2 spellings of the languages that have a built-in list (the mux tag uses them)
+        iso3 = {"eng": "en", "spa": "es", "deu": "de", "ger": "de", "fra": "fr", "fre": "fr",
+                "ita": "it", "jpn": "ja", "por": "pt"}
+
+        def _code(value) -> str:
+            value = str(value or "").strip().lower().replace("_", "-")
+            if value in ("", "auto"):
+                return ""
+            # a regional tag names its primary language (ja-JP is ja); a three-letter code that is not
+            # in the table stays as it is (est is Estonian, not the Spanish "es"); a word such as
+            # "english" is cut to its two-letter code
+            primary = value.split("-")[0]
+            if primary in iso3:
+                return iso3[primary]
+            return primary[:2] if len(primary) > 3 else primary
+        spoken = _code((raw or {}).get("language")) if isinstance(raw, dict) else ""
+        spoken = spoken or _code(transcription.get("language") or transcription.get("detected_language"))
+        if spoken and spoken not in FILLER_WORDS and not args.filler_words:
+            die(f"the transcript is in {spoken}, which has no built-in filler list. The languages with one are "
+                f"{', '.join(sorted(FILLER_WORDS))}; pass --filler-words FILE with your own list for {spoken}, or "
+                "--filler-lang for a language that has one.", kind="input")
+        lang = spoken if spoken in FILLER_WORDS else "en"
+        # with a custom list the run goes ahead, and the result names the language it heard, not the
+        # English list it did not use
+        reported_lang = spoken or lang
     listname = "builtin"
     if args.filler_words:
         wordlist = set(_word_list(read_text_or_die(args.filler_words, "--filler-words")))
@@ -174,7 +203,7 @@ def resolve_filler(args, meta):
             warnings.append(f"--filler-extra {', '.join(extra_markers)}: a discourse marker, not a "
                             "disfluency -- this will cut real sentences.")
     block = {
-        "lang": lang, "source": source, "engine": engine,
+        "lang": reported_lang, "source": source, "engine": engine,
         **({"transcription": transcription} if engine and transcription else {}),
         "words": sorted(wordlist), "removed": [dict(s) for s in spans],
         "removed_count": len(spans),
