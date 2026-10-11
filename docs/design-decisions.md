@@ -85,6 +85,27 @@ exists. When a decision changes, edit the entry in the same PR.
   and `--force` on an untagged file; through 2.2.2 it ran on BT.2020 SDR too and darkened white
   from Y 235 to 151. The result says which path ran (`sdr_path`, `notes`). Code:
   `color.is_bt2020_sdr()`. Test: `test_to_sdr_bt2020_sdr_converts_gamut_without_tonemap`.
+- **`cut.py --segments --accurate` reads every segment with `-reinit_filter 0`, so a colour-tag change
+  inside the source is a label, not a conversion.** The re-cut feeds one `-ss -t -i src` input per
+  segment into one concat graph. By default FFmpeg rebuilds the graph at an input's buffer source when
+  its frames change colour tags; on 8.1.2 that rebuild at a *later* input deadlocked at 0% CPU (an
+  in-band SPS going from untagged to bt470bg/tv, #316), so a 36-segment job sat until `--timeout`.
+  With the option the graph keeps the format it was configured with and the retagged frames pass as
+  decoded. That is acceptable because the tool never converts colour in a cut: an SDR output is
+  tagged BT.709 explicitly and tag-only (`bt709_tag_args`; "without touching its pixels"), and an
+  untagged source is relabelled the same way, so the BT.601-tagged later segment is no different from
+  an untagged one. The rebuild would have converted the retagged side toward the graph's first (unknown)
+  tag (the issue's debug log: `csp:bt470bg -> csp:unknown`), not toward BT.709, so it was no closer to
+  the output's label. A BT.2020/HDR source
+  still takes the HDR path chosen from the first video stream's probe. The cost: a source whose
+  frame *size* or pixel format changes mid-stream is no longer refused by concat's own "parameters do
+  not match" error; on 6.1 the first-format graph then crashes or stalls the encoder (the stall is
+  bounded by `--timeout`). No other tool builds this structure: `join.py`, `multicam.py` and
+  `broll.py` open different files without `-ss`; `speedramp.py`, `freeze.py` and `loop.py` split one
+  input. Code: `cut._join_chunk()`. Test:
+  `test_every_segment_input_of_an_accurate_join_keeps_the_graph_format` (the planned command, any
+  FFmpeg) and `test_an_accurate_join_across_a_colour_tag_change_completes` (the run; it only fails
+  where the deadlock reproduces).
 - **`escape_drawtext()` drops `'` and `%` from burnt-in text** instead of escaping them. Both
   characters have no reliable escape across the FFmpeg versions in CI; a missing apostrophe is a
   known limitation, a broken filter graph is not. Test: `test_drawtext_semicolon_and_quote_render_as_inert_literal_text`.
