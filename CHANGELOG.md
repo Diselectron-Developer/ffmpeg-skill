@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **`cut.py --segments --accurate` no longer hangs when a later segment crosses a mid-stream colour-tag change.** The concat re-cut opens the source once per segment; on FFmpeg 8.1.2 a source whose tags change partway (untagged to bt470bg/tv on a new SPS) deadlocked at 0% CPU in the second input's graph rebuild and ended at `--timeout` with nothing written. Every segment input now carries `-reinit_filter 0`, so the graph keeps its first format; the output's colour tags were already written explicitly, so no pixels change. A source whose frame size changes mid-stream is no longer refused cleanly by the concat filter (see `docs/design-decisions.md`) (#316).
 
 ## 2.8.3
 

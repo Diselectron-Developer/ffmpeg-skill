@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _fixtures import OUT, SCRIPTS, script, sh  # noqa: E402
-from _common import decision, probe  # noqa: E402
+from _common import decision, ffmpeg_encoders, probe  # noqa: E402
 probe_mod = sys.modules["_common.probe"]  # the module (the package re-exports probe() under its name)
 
 sys.path.insert(0, str(SCRIPTS))
@@ -622,6 +623,53 @@ class CutJoinTests(unittest.TestCase):
         frames = gray_frames(out)
         self.assertFrameIs(frames[59], 59, "last frame of segment 0")
         self.assertFrameIs(frames[60], 120, "first frame of segment 1 (4.0 s)")
+
+    def _retagged(self):
+        """The #316 source: 10 s untagged, then 10 s tagged bt470bg/tv, with the SPS repeated in-band,
+        stream-copied together, so a later segment's decode crosses a colour-tag change at 10 s."""
+        out = DIR / "retagged.mp4"
+        if out.exists():
+            return out
+        if "libx264" not in ffmpeg_encoders():
+            self.skipTest("this ffmpeg has no libx264")
+        part = ("-c:v", "libx264", "-preset", "ultrafast", "-g", "60", "-x264-params", "repeat-headers=1",
+                "-pix_fmt", "yuv420p")
+        a, b, lst = DIR / "retag_a.mp4", DIR / "retag_b.mp4", DIR / "retag.txt"
+        sh("ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=10",
+           "-f", "lavfi", "-i", "sine=f=440:d=10", *part, "-c:a", "aac", "-shortest", a)
+        sh("ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=10",
+           "-f", "lavfi", "-i", "sine=f=660:d=10", *part, "-colorspace", "bt470bg", "-color_range", "tv",
+           "-c:a", "aac", "-shortest", b)
+        lst.write_text(decision.concat_list_line(str(a)) + "\n" + decision.concat_list_line(str(b)) + "\n", encoding="utf-8")
+        sh("ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy", out)
+        return out
+
+    def test_an_accurate_join_across_a_colour_tag_change_completes(self):
+        """#316: a segment that is not the first input and starts before a mid-stream colour-tag
+        change made FFmpeg 8.1 rebuild the graph at that input and deadlock at 0% CPU until
+        --timeout. The run completes within a short limit and has the length asked for. Where this
+        FFmpeg does not hang, the second test below still pins the flag that prevents it."""
+        src = self._retagged()
+        out = DIR / "retagged_join.mp4"
+        data = cut_json(src, "--segments", "0-3,9.5-13", "--accurate", "--preset", "ultrafast", "--timeout", "60", "-o", out)
+        self.assertEqual(data["status"], "completed")
+        self.assertEqual(data["mode"], "accurate")
+        self.assertLess(abs(data["output_duration"] - 6.5), 1 / FPS + 1024 / 48000, data["output_duration"])
+        self.assertEqual(len(frame_pts(out)), 195)
+        self.assertEqual(stderr_of_decode(out), "")
+        # the output's tags are the tool's own (bt709), whatever the source's later segment said
+        self.assertEqual(probe(str(out))["video"].get("color_space"), "bt709")
+
+    def test_every_segment_input_of_an_accurate_join_keeps_the_graph_format(self):
+        """The planned command puts -reinit_filter 0 before every segment's -i (#316), so it holds
+        on an FFmpeg where the colour-tag change does not deadlock (6.1) as on the one where it does."""
+        src = self._retagged()
+        data = cut_json(src, "--segments", "0-3,9.5-13,5-6", "--accurate", "--dry-run", "-o", DIR / "retagged_plan.mp4")
+        cmd = shlex.split(data["commands"][0])
+        inputs = [i for i, tok in enumerate(cmd) if tok == "-i"]
+        self.assertEqual(len(inputs), 3, cmd)
+        for i in inputs:
+            self.assertEqual(cmd[i - 2:i], ["-reinit_filter", "0"], cmd)
 
     def test_the_last_segment_past_the_video_end_is_left_alone(self):
         """No join follows the last segment, so its sound-only tail is what the source had: no hold,
