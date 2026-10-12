@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 2.8.5
+
+_Automated release: version and notes generated from pull requests merged since 2.8.4._
+
+- fix(asr): decode whisper.cpp transcripts with -mc 0 (#323)
+
 ## 2.8.4
 
 _Automated release: version and notes generated from pull requests merged since 2.8.3._
