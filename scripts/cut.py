@@ -1025,8 +1025,13 @@ def _join_chunk(src: str, segments: List[Tuple[float, float]], dst: str, meta: d
         # land on that keyframe and lose its leading frames -- measured: -ss 9.9 on a keyint-60
         # HEVC file began at 10.0 (seek_keyframe measures where a copy lands). Likewise an input -t stops reading at s+d in decode order and would drop
         # B-frames that display inside the segment, so it reads a second past the end.
+        # -reinit_filter 0: every input is the same file, so the graph keeps the format it was
+        # configured with. A later input that decodes across a mid-stream colour-tag change (an
+        # in-band SPS going from untagged to bt470bg, say) made FFmpeg 8.1 rebuild the graph at
+        # that input's buffer source and deadlock at 0% CPU (#316); the output's colour tags are
+        # written explicitly (video_args), so the retag is a label here, not a conversion.
         m = min(SEEK_MARGIN, s)
-        cmd += ["-ss", f"{s - m:.6f}", "-t", f"{m + d + 1.0:.6f}", "-i", src]
+        cmd += ["-ss", f"{s - m:.6f}", "-t", f"{m + d + 1.0:.6f}", "-reinit_filter", "0", "-i", src]
         a, b, half = m, m + d, 0.0
         if has_v and rate:
             # Both streams are cut on the source's frame grid: from the first frame at or after the
