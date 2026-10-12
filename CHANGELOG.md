@@ -9,6 +9,19 @@
 - **A build without libx264/libx265 encodes on VideoToolbox by itself (#314).** An LGPL ffmpeg such as the one a desktop app ships has `h264_videotoolbox`/`hevc_videotoolbox` and no x264/x265, so every H.264/HEVC line (`fit`, `cut --accurate`, the other re-encoding tools, and `export.py`'s `youtube`/`reels`/`h265`/... presets) failed with "Unknown encoder". When `ffmpeg -encoders` lacks the CPU encoder, has the matching VideoToolbox one, and the machine is Apple Silicon (the check `--hw` uses), the tool now uses VideoToolbox without `--hw`, built as under `--hw`. The result's `hw` is `{requested: false, source: "auto", used, ...}` with a note naming the missing and the used encoder, plus the usual not-CRF-equivalent `notes` line (without the `--no-hw` advice). A build that has libx264/libx265 is unchanged, and so are `--no-hw` (still the CPU), `FFMPEG_SKILL_HW` (still does not move `export.py`'s presets) and AV1/ProRes.
 - **`doctor` agrees.** A missing `encoder:libx264`/`encoder:libx265` whose VideoToolbox encoder is in the build, on a machine that can run it, is left out of `available`/`missing`/`missing_optional` and named in the new `covered_by` (`{}` otherwise), so `ok` and each tool's `usable` describe what will run; a tool that needs it also carries `covered_by`, and `notes` says the output is not CRF-equivalent. The contract's capability lists are unchanged.
 
+## 2.8.4
+
+_Automated release: version and notes generated from pull requests merged since 2.8.3._
+
+### Fixed
+
+- **`cut.py --segments --accurate` no longer hangs when a later segment crosses a mid-stream colour-tag change.** The concat re-cut opens the source once per segment; on FFmpeg 8.1.2 a source whose tags change partway (untagged to bt470bg/tv on a new SPS) deadlocked at 0% CPU in the second input's graph rebuild and ended at `--timeout` with nothing written. Every segment input now carries `-reinit_filter 0`, so the graph keeps its first format; the output's colour tags were already written explicitly, so no pixels change. A source whose frame size changes mid-stream is no longer refused cleanly by the concat filter (see `docs/design-decisions.md`) (#316).
+- fix(cut): -reinit_filter 0 on every --segments --accurate input (#322)
+
+### Changed
+
+- **whisper.cpp transcripts are decoded with `-mc 0` (no previous-text context).** This is a decoding change for whisper.cpp users: `caption.py --transcribe` and `silence.py --filler --transcribe` pass `-mc 0` to the `whisper-cli` calls that write the SRT and the word timings (not to language detection), so a transcript can differ from 2.8.3's. Whisper conditions on its own previous text, and a hallucinated line can then repeat to the end of the file; in the measurement large-v3-turbo repeated one sentence ~300 times on two of six sets and lost about 7 minutes of speech on one. With `-mc 0` both loops are gone and every model's word-weighted WER over the six sets falls: base 19.87 to 18.33, small 17.07 to 15.42, large-v3-turbo 69.12 to 12.52. It is not better everywhere: gigaspeech is slightly worse for all three models, and some single sets are for some models. faster-whisper, openai-whisper and Parakeet are unchanged. Measured and proposed by [@rymalia](https://github.com/rymalia) in #318 (whisper.cpp 1.9.5, 58 min of English from the ESB test sets).
+
 ## 2.8.3
 
 _Automated release: version and notes generated from pull requests merged since 2.8.2._

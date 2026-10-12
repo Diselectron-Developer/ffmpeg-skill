@@ -21,7 +21,7 @@ The contract is derived from the code that runs, not maintained beside it:
 | Field | Meaning | Changes when |
 |---|---|---|
 | `contract_version` | shape of this document (`1.0`) | a key is renamed, removed or changes meaning |
-| `skill.version` | the npm / package.json version (`2.8.3`) | any release |
+| `skill.version` | the npm / package.json version (`2.8.4`) | any release |
 
 A release that adds a tool or a flag keeps `contract_version`; a breaking change to the
 ToolSpec shape bumps it. Consumers pin on `contract_version` and read `skill.version`
@@ -119,7 +119,7 @@ JSON would have been rewritten for that. The flat keys, typed per tool in `outpu
   "contract_version": "1.0",
   "deprecated": [],
   "removed": [{"what": "...", "since": "1.10.0", "replacement": "...", "removed_in": "2.0.0", "where": "cli | json | mcp | behaviour"}],
-  "skill": {"id": "ffmpeg-skill", "version": "2.8.3", "execution_mode": "local", "kind": "execution",
+  "skill": {"id": "ffmpeg-skill", "version": "2.8.4", "execution_mode": "local", "kind": "execution",
             "entrypoints": {"cli": "...", "mcp": "...", "contract": "...", "doctor": "..."},
             "not_provided": ["AI reasoning", "decisions", "production plans", "project IR", "approvals", "network access", "transcription engine"]},
   "requirements": {"python": ">=3.9 (standard library only)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0"},
@@ -383,7 +383,9 @@ and no detector can name it, a Whisper engine that can run takes it (whisper.cpp
 `-l auto`: its own default is English). Parakeet then runs only on English *assumed* -- when no
 Whisper engine is installed, or every one failed, or `--model` names an English-only Parakeet
 model -- and the result's top-level `notes` says the transcript is wrong if the speech is not
-English; a multilingual (v3) Parakeet model assumes nothing and gets no note. The result's
+English; a multilingual (v3) Parakeet model assumes nothing and gets no note. Every whisper.cpp
+command that writes a transcript is also passed `-mc 0` (no previous-text context, so one
+hallucinated line is not repeated to the end of the file); its language detection is not. The result's
 `transcription` says which engine, model and routing decision produced the cues (in every
 `--mode`, `mux` included).
 Every engine transcribes on the machine running the skill, and the audio is never uploaded. The

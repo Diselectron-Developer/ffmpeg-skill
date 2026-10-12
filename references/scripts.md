@@ -1023,7 +1023,8 @@ top-level `notes` then says so: that transcript is wrong for non-English speech,
 `--engine parakeet-mlx|parakeet.cpp|whisper.cpp|faster-whisper|openai-whisper` forces one (a
 missing one is `kind: missing_tool`; an installed one that fails is `kind: input`, `reason:
 engine_failed`, with its own error line in `detail`). Without a language whisper.cpp is passed
-`-l auto` (its own default is English), else the named or detected language. `--model` is the
+`-l auto` (its own default is English), else the named or detected language, and `-mc 0` (no
+previous-text context, so one hallucinated line is not repeated to the end of the file; #318). `--model` is the
 whisper model; a Parakeet engine takes it only when it names a Parakeet model
 (`mlx-community/parakeet-*` or a `.gguf`), else `PARAKEET_MODEL` / `PARAKEET_CPP_MODEL`, else the
 English `tdt-0.6b-v2`. A non-English `--language` on an English-only Parakeet model is refused; a

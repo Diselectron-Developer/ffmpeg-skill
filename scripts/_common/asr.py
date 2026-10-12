@@ -28,6 +28,11 @@ WHISPER_ENGINES = ("whisper.cpp", "faster-whisper", "openai-whisper")
 ASR_ENGINES = PARAKEET_ENGINES + WHISPER_ENGINES
 ENGINE_CHOICES = ("auto",) + ASR_ENGINES
 ASR_ENGINE_ENV = "FFMPEG_SKILL_ASR_ENGINE"
+# whisper.cpp conditions every window on the text before it, and once a hallucinated line is in that
+# context it can repeat it to the end of the file (#318: one sentence ~300 times, ~7 minutes of speech
+# lost). -mc / --max-context 0 keeps no previous text. Given to the commands that write a transcript,
+# not to language detection (-dl), which writes none.
+WHISPER_CPP_NO_CONTEXT = ["-mc", "0"]
 PARAKEET_MLX_DEFAULT_MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
 # Every engine transcribes on this machine: the audio is never uploaded. Three of them fetch
 # their model weights the first time they run, which the hint says, so "offline" is never
@@ -342,7 +347,7 @@ def _transcribe_in(tmpdir: str, video: str, out_srt: str, language: Optional[str
         model_path = _whisper_cpp_model(model)
         base = os.path.join(tmpdir, "out")
         # whisper.cpp's own default is -l en: without "auto" it decodes any speech as English
-        cmd = [cli, "-m", model_path, "-f", wav, "-osrt", "-of", base, "-l", lang or "auto"]
+        cmd = [cli, "-m", model_path, "-f", wav, "-osrt", "-of", base, "-l", lang or "auto", *WHISPER_CPP_NO_CONTEXT]
         proc = _asr_run(cmd, subprocess, "whisper.cpp")
         if proc.returncode == 0 and os.path.exists(base + ".srt"):
             info(f"transcribed with whisper.cpp ({os.path.basename(cli)}, model {os.path.basename(model_path)})")
@@ -995,7 +1000,8 @@ def transcribe_words_result(video: str, language: "Optional[str]" = None, model:
             model_path = _whisper_cpp_model(model)
             base = os.path.join(tmpdir, "out")
             # whisper.cpp's own default is -l en: without "auto" it decodes any speech as English
-            cmd = [cli, "-m", model_path, "-f", wav, "--output-json-full", "-of", base, "-l", lang or "auto"]
+            cmd = [cli, "-m", model_path, "-f", wav, "--output-json-full", "-of", base, "-l", lang or "auto",
+                   *WHISPER_CPP_NO_CONTEXT]
             proc = _asr_run(cmd, _subprocess, "whisper.cpp")
             if proc.returncode == 0 and os.path.exists(base + ".json"):
                 words = _words_from_whisper_cpp_json(base + ".json")
