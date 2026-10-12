@@ -546,6 +546,17 @@ class EncoderListTests(unittest.TestCase):
         tool, _names = self._read(dry_run=True)
         self.assertEqual(tool, "ffprobe")
 
+    def test_the_read_ends_with_the_run_s_own_timeout(self):
+        """On Apple Silicon every CPU re-encode asks for this list (#314): a deadlocked ffmpeg has to
+        end at --timeout there, not at the 120 s probe ceiling (macOS CI: a silent shim, --timeout 1)."""
+        for timeout, expected in ((1.0, 1.0), (0, runner.PROBE_TIMEOUT), (9999.0, runner.PROBE_TIMEOUT)):
+            runner._ENCODERS = None
+            STATE.timeout = timeout
+            with mock.patch.object(runner.shutil, "which", side_effect=lambda name: os.path.join("bin", name)), \
+                    mock.patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as call:
+                runner.ffmpeg_encoders()
+            self.assertEqual(call.call_args[1]["timeout"], expected, f"--timeout {timeout}")
+
 
 class _RealFfmpegCase(unittest.TestCase):
     """A 1 s source made with the real ffmpeg, a work directory, and no GPU variables leaking in."""

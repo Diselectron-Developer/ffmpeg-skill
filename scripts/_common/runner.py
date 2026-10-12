@@ -1331,9 +1331,12 @@ def ffmpeg_encoders() -> set:
     if _ENCODERS is None:
         _ENCODERS = set()
         tool = "ffprobe" if STATE.dry_run else "ffmpeg"
+        # --timeout bounds this read too: on Apple Silicon every CPU re-encode asks for the list
+        # (#314), so a deadlocked ffmpeg must not outlive the limit the caller set before the encode
+        limit = min(PROBE_TIMEOUT, STATE.timeout) if STATE.timeout else PROBE_TIMEOUT
         try:
             out = subprocess.run([ffmpeg_exe(tool)[0] or tool, "-hide_banner", "-encoders"], stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=PROBE_TIMEOUT).stdout
+                                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=limit).stdout
             _ENCODERS = set(re.findall(r"^\s*[VAS][.\w]{5}\s+(\S+)", out, re.M))
         except (OSError, subprocess.SubprocessError):
             pass
