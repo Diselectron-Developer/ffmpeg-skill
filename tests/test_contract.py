@@ -3114,6 +3114,58 @@ class DoctorDetectionTests(unittest.TestCase):
         for key in ("available", "missing", "missing_optional", "unknown", "detection", "detected_by"):
             self.assertIn(key, contract["capabilities"])
 
+    def _doctor_listing(self, drop=(), platform_reason=None):
+        """doctor() in this process over the real macOS encoder capture minus the `drop` names (the
+        other listings are this machine's own), with the platform check stood in for."""
+        from unittest import mock
+        import _common.runner as runner
+        names = [n for n in _contract._parse_ff_list("-encoders", (self.FIX / "ffmpeg_encoders_8.1.2_macos.txt").read_text()) if n not in drop]
+        real = _contract._ff_listing
+
+        def listing(binary, flag):
+            if flag == "-encoders":
+                return {"names": names, "status": "parsed", "detail": f"{len(names)} entries"}
+            return real(binary, flag)
+        with mock.patch.object(_contract, "_ff_listing", side_effect=listing), \
+                mock.patch.object(runner, "hw_platform_reason", return_value=platform_reason):
+            return _contract.doctor()
+
+    def test_a_build_without_libx264_is_usable_where_videotoolbox_takes_its_place(self):
+        """#314: libx264/libx265 absent but h264/hevc_videotoolbox present on Apple Silicon: the tools
+        encode with VideoToolbox without --hw, so doctor does not call them unusable."""
+        full = self._doctor_listing()
+        self.assertEqual(full["covered_by"], {})
+        self.assertIn("encoder:libx264", full["available"])
+        self.assertFalse(any("encoder:libx264" in n for n in full.get("notes") or []))
+        lean = self._doctor_listing(drop=("libx264", "libx265"))
+        self.assertEqual(lean["covered_by"], {"encoder:libx264": "encoder:h264_videotoolbox", "encoder:libx265": "encoder:hevc_videotoolbox"})
+        for cap in lean["covered_by"]:
+            self.assertNotIn(cap, lean["available"], "it is not in the build")
+            self.assertNotIn(cap, lean["missing"] + lean["missing_optional"], "and it blocks nothing")
+        self.assertEqual(lean["ok"], full["ok"])
+        self.assertEqual(lean["missing"], full["missing"])
+        for tool in ("insert", "fit"):
+            self.assertEqual(lean["tools"][tool]["usable"], "yes", tool)
+            self.assertNotIn("missing", lean["tools"][tool])
+        self.assertEqual(lean["tools"]["insert"]["covered_by"], {"encoder:libx264": "encoder:h264_videotoolbox"})
+        self.assertNotIn("covered_by", lean["tools"]["probe"])
+        self.assertTrue(any("encoder:libx264" in n and "h264_videotoolbox" in n for n in lean["notes"]), lean.get("notes"))
+        # only the encoder the build lacks is covered
+        self.assertEqual(self._doctor_listing(drop=("libx265",))["covered_by"], {"encoder:libx265": "encoder:hevc_videotoolbox"})
+
+    def test_libx264_stays_required_without_videotoolbox_or_off_apple_silicon(self):
+        for label, drop, reason in (("no VideoToolbox in the build", ("libx264", "libx265", "h264_videotoolbox", "hevc_videotoolbox"), None),
+                                    ("not Apple Silicon", ("libx264", "libx265"), "VideoToolbox constant-quality encoding needs Apple Silicon"),
+                                    ("not macOS", ("libx264", "libx265"), "VideoToolbox is macOS-only")):
+            with self.subTest(label):
+                d = self._doctor_listing(drop=drop, platform_reason=reason)
+                self.assertEqual(d["covered_by"], {})
+                self.assertIn("encoder:libx264", d["missing"])
+                self.assertEqual(d["tools"]["insert"]["usable"], "no")
+                self.assertIn("encoder:libx264", d["tools"]["insert"]["missing"])
+                self.assertIn("libx264", d["tools"]["insert"]["fix"])
+                self.assertFalse(d["ok"])
+
     def test_gpu_encoders_are_reported_from_the_build_alone(self):
         """gpu_encoders answers only "did this ffmpeg build ship the capability" -- never affects ok/usable."""
         # the real macOS capture carries VideoToolbox (h264/hevc), the Windows capture carries nvenc/qsv/amf/vaapi

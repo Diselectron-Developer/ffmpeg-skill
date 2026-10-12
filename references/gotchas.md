@@ -293,7 +293,9 @@ intermediates and keep the default for the final export. On Apple Silicon,
 `--hw` (or `FFMPEG_SKILL_HW=1` for the machine) moves h264/hevc/prores encodes to
 VideoToolbox: 2–7× faster, 1.1–2.9× the bytes at the same quality (1.9–3.5× on HDR). The variable
 leaves `export.py`'s delivery presets on the CPU, which is the usual split (GPU
-intermediates, CPU delivery); `render.py --hw` puts the export on the GPU too.
+intermediates, CPU delivery); `render.py --hw` puts the export on the GPU too. A build with no
+libx264/libx265 (an LGPL ffmpeg) has no CPU delivery to keep: its tools and presets use
+VideoToolbox by themselves, `hw.source` says `auto`.
 Check `encoder`/`hw` in the result: a job the GPU refuses (H.264 wider than 4096)
 was re-encoded on the CPU.
 

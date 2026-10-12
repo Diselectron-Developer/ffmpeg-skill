@@ -121,7 +121,8 @@ class FakeFfmpeg:
     runs a Python script with this interpreter, so the same fake works on every CI runner. Each
     call is logged; a command naming a *_videotoolbox encoder gets the `vt` behaviour, any other
     the `cpu` one: {"rc", "stderr"}, or {"real": "<ffmpeg path>"} to hand the command to a real
-    ffmpeg (the CPU encode then writes a real, probe-able file)."""
+    ffmpeg (the CPU encode then writes a real, probe-able file); with "as_cpu" the VideoToolbox
+    line is first rewritten to libx264 at CRF 23, so a "VideoToolbox" encode writes a real file."""
 
     def __init__(self, directory: Path, behaviour):
         self.dir = Path(directory)
@@ -136,6 +137,12 @@ class FakeFfmpeg:
             f"with open({str(self.log)!r}, 'a', encoding='utf-8') as fh:\n"
             "    fh.write(json.dumps(args) + '\\n')\n"
             "do = conf['vt' if any(a.endswith('_videotoolbox') for a in args) else 'cpu']\n"
+            "if do.get('as_cpu'):\n"  # a VideoToolbox line the real (CPU) ffmpeg can run: libx264 at its CRF
+            "    args = [a.replace('h264_videotoolbox', 'libx264') for a in args]\n"
+            "    for i, a in enumerate(args):\n"
+            "        if a == '-q:v':\n"
+            "            args[i:i + 2] = ['-crf', '23']\n"
+            "            break\n"
             "if 'real' in do:\n"
             "    sys.exit(subprocess.run([do['real']] + args).returncode)\n"
             "sys.stderr.write(do.get('stderr', ''))\n"
@@ -539,6 +546,17 @@ class EncoderListTests(unittest.TestCase):
         tool, _names = self._read(dry_run=True)
         self.assertEqual(tool, "ffprobe")
 
+    def test_the_read_ends_with_the_run_s_own_timeout(self):
+        """On Apple Silicon every CPU re-encode asks for this list (#314): a deadlocked ffmpeg has to
+        end at --timeout there, not at the 120 s probe ceiling (macOS CI: a silent shim, --timeout 1)."""
+        for timeout, expected in ((1.0, 1.0), (0, runner.PROBE_TIMEOUT), (9999.0, runner.PROBE_TIMEOUT)):
+            runner._ENCODERS = None
+            STATE.timeout = timeout
+            with mock.patch.object(runner.shutil, "which", side_effect=lambda name: os.path.join("bin", name)), \
+                    mock.patch.object(runner.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as call:
+                runner.ffmpeg_encoders()
+            self.assertEqual(call.call_args[1]["timeout"], expected, f"--timeout {timeout}")
+
 
 class _RealFfmpegCase(unittest.TestCase):
     """A 1 s source made with the real ffmpeg, a work directory, and no GPU variables leaking in."""
@@ -700,6 +718,182 @@ class HwEverywhereTests(_RealFfmpegCase):
         self.assertIn("libx264", doc["commands"][-1])
         self.assertEqual((doc["encoder"], doc["hw"]["used"], doc["hw"]["fallback"]), ("libx264", False, False))
         self.assertTrue(any(n.endswith("the CPU retry failed too") for n in doc["hw"]["notes"]), doc["hw"])
+
+
+class NoCpuEncoderTests(_RealFfmpegCase):
+    """#314: an ffmpeg build without libx264/libx265 (an LGPL build in a desktop app) encodes on
+    VideoToolbox without --hw, where VideoToolbox can run; a build that has them is untouched. The
+    platform check and the encoder list are stood in for, as in HwEverywhereTests."""
+
+    VT_ONLY = {"h264_videotoolbox", "hevc_videotoolbox", "prores_videotoolbox", "aac", "prores_ks"}
+    FULL = VT_ONLY | {"libx264", "libx265"}
+
+    def _plan(self, module_name, *argv, encoders=None, reason=None, env=None):
+        """A tool's --dry-run --json document with the build's encoder list and the platform check
+        stood in; returns (document, the mock the encoder list was read through)."""
+        import importlib
+        module = importlib.import_module(module_name)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(decision, "hw_platform_reason", return_value=reason), \
+                mock.patch.object(decision, "ffmpeg_encoders", return_value=set(self.VT_ONLY if encoders is None else encoders)) as listed, \
+                mock.patch.dict(os.environ, env or {}), \
+                mock.patch.object(sys, "argv", [module_name + ".py"] + [str(x) for x in argv] + ["--dry-run", "--json"]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            STATE.reset()
+            try:
+                module.main()
+            except SystemExit as e:
+                self.assertEqual(e.code, 0, err.getvalue())
+        return json.loads(out.getvalue()), listed
+
+    def _fit(self, *extra, **kw):
+        return self._plan("fit", self.src, "--height", "120", "-o", self.work / "f.mp4", *extra, **kw)
+
+    def test_a_re_encoding_tool_uses_videotoolbox_when_the_build_has_no_libx264(self):
+        doc, _ = self._fit()
+        self.assertEqual(doc["encoder"], "h264_videotoolbox")
+        self.assertNotIn("libx264", " ".join(doc["commands"]))
+        self.assertIn("-q:v", doc["commands"][-1])
+        self.assertEqual({k: doc["hw"][k] for k in ("requested", "source", "used", "fallback")},
+                         {"requested": False, "source": "auto", "used": None, "fallback": False}, "nobody asked; a dry run ran nothing")
+        self.assertTrue(any("libx264 is not in this ffmpeg build" in n and "h264_videotoolbox" in n for n in doc["hw"]["notes"]), doc["hw"])
+        quality = [n for n in doc["notes"] if "not CRF-equivalent" in n]
+        self.assertEqual(len(quality), 1, doc.get("notes"))
+        self.assertNotIn("--no-hw", quality[0], "the build has no CPU encoder, so --no-hw is no remedy")
+
+    def test_libx265_is_replaced_by_hevc_videotoolbox_in_the_same_way(self):
+        doc, _ = self._fit("--codec", "hevc")
+        self.assertEqual(doc["encoder"], "hevc_videotoolbox")
+        self.assertEqual(doc["hw"]["source"], "auto")
+        self.assertTrue(any("libx265 is not in this ffmpeg build" in n for n in doc["hw"]["notes"]), doc["hw"])
+        # x264 present, x265 absent: only the encoder the build lacks is replaced
+        doc, _ = self._fit("--codec", "hevc", encoders=self.VT_ONLY | {"libx264"})
+        self.assertEqual(doc["encoder"], "hevc_videotoolbox")
+        doc, _ = self._fit(encoders=self.VT_ONLY | {"libx264"})
+        self.assertEqual(doc["encoder"], "libx264")
+        self.assertNotIn("hw", doc)
+
+    def test_a_build_with_libx264_is_untouched(self):
+        doc, _ = self._fit(encoders=self.FULL)
+        self.assertEqual(doc["encoder"], "libx264")
+        self.assertNotIn("hw", doc)
+        self.assertFalse(any("videotoolbox" in c for c in doc["commands"]))
+        self.assertFalse(any("CRF-equivalent" in n for n in doc.get("notes") or []))
+
+    def test_export_presets_follow_the_build_without_libx264_or_libx265(self):
+        """The delivery presets have no CPU alternative either: reels is x264, h265 is x265. The
+        variable that keeps them on the CPU where there is one does not claim to have done so."""
+        out = self.work / "x.mp4"
+        for preset, encoder, cpu in (("reels", "h264_videotoolbox", "libx264"), ("youtube", "h264_videotoolbox", "libx264"),
+                                     ("h265", "hevc_videotoolbox", "libx265")):
+            with self.subTest(preset=preset):
+                doc, _ = self._plan("export", self.src, "--preset", preset, "-o", out)
+                self.assertEqual(doc["encoder"], encoder)
+                self.assertNotIn(cpu, " ".join(doc["commands"]))
+                self.assertIn("-q:v", doc["commands"][-1])
+                self.assertNotIn(" -preset ", doc["commands"][-1], "x264's speed preset has no VideoToolbox meaning")
+                self.assertEqual((doc["hw"]["requested"], doc["hw"]["source"]), (False, "auto"))
+                self.assertTrue(any(f"{cpu} is not in this ffmpeg build" in n for n in doc["hw"]["notes"]), doc["hw"])
+        with self.subTest(env=True):
+            doc, _ = self._plan("export", self.src, "--preset", "reels", "-o", out, env={runner.HW_ENV: "1"})
+            self.assertEqual(doc["encoder"], "h264_videotoolbox")
+            self.assertEqual(doc["hw"]["source"], "auto")
+            self.assertFalse(any("not applied" in n or "stays on the CPU" in n for n in doc["hw"]["notes"]), doc["hw"])
+        with self.subTest(with_libx264=True):
+            doc, _ = self._plan("export", self.src, "--preset", "reels", "-o", out, encoders=self.FULL)
+            self.assertEqual(doc["encoder"], "libx264")
+            self.assertNotIn("hw", doc)
+
+    def test_the_prores_and_copy_presets_are_not_touched(self):
+        for preset, encoder in (("prores", "prores_ks"), ("copy", "copy")):
+            with self.subTest(preset=preset):
+                doc, _ = self._plan("export", self.src, "--preset", preset, "-o", self.work / f"{preset}.mov")
+                self.assertEqual(doc["encoder"], encoder)
+                self.assertNotIn("hw", doc)
+
+    def test_an_explicit_no_hw_keeps_the_cpu_line(self):
+        """--no-hw is the caller's choice of the CPU: honoured even where it cannot run (ffmpeg then
+        says so), not overridden."""
+        doc, _ = self._fit("--no-hw")
+        self.assertEqual(doc["encoder"], "libx264")
+        self.assertNotIn("hw", doc)
+
+    def test_an_explicit_hw_is_unchanged(self):
+        doc, _ = self._fit("--hw")
+        self.assertEqual((doc["encoder"], doc["hw"]["requested"], doc["hw"]["source"]), ("h264_videotoolbox", True, "flag"))
+        self.assertFalse(any("is not in this ffmpeg build" in n for n in doc["hw"]["notes"]), "asked for, not chosen for lack of libx264")
+
+    def test_without_videotoolbox_or_off_apple_silicon_nothing_changes(self):
+        doc, _ = self._fit(encoders={"aac"})
+        self.assertEqual(doc["encoder"], "libx264", "no VideoToolbox in the build either: the CPU line, which ffmpeg then refuses as today")
+        self.assertNotIn("hw", doc)
+        doc, listed = self._fit(reason="VideoToolbox is macOS-only")
+        self.assertEqual(doc["encoder"], "libx264")
+        self.assertNotIn("hw", doc)
+        listed.assert_not_called()  # Linux and Windows never read the encoder list for this
+        doc, _ = self._fit(reason="VideoToolbox constant-quality encoding needs Apple Silicon")
+        self.assertEqual(doc["encoder"], "libx264")
+
+    def test_an_unreadable_encoder_list_proves_nothing_is_missing(self):
+        doc, _ = self._fit(encoders=set())
+        self.assertEqual(doc["encoder"], "libx264")
+        self.assertNotIn("hw", doc)
+
+    def test_the_encode_runs_on_videotoolbox_and_is_reported_as_one(self):
+        """The real run, with a fake ffmpeg that stands in for VideoToolbox by writing the file with
+        libx264: `used` is true, nothing is retried (there is no CPU line to retry with)."""
+        fake = FakeFfmpeg(self.work, {"vt": {"real": self.real_ffmpeg, "as_cpu": True}, "cpu": {"real": self.real_ffmpeg}})
+        code, doc, _err = self._run_auto(fake)
+        self.assertEqual(code, 0, doc)
+        self.assertEqual(len(fake.calls()), 1)
+        self.assertTrue(doc["verified"])
+        self.assertEqual(doc["encoder"], "h264_videotoolbox")
+        self.assertEqual({k: doc["hw"][k] for k in ("requested", "source", "used", "fallback")},
+                         {"requested": False, "source": "auto", "used": True, "fallback": False})
+        self.assertTrue(any("not CRF-equivalent" in n and "--no-hw" not in n for n in doc["notes"]), doc.get("notes"))
+
+    def test_a_refused_encode_is_not_retried_on_a_cpu_encoder_the_build_lacks(self):
+        fake = FakeFfmpeg(self.work, {"vt": {"rc": 187, "stderr": VT_OPEN_FAILED["6.1"]}, "cpu": {"real": self.real_ffmpeg}})
+        code, doc, _err = self._run_auto(fake)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(fake.calls()), 1, "libx264 is not in the build: a CPU retry could not run")
+        self.assertEqual(doc["error"]["kind"], "ffmpeg")
+        self.assertEqual(doc["encoder"], "h264_videotoolbox")
+        self.assertEqual((doc["hw"]["used"], doc["hw"]["fallback"], doc["hw"]["source"]), (True, False, "auto"))
+        self.assertFalse(any("re-encoded on the CPU" in n for n in doc["hw"]["notes"]), doc["hw"])
+
+    def _run_auto(self, fake):
+        """What a re-encoding tool does on a build without libx264: video_args() picks the encoder
+        (no --hw anywhere), one ffmpeg command, run(), emit()."""
+        STATE.json = True
+        with mock.patch.object(decision, "hw_platform_reason", return_value=None), \
+                mock.patch.object(decision, "ffmpeg_encoders", return_value=set(self.VT_ONLY)):
+            video = decision.video_args(_common.probe(str(self.src)), 23, "ultrafast")
+        self.assertEqual(video[video.index("-c:v") + 1], "h264_videotoolbox")
+        self.assertEqual(STATE.hw_swaps, [], "no CPU line was replaced, so none is remembered")
+        out = self.work / "o.mp4"
+        cmd = [str(fake.path), "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(self.src), "-t", "0.5"] + video + ["-an", str(out)]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                runner.run(cmd)
+                emit_module.emit(str(out))
+                code = 0
+            except SystemExit as e:
+                code = e.code
+        return code, json.loads(stdout.getvalue()), stderr.getvalue()
+
+    def test_a_stage_that_ran_on_videotoolbox_for_lack_of_libx264_does_not_offer_no_hw(self):
+        """render.py/batch.py carry a stage's quality note: its source is auto, so --no-hw is not named."""
+        stage = {"hw": {"requested": False, "source": "auto", "used": True, "fallback": False, "notes": []},
+                 "commands": ["ffmpeg -i a.mp4 -c:v h264_videotoolbox -q:v 75 b.mp4"]}
+        STATE.reset()
+        emit_module.absorb_stage_hw("fit", stage)
+        self.assertEqual(STATE.hw_stages[0]["source"], "auto")
+        self.assertIn("not CRF-equivalent", STATE.hw_stages[0]["quality_note"])
+        self.assertNotIn("--no-hw", STATE.hw_stages[0]["quality_note"])
+        report = emit_module.hw_report(STATE, "h264_videotoolbox")
+        self.assertEqual((report["requested"], report["source"]), (False, "auto"))
 
 
 class HwResultTests(unittest.TestCase):
