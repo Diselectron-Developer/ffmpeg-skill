@@ -1036,6 +1036,28 @@ not a new file format this tool would have to maintain.
   each engine's source and process, so `network: false` cannot be read as "a first
   `--transcribe` is network-free". Tests: `InstallHintTests`,
   `test_the_network_claim_matches_where_each_engine_runs`.
+- **whisper.cpp transcribes with `-mc 0`, by default.** Whisper conditions each window on the text
+  before it, and once a hallucinated line is in that context it can repeat it for the rest of the
+  file: in the contributor's benchmark (#318, six English sets of ~10 min, whisper.cpp 1.9.5)
+  large-v3-turbo repeated one sentence ~300 times on two sets, and on common_voice lost about the
+  last 7 minutes of speech. `-mc 0` (`--max-context 0`, previous-text tokens kept: none) removed both
+  loops and lowered every model's word-weighted WER: base 19.87 -> 18.33, small 17.07 -> 15.42,
+  large-v3-turbo 69.12 -> 12.52. It is a decoding change, not a free one: gigaspeech is worse for all
+  three models (13.16 -> 14.11 for large-v3-turbo) and some single cells are (small on
+  common_voice 16.44 -> 19.28, large-v3-turbo on ami 25.72 -> 27.55). It is the default rather than
+  an opt-in because a loop that silently loses minutes of speech is a defect, which the 2.x promise
+  ("behaviour may change to fix a defect, with a CHANGELOG line") allows, and because the net is
+  better for every model measured; an opt-in would leave the loss with everyone who does not know to ask.
+  It is given to the two whisper.cpp commands that write a transcript (the SRT of `caption.py
+  --transcribe` and the `--output-json-full` word timings of `silence.py --filler --transcribe`) and
+  not to language detection (`-dl`: it reads the first 30 s and writes no transcript), nor to any other
+  engine: faster-whisper, openai-whisper and Parakeet are not whisper.cpp and were not measured. No
+  repetition detector was added: the flag removes the cause, a detector would be a second decoder to
+  maintain. Every whisper.cpp binary name the skill runs (`whisper-cli`, `whisper-cpp`, `main`) is
+  documented to take `-mc` (the flag is years old); a build that rejected it would write no file, so
+  the run reads as "whisper.cpp found but failed" with the build's last output line and the next
+  engine is tried (`engine_failed` when whisper.cpp was named). Reverse this if a measurement on other material shows `-mc 0` costing more than the
+  loops it prevents. Test: `WhisperContextTests`.
 
 ## Unreleased — cuts that say what they did
 

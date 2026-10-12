@@ -237,10 +237,10 @@ class _FakeEngines:
             template = (kw["env"] if kw.get("env") is not None else os.environ).get("PARAKEET_OUTPUT_TEMPLATE") or "{filename}"
             name = template.format(filename="audio", parent=out, date="20261009", index="1")
             Path(out, name + ".json").write_text(json.dumps(MLX_DOC), encoding="utf-8")
-        elif exe == "whisper-cli" and "-osrt" in cmd:
+        elif exe in ("whisper-cli", "whisper-cpp") and "-osrt" in cmd:
             Path(cmd[cmd.index("-of") + 1] + ".srt").write_text(
                 "1\n00:00:00,000 --> 00:00:01,500\nBonjour tout le monde\n", encoding="utf-8")
-        elif exe == "whisper-cli" and "--output-json-full" in cmd:
+        elif exe in ("whisper-cli", "whisper-cpp") and "--output-json-full" in cmd:
             Path(cmd[cmd.index("-of") + 1] + ".json").write_text(json.dumps({"transcription": [{"tokens": [
                 {"text": " Bonjour", "offsets": {"from": 0, "to": 600}},
                 {"text": " euh", "offsets": {"from": 700, "to": 900}}]}]}), encoding="utf-8")
@@ -597,6 +597,65 @@ class WhisperLanguageTests(_SrtDir, _BridgeHarness, unittest.TestCase):
             self.assertFalse(asr._whisper_ready(cli, str(en)))
             self.assertFalse(asr._whisper_ready(openai, "base.en"))
             self.assertTrue(asr._whisper_ready(openai, "base"))
+
+
+class WhisperContextTests(_SrtDir, _BridgeHarness, unittest.TestCase):
+    """#318: whisper.cpp conditions each window on the text before it, and once a hallucinated line is in
+    that context it can repeat it for the rest of the file (large-v3-turbo: one sentence 293 and 303
+    times, about 7 minutes of speech lost on one set). `-mc 0` (--max-context) keeps no previous text.
+    Both commands that produce a transcript carry it; the language detector writes none and does not."""
+
+    @staticmethod
+    def _flags(argv):
+        return [argv[i + 1] for i, a in enumerate(argv) if a == "-mc"]
+
+    def test_the_srt_command_keeps_no_previous_text(self):
+        for cli in ("whisper-cli", "whisper-cpp"):
+            fake = _FakeEngines([cli])
+            self._with([], lambda: asr.transcribe_result("talk.mp4", self.srt, "en", "base"), fake=fake)
+            argv = fake.ran(cli)[-1]
+            self.assertIn("-osrt", argv)
+            self.assertEqual(self._flags(argv), ["0"], argv)
+
+    def test_the_word_timing_command_keeps_no_previous_text(self):
+        for cli in ("whisper-cli", "whisper-cpp"):
+            fake = _FakeEngines([cli])
+            self._with([], lambda: asr.transcribe_words_result("talk.mp4", "en"), fake=fake)
+            argv = fake.ran(cli)[-1]
+            self.assertIn("--output-json-full", argv)
+            self.assertEqual(self._flags(argv), ["0"], argv)
+
+    def test_the_flag_does_not_replace_the_language(self):
+        fake = _FakeEngines(["whisper-cli"])
+        self._with([], lambda: asr.transcribe_result("talk.mp4", self.srt, "fr", "base"), fake=fake)
+        argv = fake.ran("whisper-cli")[-1]
+        self.assertEqual((argv[argv.index("-l") + 1], self._flags(argv)), ("fr", ["0"]))
+
+    def test_language_detection_is_left_as_it_was(self):
+        """-dl reads the first 30 s and writes no transcript: there is no context to drop."""
+        fake = _FakeEngines(["whisper-cli"])
+        with tempfile.TemporaryDirectory() as d:
+            tiny = Path(d) / "ggml-tiny.bin"
+            tiny.write_bytes(b"")
+            with mock.patch.object(shutil, "which", fake.which), mock.patch.object(subprocess, "run", fake.run), \
+                    mock.patch.object(asr, "_whisper_cpp_model", lambda m: str(tiny) if m == "tiny" else m):
+                asr.detect_language("a.wav", shutil, subprocess)
+        argv = fake.ran("whisper-cli")[-1]
+        self.assertIn("-dl", argv)
+        self.assertNotIn("-mc", argv)
+
+    def test_other_engines_are_not_given_the_flag(self):
+        """The change is whisper.cpp's: faster-whisper and openai-whisper take no -mc, Parakeet no such option."""
+        fake = _FakeEngines(["whisper", "parakeet-mlx"])
+        # the fake writes nothing for openai-whisper, so the run is refused; what it was handed is recorded
+        with mock.patch.object(asr, "detect_language", return_value="fr"), self.assertRaises(SystemExit):
+            self._with([], lambda: asr.transcribe_result("talk.mp4", self.srt, "fr", "base", engine="openai-whisper"),
+                       fake=fake)
+        self.assertTrue(fake.ran("whisper"))
+        for exe in ("whisper", "parakeet-mlx"):
+            for argv in fake.ran(exe):
+                self.assertNotIn("-mc", argv)
+                self.assertNotIn("--max-context", argv)
 
 
 class AutoRoutingFallbackTests(_SrtDir, _BridgeHarness, unittest.TestCase):
@@ -961,6 +1020,7 @@ class ParakeetEngineTests(MediaFixtures):
         # whisper.cpp's own default is -l en: "handles any language" only holds when it is told to detect
         for argv in (caption_args, filler_args):
             self.assertEqual(argv[argv.index("-l") + 1], "auto", argv)
+            self.assertEqual(argv[argv.index("-mc") + 1], "0", argv)  # #318: no previous-text conditioning
         self.assertIn("Bonjour tout le monde", (OUT / "pk_whisperfirst.srt").read_text())
         self.assertFalse(_assumed(doc))
         self.assertEqual(fil["filler"]["source"], "whisper:whisper.cpp")
