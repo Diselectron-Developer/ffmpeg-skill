@@ -2310,6 +2310,170 @@ class Bt601ConversionTests(unittest.TestCase):
                     self.assertGreater(self._rgb_psnr(self.clips[name], "bt709", out, "bt709", seek), 45.0, tool)
 
 
+class RgbAndStillConversionTests(unittest.TestCase):
+    """2.10.1 converted a BT.601-tagged video source to the BT.709 its re-encode is tagged with; an
+    RGB picture (a PNG still or logo, an emoji PNG, a PNG sequence, a qtrle clip), a JPEG still and
+    grid.py's cells were still made YUV by FFmpeg's own default, BT.601, and tagged BT.709: pure
+    red decoded as (255,24,0) and pure green as (0,216,0) on 5.1.1, 6.1, 7.1 and 8.1 (mean
+    ΔRGB 8.8, max 38.9 over the three patches below).
+
+    Each output is decoded here, in Python, with the matrix and range its own tags name, and the
+    solid patches are compared with the colours the source holds (the PNG's RGB; the JPEG decoded
+    as BT.601 full range, what JPEG is). Converted, every patch is within ~1.6 of its colour."""
+
+    COLOURS = [(255, 0, 0), (0, 255, 0), (40, 120, 200)]
+    BAR = 64  # the still is three BAR x BAR bars side by side
+
+    @classmethod
+    def setUpClass(cls):
+        encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, text=True).stdout
+        if "libx264" not in encoders:
+            raise unittest.SkipTest("this ffmpeg build has no libx264")
+        cls.dir = OUT / "rgbstill"
+        cls.dir.mkdir(parents=True, exist_ok=True)
+        d, bar = cls.dir, cls.BAR
+        row = b"".join(bytes(cls.COLOURS[x // bar]) for x in range(3 * bar))
+        (d / "bars.ppm").write_bytes(b"P6\n%d %d\n255\n" % (3 * bar, bar) + row * bar)
+        q = ("ffmpeg", "-y", "-hide_banner", "-loglevel", "error")
+        sh(*q, "-i", d / "bars.ppm", "-pix_fmt", "rgb24", d / "bars.png")
+        sh(*q, "-i", d / "bars.ppm", "-pix_fmt", "pal8", d / "bars_pal8.png")
+        sh(*q, "-i", d / "bars.ppm", "-q:v", "1", "-pix_fmt", "yuvj420p", d / "bars.jpg")
+        (d / "seq").mkdir(exist_ok=True)
+        for i in range(1, 11):
+            shutil.copyfile(d / "bars.png", d / "seq" / f"f_{i:04d}.png")
+        cls.emoji = d / "emoji"
+        cls.emoji.mkdir(exist_ok=True)
+        # a solid red 'emoji' (the asset is named by code point, like _emoji_assets())
+        (d / "red.ppm").write_bytes(b"P6\n72 72\n255\n" + bytes((255, 0, 0)) * (72 * 72))
+        sh(*q, "-i", d / "red.ppm", "-pix_fmt", "rgba", cls.emoji / "1f389.png")
+        x264 = ("-c:v", "libx264", "-preset", "ultrafast", "-crf", "1", "-pix_fmt", "yuv420p")
+        tags = {"bt709": ("-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709"), "untagged": (),
+                "smpte170m": ("-x264-params", "colorprim=smpte170m:transfer=smpte170m:colormatrix=smpte170m")}
+        loop = (*q, "-loop", "1", "-framerate", "25", "-i", d / "bars.png", "-t", "1")
+        # the bars as a base to composite on, 768x256 with audio, BT.709-tagged and untagged (encoded
+        # with BT.709, what players take untagged video as): a shifted main picture shows as well
+        for name, tag in (("base709", "bt709"), ("baseun", "untagged")):
+            sh(*loop, "-f", "lavfi", "-i", "sine=d=1", "-vf", "scale=768:256:flags=neighbor:out_color_matrix=bt709:out_range=tv,format=yuv420p",
+               *x264, *tags[tag], "-c:a", "aac", "-shortest", d / f"{name}.mp4")
+        # the bars as video: an RGB qtrle clip, and BT.601- / BT.709-tagged and untagged clips encoded with their own matrix
+        sh(*loop, "-vf", "scale=384:128:flags=neighbor", "-c:v", "qtrle", "-pix_fmt", "rgb24", d / "qtrle.mov")
+        for name, m, tag in (("v601", "bt601", "smpte170m"), ("v709", "bt709", "bt709"), ("vun", "bt709", "untagged")):
+            sh(*loop, "-vf", f"scale=384:128:flags=neighbor:out_color_matrix={m}:out_range=tv,format=yuv420p",
+               *x264, *tags[tag], d / f"{name}.mp4")
+        cls.jpeg = cls._patches(d / "bars.jpg", cls._bars(0, 0), t=0)  # what the JPEG holds, decoded as JPEG
+
+    @classmethod
+    def _bars(cls, x, y, scale=1, inset=12):
+        b = cls.BAR * scale
+        return [(x + k * b + inset, y + inset, x + (k + 1) * b - inset, y + b - inset) for k in range(3)]
+
+    @staticmethod
+    def _patches(path, rects, t=0.5):
+        """Mean RGB of each rect of the frame at `t`, decoded with the matrix and range the stream is
+        tagged with (BT.601 for a smpte170m/bt470bg tag or an untagged JPEG, else BT.709)."""
+        s = json.loads(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                       "stream=width,height,pix_fmt,color_space,color_range", "-of", "json", str(path)],
+                                      stdout=subprocess.PIPE, text=True, check=True).stdout)["streams"][0]
+        w, h, pf, cs = s["width"], s["height"], s["pix_fmt"], s.get("color_space") or "unknown"
+        assert pf in ("yuv420p", "yuvj420p"), pf
+        raw = subprocess.run(["ffmpeg", "-v", "error", *(["-ss", str(t)] if t else []), "-i", str(path), "-frames:v", "1",
+                              "-f", "rawvideo", "-pix_fmt", pf, "-"], stdout=subprocess.PIPE, check=True).stdout
+        bt601 = cs in ("smpte170m", "bt470bg") or (cs == "unknown" and pf == "yuvj420p")
+        kr, kb = (0.299, 0.114) if bt601 else (0.2126, 0.0722)
+        full = pf == "yuvj420p" or s.get("color_range") == "pc"
+        cw, ch = w // 2, h // 2
+        out = []
+        for x0, y0, x1, y1 in rects:
+            mean = lambda off, stride, xs, ys: sum(raw[off + yy * stride + xx] for yy in ys for xx in xs) / (len(xs) * len(ys))
+            y_ = mean(0, w, range(x0, x1), range(y0, y1))
+            u = mean(w * h, cw, range(x0 // 2, x1 // 2), range(y0 // 2, y1 // 2)) - 128
+            v = mean(w * h + cw * ch, cw, range(x0 // 2, x1 // 2), range(y0 // 2, y1 // 2)) - 128
+            ys, cs_ = (1.0, 1.0) if full else (255 / 219, 255 / 224)
+            Y = (y_ - (0 if full else 16)) * ys
+            r, b = Y + 2 * (1 - kr) * v * cs_, Y + 2 * (1 - kb) * u * cs_
+            g = (Y - kr * r - kb * b) / (1 - kr - kb)
+            out.append(tuple(max(0.0, min(255.0, c)) for c in (r, g, b)))
+        return out
+
+    def _assert_colours(self, out, rects, want, t=0.5):
+        v = probe(str(out))["video"]
+        self.assertEqual(v["color_space"], "bt709", f"{out.name}: the output is not tagged BT.709")
+        got = self._patches(out, rects, t)
+        diffs = [abs(a - b) for g, w in zip(got, want) for a, b in zip(g, w)]
+        # measured after the fix: mean <= 0.65, max <= 1.6 (pal8: 0.94 / 2.6, the PNG is dithered);
+        # before it: mean >= 8.0, max >= 24 (BT.601 pixels under a BT.709 tag)
+        self.assertLess(sum(diffs) / len(diffs), 3.0, f"{out.name}: {[tuple(round(c) for c in g) for g in got]} != {want}")
+        self.assertLess(max(diffs), 8.0, f"{out.name}: {[tuple(round(c) for c in g) for g in got]} != {want}")
+
+    def test_an_rgb_or_jpeg_source_is_converted_to_the_bt709_it_is_tagged_with(self):
+        """Follow-up 1 of #332: RGB sources and JPEG stills, through every tool that takes one."""
+        d = self.dir
+        runs = [
+            ("insert.py", [d / "bars.png", "--duration", "1", "--width", "384", "--height", "128"], self.COLOURS, 0.5),
+            ("insert.py", [d / "bars_pal8.png", "--duration", "1", "--width", "384", "--height", "128"], self.COLOURS, 0.5),
+            ("insert.py", [d / "bars.jpg", "--duration", "1", "--width", "384", "--height", "128"], self.jpeg, 0.5),
+            ("sequence.py", ["--dir", d / "seq", "--pattern", "f_%04d.png", "--start-number", "1", "--fps", "10",
+                             "--width", "384", "--height", "128"], self.COLOURS, 0.3),
+            ("fit.py", [d / "qtrle.mov", "--width", "384", "--height", "128"], self.COLOURS, 0.5),
+            ("export.py", [d / "qtrle.mov", "--preset", "youtube", "--no-scale"], self.COLOURS, 0.5),
+        ]
+        for n, (tool, args, want, t) in enumerate(runs):
+            with self.subTest(tool=tool, source=Path(str(args[0])).name):
+                out = d / f"rgb_{n}_{tool[:-3]}.mp4"
+                script(tool, *args, "--fast", "-o", out)
+                self._assert_colours(out, self._bars(0, 0, 2), want, t)
+
+    def test_a_still_composited_over_the_video_is_converted_to_bt709(self):
+        """Follow-up 2 of #332: overlay.py --image (render.py's image/logo layers), waveform.py --image
+        (the audiogram template) and graphics/caption emoji PNGs. 7.1+ already converted an RGBA layer
+        by the main input's tag, so over a BT.709-tagged base only 5.1/6.1 were wrong; over an
+        untagged one 7.1+ negotiates one colourspace for both pictures and took "unknown" as BT.601.
+        The main's own bars are checked too: overlay's format=auto composited an RGBA logo in RGB, so
+        the WHOLE picture went through RGB and came back BT.601 (9.04 mean / 40.6 max on a BT.709 main,
+        7.93 / 37.4 on an untagged one, 5.1.1 and 6.1; the untagged one on 7.1.1 and 8.1.3 too)."""
+        d = self.dir
+        main = [(k * 256 + 20, 20, k * 256 + 236, 100) for k in range(3)]  # the base's bars, clear of the logo
+        for img, base, want in (("bars.png", "baseun", self.COLOURS), ("bars.png", "base709", self.COLOURS),
+                                ("bars.jpg", "base709", self.jpeg), ("bars.jpg", "baseun", self.jpeg)):
+            out = d / f"ov_{img.replace('.', '_')}_{base}.mp4"
+            script("overlay.py", d / f"{base}.mp4", "--image", d / img, "--position", "bottom-right", "--margin", "0", "--fast", "-o", out)
+            with self.subTest(tool="overlay.py", image=img, base=base, part="the image"):
+                self._assert_colours(out, self._bars(576, 192), want)
+            with self.subTest(tool="overlay.py", image=img, base=base, part="the main picture"):
+                self._assert_colours(out, main, self.COLOURS)
+        with self.subTest(tool="waveform.py"):
+            out = d / "wave_png.mp4"
+            script("waveform.py", d / "baseun.mp4", "--image", d / "bars.png", "--width", "384", "--height", "128",
+                   "--vis-height", "0.1", "--opacity", "0", "--fast", "-o", out)
+            self._assert_colours(out, self._bars(0, 0, 2), self.COLOURS)
+        filters = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], stdout=subprocess.PIPE, text=True).stdout
+        with self.subTest(tool="graphics.py --emoji png"):
+            if not re.search(r"^\s*\S+\s+ass\s", filters, re.M):
+                self.skipTest("this ffmpeg build has no ass filter")
+            out = d / "emoji_png.mp4"
+            doc = json.loads(script("graphics.py", d / "baseun.mp4", "--template", "sticker", "--text", "\U0001F389",
+                                    "--position", "bottom-right", "--emoji", "png", "--emoji-assets", self.emoji,
+                                    "--emoji-scale", "2", "--fast", "--json", "-o", out).stdout)
+            m = re.search(r"scale=(\d+):\d+.*overlay=x=(\d+):y=(\d+)", " ".join(doc["commands"]))
+            box, x, y = (int(g) for g in m.groups())
+            self._assert_colours(out, main, self.COLOURS)
+            self._assert_colours(out, [(x + 8, y + 8, x + box - 8, y + box - 8)], [(255, 0, 0)])
+
+    def test_grid_converts_each_cell_by_its_own_tags(self):
+        """Follow-up 3 of #332: grid.py relabelled every cell BT.709 (5.1.1, 6.1); on 7.1+ xstack
+        negotiated one colourspace for every cell and converted the others to it, so a BT.601 cell
+        took a BT.709 one with it, and an untagged cell beside a converted one was converted as
+        BT.601. Every order, every cell."""
+        d = self.dir
+        for order in (("v601", "v709"), ("v709", "v601"), ("v601", "vun"), ("vun", "v601")):
+            out = d / f"grid_{order[0]}_{order[1]}.mp4"
+            script("grid.py", *[d / f"{o}.mp4" for o in order], "--cols", "2", "--rows", "1", "--cell-width", "384",
+                   "--cell-height", "128", "--label", "none", "--fast", "-o", out)
+            for c, name in enumerate(order):
+                with self.subTest(order=order, cell=name):
+                    self._assert_colours(out, self._bars(384 * c, 0, 2), self.COLOURS)
+
+
 class ScriptFontTests(unittest.TestCase):
     """1.12: which script text is written in, and a font file that actually covers it."""
 

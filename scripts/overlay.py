@@ -25,7 +25,7 @@ import sys
 from typing import List, Optional
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
-from _common import STATE, script_font_for_text, drawtext_text_opts, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, matrix_chain, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
+from _common import STATE, script_font_for_text, drawtext_text_opts, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
 
 # Per-edge margins: a platform's UI does not cover the same fraction of every edge (TikTok's
 # like column is 14 % of the width, its description block 22 % of the height), so a position
@@ -266,7 +266,12 @@ def main() -> int:
             ov += f":enable='{enable}'"
         # -loop 1 turns the still into a timed stream so fade/enable expressions see real timestamps
         cmd = ffmpeg_base() + ["-i", args.input, "-loop", "1", "-i", args.image]
-        fc = f"[1:v]{','.join(chain)},setpts=PTS-STARTPTS[ov];[0:v][ov]{ov}[out]"
+        # the RGBA still is converted to the BT.709 the output is tagged with (overlay's own
+        # RGB-to-YUV step used BT.601), and an untagged main is labelled BT.709 (tags only) so
+        # 7.1+'s negotiation does not convert one picture to the other's "unknown" matrix
+        base = label_chain(meta, meta) if rgb_chain_to_bt709(meta) else ""
+        fc = (f"[1:v]{','.join(chain)},setpts=PTS-STARTPTS{rgb_chain_to_bt709(meta)}[ov];"
+              + (f"[0:v]{base}null[base];[base]" if base else "[0:v]") + f"[ov]{ov}[out]")
         cmd += ["-filter_complex", fc, "-map", "[out]", "-map", f"0:a:{args.audio_stream}?"]
         if meta.get("duration"):
             # An explicit -t is exact and, unlike -shortest, only bounds the *main* input's

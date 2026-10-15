@@ -1094,6 +1094,60 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             fold(["ffmpeg", "-i", "a.mp4", "-filter_complex", "color=red[v]", "-map", "[v]"] + enc)
 
+    def test_an_rgb_source_or_a_still_is_converted_to_the_bt709_it_is_tagged_with(self):
+        """#332's follow-ups. An RGB picture (PNG, image sequence, qtrle) has no matrix; FFmpeg gave it
+        BT.601 wherever the graph first needed YUV, under a BT.709 tag. It is converted where it enters:
+        a source by the encoder line's -vf (folded like the BT.601 one; a palette is expanded first,
+        swscale converts a palette with fixed BT.601), a still the tool made RGBA at the end of its own
+        chain (rgb_chain_to_bt709). An untagged picture that meets a converted one in a mixing filter
+        gets a BT.709 label, tags only, so 7.1+'s negotiation converts neither (label_chain). Gray,
+        YUV, HDR, prores lines and a missing probe get nothing."""
+        def meta(**v):
+            return {"file": "src", "video": dict({"bt2020_or_hdr": False}, **v)}
+        rgb = "scale=out_color_matrix=bt709:out_range=tv,format=yuv444p"
+        for pf in ("rgb24", "rgba", "bgra", "argb", "gbrp", "rgb48be", "rgba64be", "bgr0"):
+            self.assertEqual(_common.bt709_matrix_filter(meta(pix_fmt=pf, color_space="gbr")), rgb, pf)
+            self.assertEqual(_common.bt709_matrix_filter(meta(pix_fmt=pf)), rgb, pf)  # qtrle: no matrix tag at all
+        self.assertEqual(_common.bt709_matrix_filter(meta(pix_fmt="pal8", color_space="gbr")), "format=rgb24," + rgb)
+        for m in (meta(pix_fmt="gray"), meta(pix_fmt="ya8"), meta(pix_fmt="yuv420p"), meta(pix_fmt="yuvj420p"),
+                  meta(pix_fmt="rgb48be", bt2020_or_hdr=True), meta(color_space="gbr")):
+            self.assertIsNone(_common.bt709_matrix_filter(m), m)
+        # a JPEG probes as yuvj420p/bt470bg: a BT.601 source like any other
+        self.assertTrue(_common.bt709_matrix_filter(meta(pix_fmt="yuvj420p", color_space="bt470bg", color_range="pc")).startswith("colorspace=ispace=bt470bg:"))
+        png = meta(pix_fmt="rgb24", color_space="gbr")
+        saved = (_common.STATE.codec, _common.STATE.hw)
+        try:
+            _common.STATE.hw = False
+            for codec in (None, "h264", "hevc"):
+                _common.STATE.codec = codec
+                self.assertEqual(_common.video_args(png)[-2:], ["-vf", rgb], codec)
+                self.assertEqual(_common.video_args(None, source=png)[-2:], ["-vf", rgb], codec)  # insert.py / sequence.py
+                self.assertNotIn("-vf", _common.video_args(None), codec)
+                self.assertNotIn("-vf", _common.video_args(None, source=meta(pix_fmt="yuv420p")), codec)
+                self.assertEqual(_common.matrix_chain(png, None), rgb + ",")
+                self.assertEqual(_common.rgb_chain_to_bt709(None), ",scale=out_color_matrix=bt709:out_range=tv,format=yuva420p")
+                self.assertEqual(_common.rgb_chain_to_bt709(meta(pix_fmt="yuv420p"), "yuv420p"),
+                                 ",scale=out_color_matrix=bt709:out_range=tv,format=yuv420p")
+                self.assertEqual(_common.label_chain(meta(pix_fmt="yuv420p"), None), "setparams=colorspace=bt709:range=tv,")
+                self.assertEqual(_common.label_chain(meta(pix_fmt="yuvj420p", color_range="pc"), None), "setparams=colorspace=bt709,")
+                for tagged in (meta(pix_fmt="yuv420p", color_space="bt709"), meta(pix_fmt="yuv420p", color_space="smpte170m"),
+                               png, meta(pix_fmt="yuv420p10le", bt2020_or_hdr=True), meta(), None):
+                    self.assertEqual(_common.label_chain(tagged, None), "", tagged)
+            # an HDR line keeps its own tags, prores the source's: neither converts nor relabels a still
+            hdr = meta(pix_fmt="yuv420p10le", bt2020_or_hdr=True)
+            self.assertEqual(_common.rgb_chain_to_bt709(hdr), "")
+            self.assertEqual(_common.label_chain(meta(pix_fmt="yuv420p"), hdr), "")
+            _common.STATE.codec = "prores"
+            self.assertNotIn("-vf", _common.video_args(None, source=png))
+            self.assertEqual((_common.rgb_chain_to_bt709(None), _common.label_chain(meta(pix_fmt="yuv420p"), None)), ("", ""))
+        finally:
+            _common.STATE.codec, _common.STATE.hw = saved
+        fold = _common.fold_bt709_matrix
+        for conv in (rgb, "format=rgb24," + rgb):
+            enc = ["-c:v", "libx264", "-vf", conv, "out.mp4"]
+            self.assertEqual(fold(["ffmpeg", "-loop", "1", "-i", "a.png", "-vf", "scale=2:2"] + enc),
+                             ["ffmpeg", "-loop", "1", "-i", "a.png", "-vf", f"{conv},scale=2:2", "-c:v", "libx264", "out.mp4"])
+
     # ------------------------------------------------------------------ consistency: MCP and installer
     def test_mcp_tools_match_contract(self):
         """FFMPEG_SKILL_MCP_FULL=1 is the escape hatch back to the pre-1.18.3 behaviour: every
@@ -1812,13 +1866,65 @@ class ContractTests(unittest.TestCase):
                     commands = " ".join(json.loads(proc.stdout)["commands"])
                     self.assertEqual(commands.count(conv), expected, commands)
                     if src == self.src:
-                        self.assertNotIn("colorspace=", commands)
+                        # the source is not converted (overlay --image converts its logo, and labels
+                        # the untagged main BT.709 for the logo to meet: test_still_and_rgb_tools_plan...)
+                        self.assertNotIn("colorspace=ispace", commands)
+                        self.assertEqual(commands.count("setparams=colorspace=bt709"), 1 if "--image" in args else 0, commands)
         # the other way round: the BT.601 file as the second input is converted in its own chain
         for name, args in (("join", [self.camb, s601]), ("broll", [self.camb, "--insert", s601, "--at", "1", "--duration", "1"]),
                            ("overlay", [self.camb, "--video", s601])):
             with self.subTest(tool=name, second=True):
                 commands = " ".join(json.loads(tool(name, *args, "-o", self.out(f"bt601_2nd_{name}.mp4"), "--dry-run", "--json").stdout)["commands"])
                 self.assertEqual(commands.count(conv), 1, commands)
+
+    def test_still_and_rgb_tools_plan_the_bt709_conversion(self):
+        """#332's follow-ups, planned: an RGB source (a PNG still, a PNG sequence, a qtrle clip) and a
+        JPEG are converted to BT.709 by every tool that re-encodes them; a still composited over the
+        video (overlay --image) is converted at the end of its own chain, and an untagged main labelled
+        BT.709 for it; grid.py converts each cell by its own tags and labels an untagged cell only
+        beside a converted one. A grid of untagged/BT.709 clips plans exactly what it did."""
+        s601 = OUT / "c_source601.mp4"
+        if not s601.exists():
+            ffmpeg("-i", self.src, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-x264-params",
+                   "colorprim=smpte170m:transfer=smpte170m:colormatrix=smpte170m", "-c:a", "copy", s601)
+        s709 = OUT / "c_source709.mp4"
+        if not s709.exists():
+            ffmpeg("-i", self.src, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-x264-params",
+                   "colorprim=bt709:transfer=bt709:colormatrix=bt709", "-c:a", "copy", s709)
+        png, jpg, qtrle, seq = OUT / "c_still.png", OUT / "c_still.jpg", OUT / "c_rgb.mov", OUT / "c_seq"
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=160x90", "-frames:v", "1", "-pix_fmt", "rgb24", png)
+        ffmpeg("-i", png, "-pix_fmt", "yuvj420p", jpg)
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-t", "1", "-c:v", "qtrle", "-pix_fmt", "rgb24", qtrle)
+        seq.mkdir(exist_ok=True)
+        for i in range(3):
+            shutil.copyfile(png, seq / f"f_{i:04d}.png")
+        rgb, bt601 = "scale=out_color_matrix=bt709:out_range=tv,format=yuv444p", "colorspace=ispace=bt470bg:"
+        still = "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p"
+        label = "setparams=colorspace=bt709:range=tv"
+        cases = [  # (tool, args, the strings the plan holds, and how many times)
+            ("insert", [png, "--duration", "1"], {rgb: 1, bt601: 0, label: 0}),
+            ("insert", [jpg, "--duration", "1"], {rgb: 0, bt601: 1, label: 0}),
+            ("sequence", ["--dir", seq, "--pattern", "f_%04d.png"], {rgb: 1, label: 0}),
+            ("fit", [qtrle, "--width", "320", "--height", "180"], {rgb: 1, label: 0}),
+            ("export", [qtrle, "--preset", "x"], {rgb: 1, label: 0}),
+            ("overlay", [self.src, "--image", png], {still: 1, label: 1, rgb: 0}),
+            ("overlay", [self.src, "--image", jpg], {still: 1, label: 1, bt601: 0}),
+            ("overlay", [s709, "--image", self.logo], {still: 1, label: 0}),
+            ("overlay", [s601, "--image", self.logo], {still: 1, label: 0, "colorspace=ispace=smpte170m:": 1}),
+            ("overlay", [self.src, "--image", self.logo, "--codec", "prores"], {still: 0, label: 0}),
+            ("waveform", [self.src, "--image", png], {"scale=out_color_matrix=bt709:out_range=tv,format=yuv420p": 1}),
+            ("grid", [self.src, s601, "--cols", "2", "--rows", "1"], {"colorspace=ispace=smpte170m:": 1, label: 1}),
+            ("grid", [s601, self.src, png, s709, "--cols", "2", "--rows", "2"], {"colorspace=ispace=smpte170m:": 1, label: 1, rgb: 1}),
+            ("grid", [self.src, s709, "--cols", "2", "--rows", "1"], {"colorspace=": 0, "out_color_matrix": 0, "setparams": 0}),
+        ]
+        for n, (name, args, want) in enumerate(cases):
+            with self.subTest(tool=name, args=[Path(str(a)).name for a in args]):
+                ext = ".mov" if "prores" in args else ".mp4"
+                proc = tool(name, *args, "-o", self.out(f"rgbstill_{n}{ext}"), "--dry-run", "--json", check=False)
+                self.assertEqual(proc.returncode, 0, proc.stderr[-600:])
+                commands = " ".join(json.loads(proc.stdout)["commands"])
+                for s, count in want.items():
+                    self.assertEqual(commands.count(s), count, f"{s!r} in {commands}")
 
     def test_json_success_and_failure_shapes_and_exit_codes(self):
         doc = json.loads(tool("cut", self.wav, "--start", "1", "--end", "3", "-o", self.out("shape.wav"), "--json").stdout)

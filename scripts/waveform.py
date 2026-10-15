@@ -36,7 +36,7 @@ import sys
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, resolve as resolve_platform
 from _common import (add_common, apply_common, aac_args, default_output, die, emit, ffmpeg_base,
-                     info, load_brand, pad_filters, probe, run, STATE, validate_color, video_args, X264_PRESETS,
+                     info, load_brand, pad_filters, probe, rgb_chain_to_bt709, run, STATE, validate_color, video_args, X264_PRESETS,
                      fmt_secs, child_args, run_tool, measured_level_dbfs)
 from _common.emit import absorb_stage_hw
 
@@ -185,7 +185,9 @@ def main() -> int:
         graph = f"[1:v]{plate},format=rgba[plate];[0:a:{args.audio_stream}]{vf},format=rgba"
         if args.opacity < 1.0:
             graph += f",colorchannelmixer=aa={args.opacity:g}"
-        graph += f"[vis];[plate][vis]overlay=x=(W-w)/2:y={vis_y}:format=auto[v]"
+        # the composite is RGBA (the plate is): converted to the BT.709 the output is tagged with,
+        # not by the encoder's BT.601 default
+        graph += f"[vis];[plate][vis]overlay=x=(W-w)/2:y={vis_y}:format=auto{rgb_chain_to_bt709(None, 'yuv420p')}[v]"
         vf = graph
     else:
         # showwaves/showspectrum paint the visualization on a transparent-black canvas; composite

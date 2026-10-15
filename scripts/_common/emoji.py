@@ -286,12 +286,16 @@ def resolve_emoji_assets(flag: "Optional[str]" = None, project: "Optional[str]" 
 
 
 
-def emoji_filter_chain(plan, base_label, out_label, first_input=1):
+def emoji_filter_chain(plan, base_label, out_label, first_input=1, to_yuv="", base_chain=""):
     """(chains, inputs) that composite the planned PNGs on top of `base_label`.
 
     `inputs` is a list of argv fragments, each ending in the asset path, to be appended to the
     ffmpeg command in order (an overlay that fades needs `-loop 1` on its input so the still has
     a timeline the fade filter can move along; one that does not is a plain `-i`).
+    `to_yuv` ends each PNG's chain: the caller's rgb_chain_to_bt709(meta), so the RGBA asset is
+    converted to the BT.709 the output is tagged with instead of by overlay's BT.601 default;
+    `base_chain` (label_chain(meta, meta): an untagged source's BT.709 label) goes in front of
+    the first overlay, so 7.1+ does not convert the two pictures to one another.
     """
     overlays = plan.get("overlays") or []
     if not overlays:
@@ -329,11 +333,15 @@ def emoji_filter_chain(plan, base_label, out_label, first_input=1):
                 chain += f",fade=t=out:st={max(gstart, gend - fout):.3f}:d={fout:.3f}:alpha=1"
         else:
             inputs.append(["-i", asset])
+        chain += to_yuv
         if len(labels) > 1:
             chain += f",split={len(labels)}"
         chains.append(chain + "".join(f"[{l}]" for l in labels))
         pads[key] = labels
     cur = base_label
+    if base_chain:
+        chains.append(f"[{cur}]{base_chain}null[ebase]")
+        cur = "ebase"
     remaining = {key: list(v) for key, v in pads.items()}
     for j, o in enumerate(overlays):
         label = remaining[_key(o)].pop(0)
