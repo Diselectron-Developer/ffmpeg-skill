@@ -378,7 +378,11 @@ engine present. Whisper is never a dependency of this skill.
 `external:parakeet` is the same kind of optional capability for the same two flags:
 parakeet-mlx, or parakeet-cli with a `.gguf` model it can find. Either engine family
 satisfies `--transcribe`; `--engine auto` (the default, or `FFMPEG_SKILL_ASR_ENGINE`) runs
-Parakeet for English speech and Whisper for every other language. When no `--language` is given
+Parakeet for English speech and Whisper for every other language. `--model` (both tools) is the
+model; without it `FFMPEG_SKILL_ASR_MODEL` is this machine's default, else `base`. An explicit
+`--model` goes to whichever engine runs; a Parakeet model in the variable goes to the Parakeet
+engines only, and the Whisper engines keep `base`. `doctor` reports neither variable (it prints no
+environment values); the result's `transcription.model` names the model that ran. When no `--language` is given
 and no detector can name it, a Whisper engine that can run takes it (whisper.cpp is passed
 `-l auto`: its own default is English). Parakeet then runs only on English *assumed* -- when no
 Whisper engine is installed, or every one failed, or `--model` names an English-only Parakeet

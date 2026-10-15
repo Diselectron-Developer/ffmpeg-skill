@@ -28,6 +28,9 @@ WHISPER_ENGINES = ("whisper.cpp", "faster-whisper", "openai-whisper")
 ASR_ENGINES = PARAKEET_ENGINES + WHISPER_ENGINES
 ENGINE_CHOICES = ("auto",) + ASR_ENGINES
 ASR_ENGINE_ENV = "FFMPEG_SKILL_ASR_ENGINE"
+# This machine's default --model (#328); --model wins, and without either the model is "base".
+ASR_MODEL_ENV = "FFMPEG_SKILL_ASR_MODEL"
+DEFAULT_WHISPER_MODEL = "base"
 # whisper.cpp conditions every window on the text before it, and once a hallucinated line is in that
 # context it can repeat it to the end of the file (#318: one sentence ~300 times, ~7 minutes of speech
 # lost). -mc / --max-context 0 keeps no previous text. Given to the commands that write a transcript,
@@ -200,10 +203,11 @@ def write_srt(cues: List[Tuple[float, float, str]], path: str) -> None:
             fh.write(f"{i}\n{fmt_srt_time(s)} --> {fmt_srt_time(e)}\n{t}\n\n")
 
 
-def transcribe_result(video: str, out_srt: str, language: Optional[str], model: str, audio_stream: int = 0,
+def transcribe_result(video: str, out_srt: str, language: Optional[str], model: Optional[str], audio_stream: int = 0,
                       engine: Optional[str] = None) -> Transcription:
     """Optional local ASR bridge: the SRT written to `out_srt`, and a Transcription saying what
-    produced it. `engine` (else $FFMPEG_SKILL_ASR_ENGINE, else auto) picks the engine; auto tries
+    produced it. `model` (else $FFMPEG_SKILL_ASR_MODEL, else base: requested_model()) is the
+    model; `engine` (else $FFMPEG_SKILL_ASR_ENGINE, else auto) picks the engine; auto tries
     Parakeet (parakeet-mlx, parakeet.cpp) for English speech, then whisper-cli / main
     (whisper.cpp), faster-whisper (python), whisper (openai-whisper CLI). No engine installed ->
     clear error with install hints; the skill never depends on one."""
@@ -213,14 +217,16 @@ def transcribe_result(video: str, out_srt: str, language: Optional[str], model: 
     from _common import require_tool
     ffmpeg = require_tool("ffmpeg")
     wanted = requested_engine(engine)
+    model, parakeet_model = requested_model(model)
     tmpdir = tempfile.mkdtemp(prefix="ffskill_asr_")
     try:
-        return _transcribe_in(tmpdir, video, out_srt, language, model, audio_stream, ffmpeg, shutil, subprocess, wanted)
+        return _transcribe_in(tmpdir, video, out_srt, language, model, audio_stream, ffmpeg, shutil, subprocess, wanted,
+                              parakeet_model=parakeet_model)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def transcribe(video: str, out_srt: str, language: Optional[str], model: str, audio_stream: int = 0,
+def transcribe(video: str, out_srt: str, language: Optional[str], model: Optional[str], audio_stream: int = 0,
                engine: Optional[str] = None) -> List[Tuple[float, float, str]]:
     """transcribe_result()'s cues alone: the call shape caption.transcribe has always had. A caller
     that reports which engine ran (caption.py does) calls transcribe_result() instead."""
@@ -304,8 +310,12 @@ def _skipped_parakeet(route: "Route", language: Optional[str], language_flag: st
 
 
 def _transcribe_in(tmpdir: str, video: str, out_srt: str, language: Optional[str], model: str, audio_stream: int,
-                   ffmpeg: str, shutil, subprocess, wanted: str = "auto") -> Transcription:
+                   ffmpeg: str, shutil, subprocess, wanted: str = "auto",
+                   parakeet_model: Optional[str] = None) -> Transcription:
+    """`model` is what the Whisper engines run; the Parakeet engines are offered `parakeet_model`
+    (default `model`), which differs only for a Parakeet model from $FFMPEG_SKILL_ASR_MODEL."""
     from _common import run_analysis, STATE
+    pmodel = model if parakeet_model is None else parakeet_model
     language = engine_language(language)
     wav = os.path.join(tmpdir, "audio.wav")
     # A wav in our own temp dir: a measurement input for the engine, not a deliverable, so it
@@ -318,7 +328,7 @@ def _transcribe_in(tmpdir: str, video: str, out_srt: str, language: Optional[str
     tried: "List[Dict[str, str]]" = []
 
     def parakeet(engines: "List[str]", facts: Dict[str, Any]) -> Optional[Transcription]:
-        done = _parakeet_attempt(engines, facts, wanted, language, wav, tmpdir, model, shutil, subprocess, video, "--language",
+        done = _parakeet_attempt(engines, facts, wanted, language, wav, tmpdir, pmodel, shutil, subprocess, video, "--language",
                                  tried=tried)
         if not done:
             return None
@@ -328,13 +338,13 @@ def _transcribe_in(tmpdir: str, video: str, out_srt: str, language: Optional[str
         return run
 
     # 0. Parakeet (English), when auto-routing picks it or it was asked for by name
-    route = parakeet_route(wanted, language, wav, shutil, subprocess, model)
+    route = parakeet_route(wanted, language, wav, shutil, subprocess, pmodel, whisper_model=model)
     done = parakeet(route.first, route.facts)
     if done:
         return done
     tried.extend(_skipped_parakeet(route, language, "--language"))
     if wanted in PARAKEET_ENGINES:
-        die_engine_failed(wanted, video, tried, _parakeet_available(wanted, shutil, model))
+        die_engine_failed(wanted, video, tried, _parakeet_available(wanted, shutil, pmodel))
     facts = route.facts
     if route.first:
         # auto chose Parakeet and no Parakeet engine transcribed it: the routing says why Whisper ran
@@ -665,6 +675,25 @@ def requested_engine(engine: Optional[str]) -> str:
     return name
 
 
+def requested_model(model: Optional[str]) -> Tuple[str, str]:
+    """(the model the Whisper engines run, the model the Parakeet engines are offered): --model,
+    else $FFMPEG_SKILL_ASR_MODEL, else base.
+
+    --model is one call's choice and goes to whichever engine runs, as it always has. The
+    variable is this machine's default for every call, so it never hands an engine a model that
+    engine cannot load: a Parakeet model there (an mlx-community/parakeet-* repo or a .gguf) goes
+    to the Parakeet engines only, and the Whisper engines keep base. A Whisper name reaches the
+    Parakeet engines too, which pass over it for their own model, as they do for --model."""
+    if model:
+        return model, model
+    name = os.environ.get(ASR_MODEL_ENV, "").strip()
+    if not name:
+        return DEFAULT_WHISPER_MODEL, DEFAULT_WHISPER_MODEL
+    if _names_parakeet_model(name):
+        return DEFAULT_WHISPER_MODEL, name
+    return name, name
+
+
 def _is_english(language: Optional[str]) -> bool:
     # "eng" too: caption.py's --language is also the mux track tag, where ISO 639-2 is natural
     return (language or "").lower().split("-")[0].split("_")[0] in ("en", "eng", "english")
@@ -926,7 +955,7 @@ def _heard_nothing(text: str, key: str) -> bool:
     return isinstance(doc, dict) and doc.get(key) == []
 
 
-def transcribe_words(video: str, language: "Optional[str]" = None, model: str = "base",
+def transcribe_words(video: str, language: "Optional[str]" = None, model: "Optional[str]" = None,
                      audio_stream: int = 0, engine: "Optional[str]" = None) -> "Tuple[List[Dict[str, Any]], Optional[str]]":
     """transcribe_words_result()'s (words, engine) alone: the call shape this function has had
     since 1.17. A caller that reports which engine ran (silence.py does) calls
@@ -935,11 +964,12 @@ def transcribe_words(video: str, language: "Optional[str]" = None, model: str = 
     return run.words, run.engine
 
 
-def transcribe_words_result(video: str, language: "Optional[str]" = None, model: str = "base",
+def transcribe_words_result(video: str, language: "Optional[str]" = None, model: "Optional[str]" = None,
                             audio_stream: int = 0, engine: "Optional[str]" = None,
                             language_flag: str = "--filler-lang") -> Transcription:
     """[{word, start, end}, ...] from a local speech engine, as a Transcription naming the engine.
 
+    `model` (else $FFMPEG_SKILL_ASR_MODEL, else base: requested_model()) is the model and
     `engine` (else $FFMPEG_SKILL_ASR_ENGINE, else auto) picks it; auto tries Parakeet for English
     speech first (parakeet-mlx sub-word tokens merged into words, parakeet.cpp `--json` words),
     then drives whichever whisper is installed with ITS word-timestamp option -- whisper.cpp
@@ -957,7 +987,7 @@ def transcribe_words_result(video: str, language: "Optional[str]" = None, model:
     ffmpeg = require_tool("ffmpeg")
     wanted = requested_engine(engine)
     language = engine_language(language)
-    parakeet_model = None if model == "base" else model
+    model, parakeet_model = requested_model(model)
     tmpdir = _tempfile.mkdtemp(prefix="ffskill_asrw_")
     try:
         wav = os.path.join(tmpdir, "audio.wav")

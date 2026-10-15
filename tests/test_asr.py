@@ -260,8 +260,8 @@ class _BridgeHarness:
                  mock.patch.dict(sys.modules, {"faster_whisper": faster_whisper}),
                  # a host ggml model in ~/.cache/whisper.cpp must not change the model named below
                  mock.patch.object(asr, "_whisper_cpp_model", lambda m: m),
-                 mock.patch.dict(os.environ, dict({"PARAKEET_MODEL": "", "PARAKEET_CPP_MODEL": "", asr.ASR_ENGINE_ENV: ""},
-                                                  **(env or {})))]
+                 mock.patch.dict(os.environ, dict({"PARAKEET_MODEL": "", "PARAKEET_CPP_MODEL": "", asr.ASR_ENGINE_ENV: "",
+                                                   asr.ASR_MODEL_ENV: ""}, **(env or {})))]
         for p in stack:
             p.start()
         try:
@@ -721,6 +721,78 @@ class AutoRoutingFallbackTests(_SrtDir, _BridgeHarness, unittest.TestCase):
         self.assertNotIn("PARAKEET_OUTPUT_TEMPLATE", env)
 
 
+class ModelDefaultTests(_SrtDir, _BridgeHarness, unittest.TestCase):
+    """#328: caption.py --transcribe ran `base` unless every call passed --model, and silence.py
+    --filler --transcribe had no --model at all. $FFMPEG_SKILL_ASR_MODEL is this machine's default
+    for both; an explicit --model still wins."""
+
+    TURBO = {asr.ASR_MODEL_ENV: "large-v3-turbo"}
+    V3 = "mlx-community/parakeet-tdt-0.6b-v3"
+
+    @staticmethod
+    def _model(fake, exe="whisper-cli"):
+        argv = fake.ran(exe)[-1]
+        return argv[argv.index("-m" if exe == "whisper-cli" else "--model") + 1]
+
+    def _srt(self, model, env=None, engines=("whisper-cli",), language="en"):
+        fake = _FakeEngines(engines)
+        run = self._with([], lambda: asr.transcribe_result("talk.mp4", self.srt, language, model), fake=fake, env=env)
+        return run, fake
+
+    def _words(self, model, env=None, engines=("whisper-cli",), language="en"):
+        fake = _FakeEngines(engines)
+        run = self._with([], lambda: asr.transcribe_words_result("talk.mp4", language, model), fake=fake, env=env)
+        return run, fake
+
+    def test_precedence(self):
+        with mock.patch.dict(os.environ, {asr.ASR_MODEL_ENV: ""}):
+            self.assertEqual(asr.requested_model(None), ("base", "base"))
+            os.environ[asr.ASR_MODEL_ENV] = "  large-v3-turbo "
+            self.assertEqual(asr.requested_model(None), ("large-v3-turbo", "large-v3-turbo"))
+            self.assertEqual(asr.requested_model("small"), ("small", "small"))
+            # a Parakeet model in the variable is offered to Parakeet only; the Whisper engines keep base
+            os.environ[asr.ASR_MODEL_ENV] = self.V3
+            self.assertEqual(asr.requested_model(None), ("base", self.V3))
+            # --model is one call's choice and goes to whichever engine runs, as before
+            self.assertEqual(asr.requested_model(self.V3), (self.V3, self.V3))
+
+    def test_the_environment_reaches_both_transcripts(self):
+        for transcribe in (self._srt, self._words):
+            run, fake = transcribe(None, env=self.TURBO)
+            self.assertEqual((self._model(fake), run.facts["model"]), ("large-v3-turbo", "large-v3-turbo"))
+
+    def test_an_explicit_model_wins(self):
+        for transcribe in (self._srt, self._words):
+            run, fake = transcribe("small", env=self.TURBO)
+            self.assertEqual(self._model(fake), "small")
+
+    def test_unset_keeps_base(self):
+        for transcribe in (self._srt, self._words):
+            run, fake = transcribe(None)
+            self.assertEqual(self._model(fake), "base")
+
+    def test_a_whisper_model_in_the_environment_leaves_parakeet_routing_alone(self):
+        """English still goes to Parakeet, which runs its own model, not the Whisper name."""
+        for transcribe in (self._srt, self._words):
+            run, fake = transcribe(None, env=self.TURBO, engines=("parakeet-mlx", "whisper-cli"))
+            self.assertEqual((run.engine, run.facts["routing"]), ("parakeet-mlx", "auto: --language is English"))
+            self.assertEqual(self._model(fake, "parakeet-mlx"), asr.PARAKEET_MLX_DEFAULT_MODEL)
+            self.assertEqual(fake.ran("whisper-cli"), [])
+
+    def test_a_parakeet_model_in_the_environment_never_reaches_whisper(self):
+        """English runs the variable's Parakeet model; French, which auto gives to Whisper, runs base
+        rather than a Parakeet name no Whisper engine can load."""
+        env = {asr.ASR_MODEL_ENV: self.V3}
+        for transcribe in (self._srt, self._words):
+            run, fake = transcribe(None, env=env, engines=("parakeet-mlx", "whisper-cli"))
+            self.assertEqual((run.engine, run.facts["model"]), ("parakeet-mlx", self.V3))
+            run, fake = transcribe(None, env=env, engines=("parakeet-mlx", "whisper-cli"), language="fr")
+            self.assertEqual((run.engine, self._model(fake)), ("whisper.cpp", "base"))
+        # the same name given with --model still goes to Whisper as given, as in 2.8.6
+        run, fake = self._srt(self.V3, engines=("parakeet-mlx", "whisper-cli"), language="fr")
+        self.assertEqual(self._model(fake), self.V3)
+
+
 class InstallHintTests(unittest.TestCase):
     """Review of #305: parakeet-mlx fetches its default model from Hugging Face on first use. The
     hints say so, and say the audio stays on the machine, so "no cloud" stays a true sentence."""
@@ -1047,6 +1119,36 @@ class ParakeetEngineTests(MediaFixtures):
         self.assertEqual(fil["filler"]["source"], "parakeet:parakeet-mlx")
         self.assertEqual(fil["filler"]["transcription"]["routing"], asr.ROUTING_LAST_RESORT)
         self.assertEqual(len(_assumed(fil)), 1, fil.get("notes"))
+
+    def test_the_machine_model_reaches_caption_and_silence(self):
+        """#328 through the real parsers: $FFMPEG_SKILL_ASR_MODEL is the model when no --model is given,
+        silence.py's new --model beats it, and English still goes to Parakeet with Parakeet's model."""
+        d, home = self._with_whisper_cli(fail=False)
+        args = home / "whisper-args.json"
+        turbo = home / ".cache" / "whisper.cpp" / "ggml-large-v3-turbo.bin"
+        turbo.write_bytes(b"")
+        try:
+            env = self.env(PATH=str(d), HOME=str(home), FFMPEG_SKILL_ASR_MODEL="large-v3-turbo")
+            doc = json.loads(script("caption.py", self.src, "--transcribe", "--language", "fr", "--mode", "mux", "--json",
+                                    "-o", OUT / "pk_envmodel.mp4", env=env).stdout)
+            caption_args = json.loads(args.read_text())
+            fil = json.loads(script("silence.py", self.src, "--filler", "--transcribe", "--filler-lang", "fr",
+                                    "--filler-list", "--json", env=env).stdout)
+            filler_args = json.loads(args.read_text())
+            script("silence.py", self.src, "--filler", "--transcribe", "--filler-lang", "fr", "--model", "small",
+                   "--filler-list", "--json", env=env)
+            explicit_args = json.loads(args.read_text())
+            english = json.loads(script("caption.py", self.src, "--transcribe", "--language", "en", "--mode", "mux",
+                                        "--json", "-o", OUT / "pk_envmodel_en.mp4", env=env).stdout)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+            shutil.rmtree(home, ignore_errors=True)
+        for argv in (caption_args, filler_args):
+            self.assertEqual(argv[argv.index("-m") + 1], str(turbo), argv)
+        self.assertEqual((doc["transcription"]["model"], fil["filler"]["transcription"]["model"]), (str(turbo), str(turbo)))
+        self.assertEqual(explicit_args[explicit_args.index("-m") + 1], "small")
+        self.assertEqual((english["transcription"]["engine"], english["transcription"]["model"]),
+                         ("parakeet-mlx", asr.PARAKEET_MLX_DEFAULT_MODEL))
 
     def test_caption_another_language_skips_parakeet(self):
         """Parakeet is installed and auto passes it over for French: the refusal says that, not

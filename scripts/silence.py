@@ -127,7 +127,7 @@ def resolve_filler(args, meta):
         # cannot answer this question: a cue has a start and an end, a word does not.
         # The call's own result, not module state: engine, routing and notes belong to this run.
         asr_run = _asr.transcribe_words_result(args.input, args.filler_lang if args.filler_lang != "auto" else None,
-                                               engine=args.engine)
+                                               model=args.model, engine=args.engine)
         words, engine = asr_run.words, asr_run.engine
         transcription = dict(asr_run.facts)
         args._asr_notes = list(asr_run.notes)
@@ -277,6 +277,9 @@ def main() -> int:
     fil.add_argument("--engine", choices=_asr.ENGINE_CHOICES, default=None,
                      help="speech engine for --transcribe (default: $FFMPEG_SKILL_ASR_ENGINE, else auto = Parakeet "
                           "for English speech when installed, else whisper)")
+    fil.add_argument("--model", default=None,
+                     help="speech model for --transcribe, as caption.py's: a whisper model name/path (default: "
+                          "$FFMPEG_SKILL_ASR_MODEL, else base), or a Parakeet model for the Parakeet engines")
     fil.add_argument("--filler-list", action="store_true",
                      help="report what --filler would remove and write nothing")
     fil.add_argument("--max-cuts", type=int, default=400,
