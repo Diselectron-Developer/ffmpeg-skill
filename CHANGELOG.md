@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.10.2
+
+_Automated release: version and notes generated from pull requests merged since 2.10.1._
+
 ### Fixed
 
 - **An RGB picture, a JPEG still and every `grid.py` cell are converted to the BT.709 their output is tagged with.** 2.10.1 converted a BT.601-tagged video source; everything else was still made YUV by FFmpeg's own default, BT.601, under a BT.709 tag, so pure red came out (255,24,0) and pure green (0,216,0) to any player that honours the tag (mean ΔRGB 8.8, max 38.9 on FFmpeg 5.1.1, 6.1, 7.1 and 8.1). Now converted explicitly (`scale=out_color_matrix=bt709`): a PNG/JPEG still (`insert.py`), a PNG sequence (`sequence.py`), an RGB clip (qtrle, PNG-in-MOV) through any re-encode, the logo or image of `overlay.py --image` (and `render.py`'s image/logo layers: there the RGBA logo also made `overlay=format=auto` composite in RGB, so the *whole video* came back BT.601, 9.04 mean / 40.6 max ΔRGB on a BT.709 source with 6.1; it now composites in YUV and leaves the video's pixels alone), `waveform.py --image` (the audiogram template) and the emoji PNGs of `graphics.py`/`caption.py`; a palette PNG is expanded first (swscale converts a palette with fixed BT.601). `grid.py` converts each cell by its own tags: it relabelled them on 5.1/6.1, and on 7.1+ `xstack` converted the cells to one another's matrix. Where a converted picture meets an untagged one (an untagged main under a logo, an untagged grid cell beside a converted one), the untagged one is labelled BT.709 (`setparams`, tags only), because FFmpeg 7.1+ otherwise converts one to the other taking "unknown" as BT.601 (the untagged main shifted by 7.08 mean / 25 max ΔRGB on 7.1.1 and 8.1.3). After the fix every measured patch is within 1.6 of its colour (2.6 for a dithered palette PNG). An untagged or BT.709 video source re-encoded alone, and a grid of untagged/BT.709 clips, plan the commands they did.
+- fix(color): convert RGB pictures, JPEG stills and grid cells to BT.709 (#333)
 
 ## 2.10.1
 
