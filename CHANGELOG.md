@@ -8,9 +8,15 @@
 
 - **A `render.py` project can carry a video layer (#326).** An `overlays[]` entry takes `"video": "webcam.mp4"` as a fourth kind next to `logo`/`image`/`text`, mapped to `overlay.py --video` with the same `position`/`scale`/`opacity`/`start`/`end`/`margin`/`platform` keys, plus `"chromakey"`, `"chromakey_similarity"` and `"chromakey_blend"` for green-screen removal. The layer is composited in the overlays stage, after `fit`, so its size is relative to the delivered frame and a template's safe margins apply; `--cache` keys the stage on the layer file's content, `--dry-run` plans the `overlay.py` command, and `--export-timeline` names the layer under `not_exported`. Refused before the first stage (`kind: input`): `video` with another kind in the same entry, a `chromakey*` key without `video`, a similarity or blend without `chromakey`, and a layer file that does not exist. No existing key changes meaning; a project without `video` renders as before. Reported by [@rymalia](https://github.com/rymalia).
 
+## 2.8.7
+
+_Automated release: version and notes generated from pull requests merged since 2.8.6._
+
 ### Fixed
 
 - **`check.py`'s colour row reads the matrix tag.** It decided "untagged" from the primaries and transfer alone, so a file whose only colour tag is a BT.601 matrix (`smpte170m`/`bt470bg`, as some renderers write) passed as `untagged (players assume bt709)` although a player that honours the tag decodes it as BT.601. A non-BT.709 matrix is now a tag: the row is WARN, and so is a BT.709 primaries/transfer file with a BT.601 matrix. For a BT.601 matrix the fix no longer offers `color.py --retag bt709`, which only relabels the pixels (as every SDR re-encode here does); it says to re-export from the master as BT.709. A file tagged only with a BT.709 matrix still passes, worded `bt709 matrix, primaries/transfer untagged (players assume bt709)` instead of "untagged" (#325).
+- fix(check): read the matrix tag in the colour row (#329)
+- chore: expand package keywords and plugin description (#327)
 
 ## 2.8.6
 
