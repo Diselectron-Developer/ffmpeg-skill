@@ -1055,6 +1055,7 @@
    "max_cuts",
    "min_keep",
    "min_silence",
+   "model",
    "no_hw",
    "output",
    "overwrite",

@@ -1095,6 +1095,20 @@ not a new file format this tool would have to maintain.
   the run reads as "whisper.cpp found but failed" with the build's last output line and the next
   engine is tried (`engine_failed` when whisper.cpp was named). Reverse this if a measurement on other material shows `-mc 0` costing more than the
   loops it prevents. Test: `WhisperContextTests`.
+- **`FFMPEG_SKILL_ASR_MODEL` names a model for the engine that can load it; `--model` goes where it
+  is told.** The variable is this machine's default `--model` for `caption.py --transcribe` and
+  `silence.py --filler --transcribe` (#328). An explicit `--model` is one call's choice and goes to
+  whichever engine runs, as it did in 2.8.6. The variable applies to every call, including the
+  ones auto sends to Whisper for another language, so a Parakeet model there (an
+  `mlx-community/parakeet-*` repo or a `.gguf`) is offered to the Parakeet engines only and the
+  Whisper engines keep `base`; passed through as `--model` is, it would make every non-English
+  transcription on that machine fail on a model no Whisper engine loads. A Whisper name reaches the
+  Parakeet engines too, which pass over it for their own model, so it changes neither routing nor
+  Parakeet's model. The variable is not refused for a Parakeet name (`PARAKEET_MODEL` /
+  `PARAKEET_CPP_MODEL` remain the Parakeet engines' own setting, and `--model` beats them, so the
+  variable does too). `doctor` reports it no more than `FFMPEG_SKILL_ASR_ENGINE`: it prints no
+  environment values, and the result's `transcription.model` names the model that ran. Tests:
+  `ModelDefaultTests`, `test_the_machine_model_reaches_caption_and_silence`.
 
 ## Unreleased — cuts that say what they did
 

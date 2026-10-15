@@ -916,9 +916,10 @@ def main() -> int:
                           "(default: none, so no player burns in a language the viewer did not ask for)")
     src.add_argument("--offset", default="0", help="shift every cue by TIME (seconds, mm:ss, hh:mm:ss.ms or "
                                                     "hh:mm:ss:ff; a leading - shifts earlier); works for --text, --srt and --ass")
-    src.add_argument("--model", default="base",
-                     help="speech model for --transcribe: a whisper model name/path (default base), or a Parakeet "
-                          "model (an mlx-community/parakeet-* repo or a .gguf) for the Parakeet engines")
+    src.add_argument("--model", default=None,
+                     help="speech model for --transcribe: a whisper model name/path (default: $FFMPEG_SKILL_ASR_MODEL, "
+                          "else base), or a Parakeet model (an mlx-community/parakeet-* repo or a .gguf) for the "
+                          "Parakeet engines")
     src.add_argument("--engine", choices=ENGINE_CHOICES, default=None,
                      help="speech engine for --transcribe (default: $FFMPEG_SKILL_ASR_ENGINE, else auto = Parakeet "
                           "for English speech when installed, else whisper.cpp / faster-whisper / openai-whisper)")

@@ -558,7 +558,7 @@ silence.py INPUT [--threshold -35] [--min-silence 0.6] [--margin 0.15] [--min-ke
 silence.py INPUT --filler --words transcript.json [--filler-lang auto|en|ja|es|de|fr|pt|it]
            [--filler-words FILE] [--filler-extra W,W] [--filler-keep W,W] [--filler-pad 0.02]
            [--transcribe] [--engine auto|parakeet-mlx|parakeet.cpp|whisper.cpp|faster-whisper|openai-whisper]
-           [--filler-list] [--max-cuts 400]
+           [--model MODEL] [--filler-list] [--max-cuts 400]
 ```
 Runs `silencedetect`, keeps `--margin` seconds of air around speech, drops
 gaps shorter than `--min-silence`, and re-encodes once with `select`/`aselect`
@@ -1042,12 +1042,14 @@ missing one is `kind: missing_tool`; an installed one that fails is `kind: input
 engine_failed`, with its own error line in `detail`). Without a language whisper.cpp is passed
 `-l auto` (its own default is English), else the named or detected language, and `-mc 0` (no
 previous-text context, so one hallucinated line is not repeated to the end of the file; #318). `--model` is the
-whisper model; a Parakeet engine takes it only when it names a Parakeet model
+whisper model (default `FFMPEG_SKILL_ASR_MODEL`, this machine's default, else `base`); a Parakeet engine takes it only when it names a Parakeet model
 (`mlx-community/parakeet-*` or a `.gguf`), else `PARAKEET_MODEL` / `PARAKEET_CPP_MODEL`, else the
-English `tdt-0.6b-v2`. A non-English `--language` on an English-only Parakeet model is refused; a
+English `tdt-0.6b-v2`. A Parakeet model in `FFMPEG_SKILL_ASR_MODEL` goes to the Parakeet engines
+only (the Whisper engines keep `base`); one given with `--model` goes to whichever engine runs.
+A non-English `--language` on an English-only Parakeet model is refused; a
 multilingual (v3) model assumes no language, so it gets no English-assumed note. The result's
 `transcription` names the engine, model and routing. `silence.py --filler --transcribe` takes
-the same `--engine`.
+the same `--engine` and `--model`.
 Nothing is required: without an engine it prints install hints and the user can supply `--text`
 cues instead. When engines are installed but none transcribed, the refusal names each and why
 instead (`reason: engine_failed`, or `english_only` for a Parakeet engine auto passed over for

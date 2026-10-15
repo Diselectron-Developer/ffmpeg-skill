@@ -34,10 +34,11 @@ from _common.runner import HW_ENV, HW_FORCED_ENV  # noqa: E402
 for _k in (HW_ENV, HW_FORCED_ENV):
     os.environ.pop(_k, None)
 
-# The host's own speech defaults must not reach the suite either: FFMPEG_SKILL_ASR_ENGINE or a
-# PARAKEET_* setting would change which speech engine a --transcribe test drives, or where
-# parakeet-mlx writes. Tests that exercise those opt in with an explicit env.
-for _k in ("FFMPEG_SKILL_ASR_ENGINE", "PARAKEET_MODEL", "PARAKEET_CPP_MODEL", "PARAKEET_OUTPUT_TEMPLATE"):
+# The host's own speech defaults must not reach the suite either: FFMPEG_SKILL_ASR_ENGINE,
+# FFMPEG_SKILL_ASR_MODEL or a PARAKEET_* setting would change which speech engine or model a
+# --transcribe test drives, or where parakeet-mlx writes. Tests that exercise those opt in with an
+# explicit env.
+for _k in ("FFMPEG_SKILL_ASR_ENGINE", "FFMPEG_SKILL_ASR_MODEL", "PARAKEET_MODEL", "PARAKEET_CPP_MODEL", "PARAKEET_OUTPUT_TEMPLATE"):
     os.environ.pop(_k, None)
 import _common  # noqa: E402
 import server as mcp_server  # noqa: E402
