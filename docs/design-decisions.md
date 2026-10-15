@@ -115,6 +115,12 @@ exists. When a decision changes, edit the entry in the same PR.
   is a deliverable, keep the HDR (10-bit HEVC) path. Test: `test_grid_composites_cols_rows_with_labels`.
 - **`look.py -o` is used verbatim only for a single `--at` with an image extension**; several frames,
   or `-o` given as a stem, produce `<stem>_<t>s.png` names. Test: `test_hdr_source_stays_hdr_through_reencodes`.
+- **`check.py`'s colour row WARNs on a BT.601 matrix without naming a command.** The matrix is a
+  tag (#325): a file tagged only `smpte170m`/`bt470bg` is BT.601, not "untagged". No tool here
+  converts the matrix -- `color.py --retag bt709`, and every SDR re-encode (`bt709_tag_args`), only
+  relabels it, which shifts the colours of BT.601 pixels -- so the fix says to re-export from the
+  master as BT.709. Untagged 8-bit video, or a BT.709 matrix alone, still passes: players assume
+  BT.709. Code: `check.py`, the colour row. Test: `test_check_colour_row_reads_the_matrix_tag`.
 - **`--correct` converts through bt601 on both legs** (not bt709), because on every tested
   FFmpeg the 709 round trip through 8-bit 4:2:0 loses ~5 dB more than 601. Code:
   `color.py _rgb_stage()`. Test: `test_color_correct_identity_holds_on_a_bt709_tagged_source`.
