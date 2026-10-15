@@ -202,7 +202,7 @@ def main() -> int:
                      "run color.py --to-sdr first for the SDR look")
             vf.append(pad_filters(out_w, out_h, "blur", args.pad_color, args.pad_blur, darken))
         else:
-            vf.append(pad_filters(out_w, out_h, args.pad_fill, args.pad_color, args.pad_blur))
+            vf.append(pad_filters(out_w, out_h, args.pad_fill, args.pad_color, args.pad_blur, meta=meta))
         vf.append("setsar=1")
 
     if args.fps:

@@ -16,7 +16,7 @@ Examples:
 import argparse
 import sys
 
-from _common import add_common, apply_common, aac_args, cfr_args, default_output, die, emit, ffmpeg_base, info, probe, run_keeping_subtitles, validate_color, video_args, X264_PRESETS, time_arg, fmt_secs, run
+from _common import add_common, apply_common, aac_args, cfr_args, default_output, die, drawn_chain, emit, ffmpeg_base, info, probe, run_keeping_subtitles, validate_color, video_args, X264_PRESETS, time_arg, fmt_secs, run
 
 
 def main() -> int:
@@ -46,7 +46,10 @@ def main() -> int:
     has_audio = bool(meta.get("audio"))
     output = args.output or default_output(args.input, "pad")
 
-    vf = f"tpad=start_duration={args.start:.3f}:stop_duration={args.end:.3f}:color={args.color}"
+    tpad = f"tpad=start_duration={args.start:.3f}:stop_duration={args.end:.3f}:color="
+    # a --color with chroma lands in the BT.709 the output is tagged with (tpad's own YUV is BT.601
+    # before FFmpeg 7.1, and for an untagged picture after it); black is the same under every matrix
+    vf = drawn_chain(tpad + args.color, meta, [args.color], tpad + "black")
     cmd = ffmpeg_base() + ["-i", args.input, "-vf", vf, "-map", "0:v:0"]
     if has_audio:
         af = f"adelay={int(args.start * 1000)}:all=1,apad=pad_dur={args.end:.3f}"

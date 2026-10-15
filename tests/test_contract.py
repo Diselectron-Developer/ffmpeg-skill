@@ -1866,10 +1866,12 @@ class ContractTests(unittest.TestCase):
                     commands = " ".join(json.loads(proc.stdout)["commands"])
                     self.assertEqual(commands.count(conv), expected, commands)
                     if src == self.src:
-                        # the source is not converted (overlay --image converts its logo, and labels
-                        # the untagged main BT.709 for the logo to meet: test_still_and_rgb_tools_plan...)
+                        # the source is not converted (overlay --image converts its logo, and the title
+                        # its brand-yellow accent line, and each labels the untagged main BT.709 for it
+                        # to meet: test_still_and_rgb_tools_plan..., test_drawn_colours_plan...)
                         self.assertNotIn("colorspace=ispace", commands)
-                        self.assertEqual(commands.count("setparams=colorspace=bt709"), 1 if "--image" in args else 0, commands)
+                        self.assertEqual(commands.count("setparams=colorspace=bt709"),
+                                         1 if "--image" in args or name == "graphics" else 0, commands)
         # the other way round: the BT.601 file as the second input is converted in its own chain
         for name, args in (("join", [self.camb, s601]), ("broll", [self.camb, "--insert", s601, "--at", "1", "--duration", "1"]),
                            ("overlay", [self.camb, "--video", s601])):
@@ -1925,6 +1927,101 @@ class ContractTests(unittest.TestCase):
                 commands = " ".join(json.loads(proc.stdout)["commands"])
                 for s, count in want.items():
                     self.assertEqual(commands.count(s), count, f"{s!r} in {commands}")
+
+    def test_drawn_colours_are_drawn_in_bt709(self):
+        """A colour the skill draws (pad, tpad, rotate fill, drawtext, libass) was turned into YUV by
+        the drawing filter itself: with BT.601 on 5.1-7.0 whatever the picture is tagged, with the
+        link's colourspace from 7.1 on ("unknown" = BT.601). drawn_chain() labels an untagged picture
+        BT.709 on 7.1+ (tags only) and draws in RGB on an older build, keeping the untouched pixels
+        (rgb_island). A grey -- the same 8-bit YUV under either matrix -- a prores line and an HDR
+        line change nothing. Pinned with the version forced."""
+        n = _common.is_neutral_color
+        for c in ("black", "white", "gray", "Silver", "0x808080", "#FFFFFF", "000000", "black@0.5", "0x101418"):
+            self.assertTrue(n(c), c)
+        for c in ("red", "lime", "random", "0xFF0000", "#2878C8", "FFD200", "0x00FF00@0.3", "0x1E6F8E", "nonsense"):
+            self.assertFalse(n(c), c)
+
+        def meta(**v):
+            return {"file": "src", "video": dict({"bt2020_or_hdr": False, "pix_fmt": "yuv420p"}, **v)}
+        pad, black = "pad=8:8:0:0:color=red", "pad=8:8:0:0:color=black"
+        un, t709, rgb = meta(), meta(color_space="bt709"), meta(pix_fmt="rgb24", color_space="gbr")
+        full, hdr = meta(pix_fmt="yuvj420p", color_range="pc"), meta(pix_fmt="yuv420p10le", bt2020_or_hdr=True)
+        dc = _common.drawn_chain
+        saved = (_common._FFMPEG_VERSION, _common.STATE.codec)
+        try:
+            for version in ((7, 1), (8, 1)):
+                _common._FFMPEG_VERSION = version
+                self.assertEqual(dc(pad, un, ["red"], black), "setparams=colorspace=bt709:range=tv," + pad, version)
+                self.assertEqual(dc(pad, full, ["red"], black), "setparams=colorspace=bt709," + pad, version)
+                for m in (t709, rgb, meta(color_space="smpte170m")):  # a tagged or converted link is followed already
+                    self.assertEqual(dc(pad, m, ["red"], black), pad, (version, m))
+                self.assertEqual(dc(pad, un, ["red"], black, labelled=True), pad)
+            for version in ((5, 1), (6, 1), (7, 0), (0, 0)):
+                _common._FFMPEG_VERSION = version
+                for m, fmt, rng in ((un, "yuv420p", "tv"), (t709, "yuv420p", "tv"), (rgb, "yuv444p", "tv"), (full, "yuvj420p", "pc")):
+                    island = dc(pad, m, ["red"], black)
+                    self.assertEqual(island, _common.rgb_island(pad, black, fmt, rng == "pc", "d"))
+                    self.assertTrue(island.startswith(f"split=3[_dp][_dc][_dn];[_dp]format={fmt},{black}[_dp1];"), island)
+                    self.assertIn(f"[_dc]scale=in_color_matrix=bt709:in_range={rng},format=rgb24,{pad},"
+                                  f"scale=out_color_matrix=bt709:out_range={rng},format={fmt},split[_dc1][_dc2];", island)
+                    self.assertIn(f"[_dn]scale=in_color_matrix=bt709:in_range={rng},format=rgb24,{black},", island)
+                    self.assertTrue(island.endswith("blend=all_mode=difference,lut=c0='255*gt(val,0)':c1='255*gt(val,0)':"
+                                                    "c2='255*gt(val,0)'[_dm];[_dp1][_dc2][_dm]maskedmerge"), island)
+                self.assertEqual(dc("drawtext=x=1", un, ["red"], tag="t7"),
+                                 _common.rgb_island("drawtext=x=1", "null", "yuv420p", False, "t7"))
+            for version in ((6, 1), (8, 1)):
+                _common._FFMPEG_VERSION = version
+                self.assertEqual(dc(pad, un, ["black", "white@0.5", "0x808080", None], black), pad)  # greys
+                self.assertEqual(dc(pad, hdr, ["red"], black), pad)  # an HDR line keeps its own tags
+                self.assertEqual(dc(pad, un, ["red"], black, line_meta=hdr), pad)
+                _common.STATE.codec = "prores"  # prores keeps the source's
+                self.assertEqual(dc(pad, un, ["red"], black), pad)
+                _common.STATE.codec = None
+        finally:
+            _common._FFMPEG_VERSION, _common.STATE.codec = saved
+
+        # every tool that draws a colour, planned on this build: a colour with chroma takes the label
+        # (7.1+) or the RGB island (older), once per picture it is drawn on; the default greys plan
+        # neither. join/broll/grid label every untagged input on any build (the label changes nothing
+        # before 7.1). background.py and waveform.py make their colours in RGB and convert them.
+        modern = _common.ffmpeg_version() >= (7, 1)
+        conv = "scale=out_color_matrix=bt709:out_range=tv"
+        cases = [  # (tool, args, labels on 7.1+, (islands, labels) before 7.1, conversions)
+            ("fit", [self.src, "--width", "320", "--height", "320", "--pad-color", "red"], 1, (1, 0), 0),
+            ("fit", [self.src, "--width", "320", "--height", "320"], 0, (0, 0), 0),
+            ("export", [self.src, "--preset", "reels", "--pad-color", "0x2878C8"], 1, (1, 0), 0),
+            ("export", [self.src, "--preset", "gif", "--pad-color", "red"], 0, (0, 0), 0),  # palettegen reads BT.601 back
+            ("pad", [self.src, "--start", "1", "--color", "red"], 1, (1, 0), 0),
+            ("pad", [self.src, "--start", "1", "--color", "0x101010"], 0, (0, 0), 0),
+            ("straighten", [self.src, "--degrees", "2", "--fit", "pad", "--fill-color", "0x00FF00"], 1, (1, 0), 0),
+            ("overlay", [self.src, "--text", "hi", "--font-color", "yellow"], 1, (1, 0), 0),
+            ("overlay", [self.src, "--text", "hi", "--box", "--box-color", "0x2878C8@0.5"], 1, (1, 0), 0),
+            ("overlay", [self.src, "--text", "hi", "--box"], 0, (0, 0), 0),
+            ("caption", [self.src, "--text", self.cues, "--color", "FF0000"], 1, (1, 0), 0),
+            ("caption", [self.src, "--text", self.cues], 0, (0, 0), 0),
+            ("join", [self.src, self.camb, "--pad-color", "red"], 2, (2, 2), 0),
+            ("join", [self.src, self.camb], 0, (0, 0), 0),
+            ("broll", [self.src, "--insert", self.camb, "--at", "1", "--duration", "1", "--pad-color", "red"], 2, (1, 2), 0),
+            ("grid", [self.src, self.camb, "--cols", "2", "--rows", "1", "--background", "red", "--gap", "8"], 2, (2, 2), 0),
+            ("grid", [self.src, self.camb, "--cols", "2", "--rows", "1", "--gap", "8"], 0, (0, 0), 0),
+            ("graphics", [self.src, "--template", "chapter", "--title", "T"], 1, (1, 0), 0),  # the brand-yellow chip
+            ("graphics", [self.src, "--template", "meme", "--top", "T"], 0, (0, 0), 0),
+            ("background", ["--duration", "1", "--width", "64", "--height", "64", "--color", "red"], 0, (0, 0), 1),
+            ("background", ["--duration", "1", "--width", "64", "--height", "64"], 0, (0, 0), 0),
+            ("waveform", [self.src], 0, (0, 0), 2),  # lime waves: the background and the waves
+            ("waveform", [self.src, "--color", "white"], 0, (0, 0), 0),
+        ]
+        for k, (name, args, labels, (islands, old_labels), convs) in enumerate(cases):
+            with self.subTest(tool=name, args=[Path(str(a)).name for a in args]):
+                ext = ".gif" if "gif" in args else ".mp4"
+                proc = tool(name, *args, "-o", self.out(f"drawn_{k}{ext}"), "--dry-run", "--json", check=False)
+                self.assertEqual(proc.returncode, 0, proc.stderr[-600:])
+                commands = " ".join(json.loads(proc.stdout)["commands"])
+                if modern:
+                    islands, old_labels = 0, labels
+                self.assertEqual(commands.count("maskedmerge"), islands, commands)
+                self.assertEqual(commands.count("setparams=colorspace=bt709"), old_labels, commands)
+                self.assertEqual(commands.count(conv) - 2 * islands, convs, commands)  # an island converts twice
 
     def test_json_success_and_failure_shapes_and_exit_codes(self):
         doc = json.loads(tool("cut", self.wav, "--start", "1", "--end", "3", "-o", self.out("shape.wav"), "--json").stdout)

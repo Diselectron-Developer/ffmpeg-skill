@@ -25,7 +25,7 @@ import sys
 from typing import List, Optional
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
-from _common import STATE, script_font_for_text, drawtext_text_opts, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
+from _common import STATE, script_font_for_text, drawtext_text_opts, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, drawn_chain, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
 
 # Per-edge margins: a platform's UI does not cover the same fraction of every edge (TikTok's
 # like column is 14 % of the width, its description block 22 % of the height), so a position
@@ -304,9 +304,13 @@ def main() -> int:
         if enable:
             ov += f":enable='{enable}'"
         cmd = ffmpeg_base() + ["-i", args.input, "-i", args.video]
-        # both pictures converted by their own colour tags to the BT.709 the output is tagged with
-        base = matrix_chain(meta, meta)
-        fc = (f"[1:v]{matrix_chain(pip_meta, meta)}{','.join(chain)}[ov];"
+        # both pictures converted by their own colour tags to the BT.709 the output is tagged with;
+        # beside a converted one an untagged one gets its BT.709 label, tags only, so 7.1+'s
+        # overlay does not convert one to the other's "unknown" (BT.601) matrix
+        base, pip = matrix_chain(meta, meta), matrix_chain(pip_meta, meta)
+        if base or pip:
+            base, pip = base or label_chain(meta, meta), pip or label_chain(pip_meta, meta)
+        fc = (f"[1:v]{pip}{','.join(chain)}[ov];"
               + (f"[0:v]{base}null[base];[base]" if base else "[0:v]") + f"[ov]{ov}[out]")
         cmd += ["-filter_complex", fc, "-map", "[out]", "-map", f"0:a:{args.audio_stream}?"]
         if meta.get("duration"):
@@ -333,7 +337,9 @@ def main() -> int:
             opts += ["box=1", f"boxcolor={args.box_color}", "boxborderw=12"]
         if enable:
             opts.append(f"enable='{enable}'")
-        cmd += ["-vf", "drawtext=" + ":".join(opts), "-map", "0:v:0"]
+        # a font/border/box colour with chroma lands in the BT.709 the output is tagged with
+        colours = [args.font_color] + ([args.border_color] if args.border else []) + ([args.box_color] if args.box else [])
+        cmd += ["-vf", drawn_chain("drawtext=" + ":".join(opts), meta, colours), "-map", "0:v:0"]
         if meta.get("audio"):
             cmd += ["-map", f"0:a:{args.audio_stream}"]
 

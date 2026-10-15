@@ -26,7 +26,7 @@ import os
 import sys
 
 from _common import add_common, apply_common, aac_args, cfr_args, default_font_file, default_output, die, emit, X264_PRESETS, fmt_secs, \
-    escape_drawtext, escape_filter_path, ffmpeg_base, info, label_chain, matrix_chain, probe, run, validate_color, video_args
+    draws_chroma, drawn_chain, escape_drawtext, escape_filter_path, ffmpeg_base, info, label_chain, matrix_chain, probe, run, validate_color, video_args
 
 LABEL_MARGIN = 10
 
@@ -95,28 +95,39 @@ def main() -> int:
     # input): without it 5.1/6.1 relabelled them, and 7.1+ converted cells to one another's matrix.
     # Beside a converted cell an untagged one gets a BT.709 label, so 7.1+'s xstack has nothing to
     # convert; a grid of untagged/BT.709 clips is what it was.
+    # A --background or --font-color with chroma is drawn in the BT.709 the grid is tagged with
+    # (drawn_chain): every untagged cell is labelled for it too, and the gaps are each cell's own
+    # pad instead of xstack's fill, which 5.1/6.1 draw in BT.601 (a grey needs neither).
+    colours = [args.background] + ([args.font_color] if args.label == "auto" else [])
+    chroma = draws_chroma(colours, None)
     convert = [matrix_chain(m, None) for m in metas]
-    if any(convert):
+    if any(convert) or chroma:
         convert = [c or label_chain(m, None) for c, m in zip(convert, metas)]
     parts = []
     for i, p in enumerate(args.inputs):
-        chain = [
-            f"fps={args.fps:g}",
-            f"scale={args.cell_width}:{args.cell_height}:force_original_aspect_ratio=decrease",
-            f"pad={args.cell_width}:{args.cell_height}:(ow-iw)/2:(oh-ih)/2:color={args.background}",
-            "setsar=1",
+        drawn = [  # (with this colour, with black)
+            (f"pad={args.cell_width}:{args.cell_height}:(ow-iw)/2:(oh-ih)/2:color={args.background}",
+             f"pad={args.cell_width}:{args.cell_height}:(ow-iw)/2:(oh-ih)/2:color=black"),
+            ("setsar=1",) * 2,
         ]
         if args.pad and durations[i] < target_duration:
-            chain.append(f"tpad=stop_mode=clone:stop_duration={target_duration - durations[i]:.3f}")
+            drawn.append((f"tpad=stop_mode=clone:stop_duration={target_duration - durations[i]:.3f}",) * 2)
         elif not args.pad:
-            chain.append(f"trim=duration={target_duration:.3f}")
+            drawn.append((f"trim=duration={target_duration:.3f}",) * 2)
         if args.label == "auto":
             stem = os.path.splitext(os.path.basename(p))[0]
             font_opt = f"fontfile={escape_filter_path(font_file)}" if font_file else f"font='{escape_drawtext(args.font)}'"
-            chain.append(f"drawtext=text='{escape_drawtext(stem)}':{font_opt}:fontsize={args.font_size}:"
-                         f"fontcolor={args.font_color}:x=w-tw-{LABEL_MARGIN}:y=h-th-{LABEL_MARGIN}:"
-                         f"box=1:boxcolor=black@0.5:boxborderw=4")
-        parts.append(f"[{i}:v]{convert[i]}{','.join(chain)}[v{i}]")
+            drawn.append((f"drawtext=text='{escape_drawtext(stem)}':{font_opt}:fontsize={args.font_size}:"
+                          f"fontcolor={args.font_color}:x=w-tw-{LABEL_MARGIN}:y=h-th-{LABEL_MARGIN}:"
+                          f"box=1:boxcolor=black@0.5:boxborderw=4", "null"))
+        gap_r = args.gap if i % args.cols < args.cols - 1 else 0
+        gap_b = args.gap if i // args.cols < args.rows - 1 else 0
+        if chroma and (gap_r or gap_b):
+            drawn.append((f"pad=iw+{gap_r}:ih+{gap_b}:0:0:color={args.background}", f"pad=iw+{gap_r}:ih+{gap_b}:0:0:color=black"))
+        chain = f"fps={args.fps:g},scale={args.cell_width}:{args.cell_height}:force_original_aspect_ratio=decrease,"
+        chain += drawn_chain(",".join(c for c, _n in drawn), metas[i], colours, ",".join(n for _c, n in drawn),
+                             line_meta=None, tag=f"c{i}", labelled=True)
+        parts.append(f"[{i}:v]{convert[i]}{chain}[v{i}]")
 
     cw, ch = args.cell_width + args.gap, args.cell_height + args.gap
     layout = "|".join(f"{c * cw}_{r * ch}" for r in range(args.rows) for c in range(args.cols))

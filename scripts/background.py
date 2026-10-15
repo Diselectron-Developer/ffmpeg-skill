@@ -14,7 +14,7 @@ import argparse
 import math
 import sys
 
-from _common import add_common, apply_common, die, emit, ffmpeg_base, info, parse_time, probe, run, validate_color, video_args, X264_PRESETS, time_arg, fmt_secs
+from _common import add_common, apply_common, die, draws_chroma, emit, ffmpeg_base, info, parse_time, probe, rgb_chain_to_bt709, run, validate_color, video_args, X264_PRESETS, time_arg, fmt_secs
 
 
 def main() -> int:
@@ -61,9 +61,16 @@ def main() -> int:
         # speed's own valid range bottoms out at 1e-05 (0 is refused), so that's the closest to
         # motionless the filter allows.
         src_filter = f"gradients=size={args.width}x{args.height}:rate={args.fps:g}:c0={c0}:c1={c1}:x0=0:y0=0:x1={x1}:y1={y1}:seed=0:speed=1e-05"
+        colours = [c0, c1]
     else:
         validate_color(args.color, "--color")
         src_filter = f"color=c={args.color}:size={args.width}x{args.height}:rate={args.fps:g}"
+        colours = [args.color]
+    if draws_chroma(colours, None):
+        # the colours are made in RGB and converted to the BT.709 the output is tagged with: left to
+        # the encoder line's own conversion (or `color`'s YUV), they were BT.601 under that tag
+        # (pure red decoded as (255,24,0)); a grey is the same under every matrix
+        src_filter += (",format=rgb24" if not args.gradient else "") + rgb_chain_to_bt709(None, "yuv420p")
 
     output = args.output
     cmd = ffmpeg_base() + ["-f", "lavfi", "-i", src_filter, "-t", f"{target:.3f}"]

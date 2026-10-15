@@ -225,7 +225,12 @@ source adds no filter, and the tags themselves never convert (`bt709_tag_args()`
 `waveform --image`) is converted to BT.709 YUV explicitly (`scale=out_color_matrix=bt709`; a JPEG is
 a `bt470bg` source); `grid.py` converts each cell by its own tags. Where a converted picture meets an
 untagged one in a mixing filter, the untagged one is labelled BT.709 (`setparams`, tags only), so
-FFmpeg 7.1+'s colourspace negotiation converts neither.
+FFmpeg 7.1+'s colourspace negotiation converts neither (`join`, `multicam`, `broll` and `overlay --video`
+too, beside a converted clip). A colour a tool draws from a hex or named value (a pad, `tpad` or
+`rotate` fill, `drawtext` and libass text and boxes, a `graphics.py` box or bar, `background.py`'s
+`color`/`gradients`, `waveform.py`'s plate and waves) lands in the same BT.709: from FFmpeg 7.1
+an untagged picture is labelled for the drawing filters, before 7.1 the drawing runs on an RGB copy
+and only the pixels it touched are taken from it (`_common.drawn_chain()`); a grey changes nothing.
 `cut.py --keep-hevc` (opt-in) re-encodes an SDR HEVC source as x265 8-bit BT.709 instead of x264; an HDR or
 BT.2020 source keeps the Main10 line with its own colour tags, with or without the flag. The
 encoder each value needs is listed under the tool's optional capabilities (`--codec hevc` and

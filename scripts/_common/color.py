@@ -123,6 +123,75 @@ def bt709_label_filter(meta: Optional[Dict[str, Any]]) -> Optional[str]:
     return "setparams=colorspace=bt709" + ("" if v.get("color_range") == "pc" else ":range=tv")
 
 
+# FFmpeg's named colours that are greys (libavutil/parseutils.c's table): R = G = B.
+_GREY_NAMES = frozenset(("black", "white", "gray", "grey", "silver", "darkgray", "darkgrey", "dimgray", "dimgrey",
+                         "gainsboro", "lightgray", "lightgrey", "whitesmoke"))
+
+
+def _yuv8(rgb: Sequence[int], kr: float, kb: float) -> "Tuple[int, int, int]":
+    """8-bit limited-range YUV of an RGB colour under the matrix (kr, kb), rounded as FFmpeg's
+    drawing code rounds it (ff_draw_color)."""
+    r, g, b = (c / 255 for c in rgb)
+    y = kr * r + (1 - kr - kb) * g + kb * b
+    return (int(16 + 219 * y + 0.5), int(128 + 224 * (b - y) / (2 * (1 - kb)) + 0.5),
+            int(128 + 224 * (r - y) / (2 * (1 - kr)) + 0.5))
+
+
+def is_neutral_color(value: Any) -> bool:
+    """True for a colour whose 8-bit YUV is the same under BT.601 and BT.709, however translucent: a
+    grey (R = G = B; black and white included), or one so near grey that both round to the same
+    bytes (graphics.py's default background 101418). Only another colour lands differently, so only
+    it needs drawn_chain(). A name counts only if it is one of FFmpeg's greys; anything else
+    (`red`, `random`) is not neutral."""
+    v = str(value or "").strip().split("@")[0].lower()
+    if v in _GREY_NAMES:
+        return True
+    v = v[1:] if v.startswith("#") else v[2:] if v.startswith("0x") else v
+    if re.fullmatch(r"[0-9a-f]{6}(?:[0-9a-f]{2})?", v):
+        rgb = (int(v[0:2], 16), int(v[2:4], 16), int(v[4:6], 16))
+        return _yuv8(rgb, 0.299, 0.114) == _yuv8(rgb, 0.2126, 0.0722)
+    return False
+
+
+def drawn_stream_format(meta: Optional[Dict[str, Any]]) -> "Tuple[str, bool]":
+    """(pix_fmt, full range) of the picture a tool draws on, for rgb_island(): the probed source's own
+    8-bit planar YUV format (an RGB source has become yuv444p, BT.709 limited, through
+    bt709_matrix_filter), or yuv420p for anything else (the format the encoder line takes it to)."""
+    v = (meta or {}).get("video") or {}
+    if is_rgb(meta):
+        return "yuv444p", False
+    pf = str(v.get("pix_fmt") or "yuv420p")
+    full = pf.startswith("yuvj") or v.get("color_range") == "pc"
+    if pf not in ("yuv420p", "yuv422p", "yuv444p", "yuvj420p", "yuvj422p", "yuvj444p"):
+        pf = "yuv420p"
+    return pf, full
+
+
+def rgb_island(colour_chain: str, neutral_chain: str = "null", pix_fmt: str = "yuv420p", full: bool = False,
+               tag: str = "d") -> str:
+    """`colour_chain` (filters that draw a colour: drawtext, pad, tpad, rotate's fill, libass) run on
+    an RGB copy of the picture, as one simple filtergraph (one input, one output; `tag` keeps its
+    labels unique in a bigger graph). For FFmpeg < 7.1, whose drawing filters turn every colour into
+    YUV with BT.601 whatever the picture is tagged (`ff_draw_init`), and drawbox on every version:
+    in RGB a colour is written as it is, and the copy goes back to YUV with BT.709.
+
+    Only the pixels the drawing touched come from that copy. The same round trip without the colour
+    (`neutral_chain`: `null`, or the same pad/tpad/rotate with a black fill, which is the same under
+    every matrix) is compared with it plane by plane, and maskedmerge takes the drawn copy where
+    the two differ and the untouched picture (`neutral_chain` on the YUV itself) everywhere else:
+    the RGB round trip is not lossless, so a picture that only passes through keeps its pixels."""
+    rng = "pc" if full else "tv"
+    to_rgb = f"scale=in_color_matrix=bt709:in_range={rng},format=rgb24"
+    to_yuv = f"scale=out_color_matrix=bt709:out_range={rng},format={pix_fmt}"
+    keep = "'255*gt(val,0)'"
+    t = f"_{tag}"
+    return (f"split=3[{t}p][{t}c][{t}n];[{t}p]format={pix_fmt},{neutral_chain}[{t}p1];"
+            f"[{t}c]{to_rgb},{colour_chain},{to_yuv},split[{t}c1][{t}c2];"
+            f"[{t}n]{to_rgb},{neutral_chain},{to_yuv}[{t}n1];"
+            f"[{t}c1][{t}n1]blend=all_mode=difference,lut=c0={keep}:c1={keep}:c2={keep}[{t}m];"
+            f"[{t}p1][{t}c2][{t}m]maskedmerge")
+
+
 def bt709_matrix_args(meta: Optional[Dict[str, Any]]) -> List[str]:
     """["-vf", bt709_matrix_filter(meta)] for an encoder line that tags its output BT.709, or [].
 

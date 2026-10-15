@@ -162,6 +162,11 @@ these had ever shown up before.
   before measuring (40 dB for re-matrixed pixels), and it then flagged the fixed, byte-clean
   output as 26 dB instead. The tests' `_psnr` helper now pins identical colour tags on both
   inputs so every build reports the same number for the same two files.
+- **A test fixture drawn with `scale=out_color_matrix=bt709` is not untagged on 7.1+.** The scale
+  labels its output and x264 writes that label, so an "untagged" clip made that way probes as
+  `color_space=bt709` on the trixie/macOS/Windows jobs and the untagged case silently went untested
+  there (#333's colour fixtures until 2.10.3). Relabel the frames `setparams=colorspace=unknown`
+  before the encode, and assert the probe says unknown.
 - **The conda-forge 7.1.1 build deadlocks on `tpad` + `adelay`/`apad` (pad.py) and ignores
   SIGTERM.** Debian's 7.1.5 in CI does not. Run pad tests against CI, not that build, and note
   that the tools have no subprocess timeout to get an agent out of such a hang.
