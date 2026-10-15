@@ -2223,6 +2223,93 @@ class PictureTests(MediaFixtures):
         self.assertEqual((OUT / "cap_mux_auto.srt").read_bytes(),
                          (OUT / "cap_mux_off.srt").read_bytes())
 
+
+class Bt601ConversionTests(unittest.TestCase):
+    """A BT.601-matrix source re-encoded here comes out tagged BT.709 *and* converted to it. Through
+    2.10.0 only the label changed: export.py --preset reels on a smpte170m clip wrote
+    bt709/bt709/bt709 over pixels 48.5 dB YUV PSNR from the source (untouched), so every player
+    that honours the tag showed shifted colours.
+
+    The pictures are compared in RGB, each decoded with the matrix it is tagged with (the source as
+    BT.601, the output as BT.709): a converted output matches its source there, a relabelled one
+    does not. Both sides' tags are pinned first, as in MediaFixtures._psnr, so no FFmpeg 7.1+
+    negotiation adds a conversion of its own."""
+
+    @classmethod
+    def setUpClass(cls):
+        encoders = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, text=True).stdout
+        if "libx264" not in encoders:
+            raise unittest.SkipTest("this ffmpeg build has no libx264")
+        OUT.mkdir(parents=True, exist_ok=True)
+        cls.clips = {}
+        for name, params, size in (("full601", "colorprim=smpte170m:transfer=smpte170m:colormatrix=smpte170m", "320x240"),
+                                   ("bt470bg", "colormatrix=bt470bg", "320x240"),
+                                   ("untagged", None, "320x240"),
+                                   ("bt709", "colorprim=bt709:transfer=bt709:colormatrix=bt709", "320x240"),
+                                   ("reels601", "colorprim=smpte170m:transfer=smpte170m:colormatrix=smpte170m", "1080x1920")):
+            path = OUT / f"matrix_{name}.mp4"
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc2=s={size}:r=30:d={1 if size == '1080x1920' else 2}",
+               "-f", "lavfi", "-i", "sine=sample_rate=48000:d=2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "8", "-pix_fmt", "yuv420p",
+               *(["-x264-params", params] if params else []), "-c:a", "aac", "-shortest", path)
+            cls.clips[name] = path
+
+    @staticmethod
+    def _rgb_psnr(a, a_matrix, b, b_matrix, seek=None):
+        """PSNR in RGB of b (decoded with b_matrix) against a (decoded with a_matrix), over b's frames;
+        `seek` = (start, length) of a that b holds."""
+        def leg(i, m):
+            tag = {"bt601": "smpte170m", "bt709": "bt709"}[m]
+            return (f"[{i}:v]setpts=N/FRAME_RATE/TB,setparams=colorspace={tag}:color_primaries=bt709:color_trc=bt709:range=tv,"
+                    f"scale=in_color_matrix={m}:in_range=tv:out_range=pc,format=gbrp[{'ab'[i]}]")
+        cut = ["-ss", str(seek[0]), "-t", str(seek[1])] if seek else []
+        proc = subprocess.run(["ffmpeg", "-hide_banner", *cut, "-i", str(a), "-i", str(b), "-lavfi",
+                               f"{leg(0, a_matrix)};{leg(1, b_matrix)};[a][b]psnr", "-f", "null", "-"],
+                              stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        m = re.search(r"average:(inf|[\d.]+)", proc.stderr)
+        assert m, proc.stderr[-400:]
+        return float("inf") if m.group(1) == "inf" else float(m.group(1))
+
+    def _runs(self, name):
+        """(tool, output, seek, result document) for fit.py and cut.py --accurate on clip `name`."""
+        src = self.clips[name]
+        for tool, args, seek in (("fit.py", ["--width", "320", "--height", "240", "--quality", "8"], None),
+                                 ("cut.py", ["--start", "0.5", "--end", "1.5", "--accurate", "--quality", "8"], (0.5, 1))):
+            out = OUT / f"matrix_{name}_{tool[:-3]}.mp4"
+            doc = json.loads(script(tool, src, *args, "--fast", "--json", "-o", out).stdout)
+            yield tool, out, seek, doc
+
+    def _assert_bt709_tags(self, out):
+        v = probe(str(out))["video"]
+        self.assertEqual((v["color_space"], v["color_primaries"], v["color_transfer"]), ("bt709", "bt709", "bt709"))
+
+    def test_a_bt601_source_is_converted_to_the_bt709_it_is_tagged_with(self):
+        # the issue's reproduction: export.py --preset reels on a 1080x1920 smpte170m clip
+        src = self.clips["reels601"]
+        out = OUT / "matrix_reels601_export.mp4"
+        doc = json.loads(script("export.py", src, "--preset", "reels", "--fast", "--crf", "8", "--json", "-o", out).stdout)
+        self.assertIn("colorspace=ispace=smpte170m", " ".join(doc["commands"]))
+        cases = [("export.py", out, None, src)] + [(t, o, s, self.clips[n]) for n in ("full601", "bt470bg") for t, o, s, _ in self._runs(n)]
+        for tool, out, seek, src in cases:
+            with self.subTest(tool=tool, source=src.name):
+                self._assert_bt709_tags(out)
+                converted = self._rgb_psnr(src, "bt601", out, "bt709", seek)
+                relabelled = self._rgb_psnr(src, "bt709", out, "bt709", seek)
+                # measured 42.2 dB converted (5.1.1, 6.1, a 7.1 snapshot); the 2.10.0 relabel was 24.8 dB
+                # here and 52 dB on the second comparison, which a converted picture can't reach
+                self.assertGreater(converted, 38.0, f"{tool}: the BT.709 output does not show the BT.601 source's colours")
+                self.assertLess(relabelled, 32.0, f"{tool}: the pixels were relabelled, not converted")
+
+    def test_an_untagged_or_bt709_source_is_not_converted(self):
+        """Untagged SDR is taken as BT.709 by players, and converting it is the 7.1 auto-conversion
+        bt709_tag_args() exists to avoid: no conversion is planned and the pixels stay the source's."""
+        for name in ("untagged", "bt709"):
+            for tool, out, seek, doc in self._runs(name):
+                with self.subTest(tool=tool, source=name):
+                    self.assertNotIn("colorspace=", " ".join(doc["commands"]))
+                    self._assert_bt709_tags(out)
+                    self.assertGreater(self._rgb_psnr(self.clips[name], "bt709", out, "bt709", seek), 45.0, tool)
+
+
 class ScriptFontTests(unittest.TestCase):
     """1.12: which script text is written in, and a font file that actually covers it."""
 

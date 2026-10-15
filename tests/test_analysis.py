@@ -312,9 +312,10 @@ class AnalysisTests(MediaFixtures):
                 if status == "PASS":
                     self.assertEqual((row["fix"], row["reason"]), ("", ""), row)
                 else:
-                    # every WARN here is a BT.601 matrix: nothing converts it, so --retag bt709 is not the fix
-                    self.assertTrue(row["fix"].startswith("re-export from the master as BT.709"), row)
-                    self.assertIn("only relabels", row["fix"])
+                    # every WARN here is a BT.601 matrix: a re-encode converts it (after 2.10.0), --retag bt709
+                    # only relabels it, so the fix names the conversion first
+                    self.assertTrue(row["fix"].startswith("export.py (any re-encode here converts the BT.601 matrix to BT.709)"), row)
+                    self.assertIn("--retag bt709 only relabels", row["fix"])
                     self.assertIn("BT.601", row["reason"])
 
     def test_check_default_rows_unchanged_without_content(self):

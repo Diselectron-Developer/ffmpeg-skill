@@ -39,7 +39,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from _common import STATE, AUDIO_MEDIA_EXT, video_args, aac_args, add_common, apply_common, audio_codec_for, default_output, die, dry_run_input_pending, emit, ffmpeg_base, info, measured_level_dbfs, is_audio_output, probe, require_tool, run, validate_color, X264_PRESETS, fmt_secs
+from _common import STATE, AUDIO_MEDIA_EXT, matrix_chain, video_args, aac_args, add_common, apply_common, audio_codec_for, default_output, die, dry_run_input_pending, emit, ffmpeg_base, info, measured_level_dbfs, is_audio_output, probe, require_tool, run, validate_color, X264_PRESETS, fmt_secs
 
 TRANSITIONS = ["fade", "dissolve", "wipeleft", "wiperight", "wipeup", "wipedown", "slideleft", "slideright",
                "circleopen", "circleclose", "fadeblack", "fadewhite", "smoothleft", "smoothright", "radial", "none"]
@@ -497,7 +497,8 @@ def main() -> int:
     if len(set(chans)) > 1:
         info(f"channel counts differ ({', '.join(str(c) for c in chans)}); every clip becomes {layout}")
     for i in range(n):
-        parts.append(f"[{i}:v]{geo},setsar=1,fps={fps:g},format={pixfmt},settb=AVTB[v{i}]")
+        # a BT.601 clip is converted to the BT.709 the join is tagged with, each clip by its own tags
+        parts.append(f"[{i}:v]{matrix_chain(metas[i], hdr_meta or metas[0])}{geo},setsar=1,fps={fps:g},format={pixfmt},settb=AVTB[v{i}]")
         parts.append(f"[{audio_src[i]}]aformat=sample_rates=48000:channel_layouts={layout},asetpts=PTS-STARTPTS[a{i}]")
 
     # pad the shorter stream to the clip's length: the audio with silence, the picture by holding
@@ -541,7 +542,7 @@ def main() -> int:
     # to meet the AAC tail (a 51-frame dissolve came out 52), which newer builds no longer do -- pass
     # the frames through as built, for a plain cut as much as for a transition
     cmd += ["-fps_mode", "passthrough"]
-    cmd += video_args(hdr_meta or metas[0], args.crf, args.preset) + aac_args() + [output]
+    cmd += video_args(hdr_meta or metas[0], args.crf, args.preset, convert_matrix=False) + aac_args() + [output]
     run(cmd)
     expected = unpending_length(lens, d)
     r = probe(output, role="output")

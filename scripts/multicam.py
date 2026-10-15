@@ -31,7 +31,7 @@ import math
 import sys
 from typing import Dict, List, Tuple
 
-from _common import video_args, aac_args, add_common, apply_common, default_output, die, emit, ffmpeg_base, info, time_arg, probe, run, x264_args, X264_PRESETS, fmt_secs, decode_pcm_mono, rms_envelope, STATE
+from _common import matrix_chain, video_args, aac_args, add_common, apply_common, default_output, die, emit, ffmpeg_base, info, time_arg, probe, run, x264_args, X264_PRESETS, fmt_secs, decode_pcm_mono, rms_envelope, STATE
 from sync import measure_offset
 
 ENERGY_WINDOW_S = 0.25  # --switch energy: loudness measured over this window on the reference timeline
@@ -276,7 +276,8 @@ def main() -> int:
         if src_s < 0:
             info(f"warning: camera {c} has not started at reference {s:.2f}s; using camera 0 for that range")
             c, src_s, src_e = 0, s, e
-        parts.append(f"[{c}:v]trim=start={src_s:.4f}:end={src_e:.4f},setpts=PTS-STARTPTS,{geo}[v{i}]")
+        # each camera converted by its own colour tags to the BT.709 the cut is tagged with
+        parts.append(f"[{c}:v]trim=start={src_s:.4f}:end={src_e:.4f},setpts=PTS-STARTPTS,{matrix_chain(metas[c], metas[0])}{geo}[v{i}]")
         labels.append(f"[v{i}]")
         project_clips.append({"src": args.inputs[c], "in": round(src_s, 3), "out": round(src_e, 3)})
     parts.append("".join(labels) + f"concat=n={len(filled)}:v=1:a=0[vout]")
@@ -297,7 +298,7 @@ def main() -> int:
 
     output = args.output or default_output(args.inputs[0], "multicam", "mp4")
     cmd += ["-filter_complex", ";".join(parts), "-map", "[vout]", "-map", "[aout]"]
-    cmd += video_args(metas[0], args.crf, args.preset) + aac_args() + ["-t", f"{ref_dur:.3f}", output]
+    cmd += video_args(metas[0], args.crf, args.preset, convert_matrix=False) + aac_args() + ["-t", f"{ref_dur:.3f}", output]
 
     if args.write_project:
         # Same cut decision as the combined render above (project_clips was built alongside the

@@ -8,7 +8,10 @@ detail, not an aside.
 ## Colour, HDR and Log
 
 ### HDR and colour
-SDR outputs are H.264 tagged BT.709 `yuv420p`. When `probe.py` reports
+SDR outputs are H.264 tagged BT.709 `yuv420p`. A source tagged with a BT.601 matrix
+(`smpte170m`, `bt470bg`; also `fcc`, `smpte240m`) has its pixels converted to that BT.709 matrix
+by every re-encode (through 2.10.0 only the label changed); `color.py --retag bt709` is a
+stream copy and still only relabels. Untagged sources are taken as BT.709 and left alone. When `probe.py` reports
 `bt2020_or_hdr: true` (HDR10/PQ, HLG, Dolby Vision, or BT.2020 SDR), every editing script keeps
 the output on the 10-bit path (HEVC Main10, source colour tags) so nothing is silently
 flattened. Decide with the user: keep HDR (fine for YouTube/phones) or run
