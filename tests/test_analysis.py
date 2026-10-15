@@ -286,6 +286,37 @@ class AnalysisTests(MediaFixtures):
         r = self._rows(mixed, "--content")
         self.assertEqual((r["black"]["status"], r["silence"]["status"]), ("WARN", "WARN"), r)
 
+    def test_check_colour_row_reads_the_matrix_tag(self):
+        """#325: the colour row decided "untagged" from primaries and transfer only, so a file whose
+        only tag is a BT.601 matrix passed as "untagged (players assume bt709)" while a tag-honouring
+        player decodes it as BT.601. The tags are x264 VUI parameters (a label, no conversion)."""
+        cases = {  # name: (x264 VUI params, status, value)
+            "matrix-only-601": ("colormatrix=smpte170m", "WARN", "smpte170m matrix, primaries/transfer untagged"),
+            "matrix-only-bt470bg": ("colormatrix=bt470bg", "WARN", "bt470bg matrix, primaries/transfer untagged"),
+            "full-601": ("colorprim=smpte170m:transfer=smpte170m:colormatrix=smpte170m", "WARN", "smpte170m/smpte170m"),
+            "709-601-matrix": ("colorprim=bt709:transfer=bt709:colormatrix=smpte170m", "WARN", "bt709/bt709, smpte170m matrix"),
+            "matrix-only-709": ("colormatrix=bt709", "PASS", "bt709 matrix, primaries/transfer untagged (players assume bt709)"),
+            "full-709": ("colorprim=bt709:transfer=bt709:colormatrix=bt709", "PASS", "bt709/bt709"),
+            "untagged": ("scenecut=0", "PASS", "untagged (players assume bt709)"),
+        }
+        for name, (params, status, value) in cases.items():
+            with self.subTest(name):
+                path = OUT / f"colour_{name}.mp4"
+                if not path.exists():
+                    sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10",
+                       "-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "1", "-pix_fmt", "yuv420p",
+                       "-c:v", "libx264", "-x264-params", params, "-c:a", "aac", "-shortest", path)
+                # the later --platform wins over _rows' custom, which passes any colour
+                row = self._rows(path, "--no-loudness", "--platform", "reels")["colour"]
+                self.assertEqual((row["status"], row["value"]), (status, value), row)
+                if status == "PASS":
+                    self.assertEqual((row["fix"], row["reason"]), ("", ""), row)
+                else:
+                    # every WARN here is a BT.601 matrix: nothing converts it, so --retag bt709 is not the fix
+                    self.assertTrue(row["fix"].startswith("re-export from the master as BT.709"), row)
+                    self.assertIn("only relabels", row["fix"])
+                    self.assertIn("BT.601", row["reason"])
+
     def test_check_default_rows_unchanged_without_content(self):
         clip = self._content_clip("content_black.mp4", "color=black:size=160x90:rate=10",
                                   "sine=frequency=440:sample_rate=48000")
