@@ -39,7 +39,7 @@ _NOT_EXPORTED = {
     "silence": "the silence cut (render.py measures it at render time; the timeline keeps the clips whole)",
     "captions": "captions (burn them with render.py, or import the .srt into the editor)",
     "graphics": "graphics (titles, lower thirds, social templates)",
-    "overlays": "overlays (logos and text)",
+    "overlays": "overlays (logos, images, text and video layers)",
     "fit": "fit / reframe to the delivery aspect (set the sequence frame in the editor)",
     "audiogram": "the audiogram picture",
     "loudness": "loudness normalisation",

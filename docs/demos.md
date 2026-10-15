@@ -646,6 +646,16 @@ python3 scripts/render.py demos/out/fixtures/project.json --export-timeline demo
 
 **Look for:** Clips, a transition, captions and a title card described as JSON and rendered in one pass.
 
+### A keyed video layer in a project
+
+![A keyed video layer in a project](demos/render_pip.gif)
+
+```bash
+python3 scripts/render.py demos/out/fixtures/project_pip.json --fast
+```
+
+**Look for:** The 16:9 master is reframed to 9:16 on a blurred background, then a green-screen clip is keyed and composited at the bottom. The overlays stage runs after fit, so "scale": 540 is the full width of the delivered frame.
+
 ### Contact sheet
 
 ![Contact sheet](demos/contact_sheet.gif)

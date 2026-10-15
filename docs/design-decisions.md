@@ -1439,3 +1439,23 @@ not a new file format this tool would have to maintain.
   measured frame timing rather than on the whole-file average; `keyframe_snapped` takes
   `start_snapped`'s meaning (the presented start moved) and `precision` takes
   `least_exact_precision`'s (the least exact segment).
+
+## Unreleased — a video layer in a project
+
+- **`overlays[]` refuses `video` beside another layer kind, and only that combination.** A video
+  layer is a fourth kind next to `logo`/`image`/`text`, as `overlay.py`'s `--logo`/`--image`/
+  `--text`/`--video` are one mutually exclusive choice. An entry with a logo, an image and text
+  together still draws the first of them (logo, then image, then text), as every release before
+  #326 did: refusing those too would refuse projects 2.8.6 rendered. Making every combination a
+  refusal is a separate change. Code: `render.check_overlay()`. Test:
+  `test_render_video_overlay_refusals_and_dry_run_plan`.
+- **`chromakey_similarity`/`chromakey_blend` without `chromakey` are refused in a project, though
+  `overlay.py` accepts the flags alone.** The tool ignores them silently there; a project key that
+  does nothing is what review 9 made a refusal (`OBJECT_KEYS`). A `chromakey*` key without
+  `video` is refused as `overlay.py --chromakey` without `--video` is. Code:
+  `render.check_overlay()`. Test: `test_render_video_overlay_refusals_and_dry_run_plan`.
+- **A missing layer file is refused before the first stage, under `--dry-run` too.** No earlier
+  stage writes an overlay video (it is the caller's file, like a clip source), so it is not a
+  pending intermediate and a plan for it is no plan. A missing `image` is unchanged: a dry run
+  still plans it and a real run fails in the overlays stage. Code: `render.main()`. Test:
+  `test_render_video_overlay_refusals_and_dry_run_plan`.

@@ -735,6 +735,23 @@ stem wins, and a stems level with no file to apply it to (`effects` without
 `"audio": {"voice": "light"|"medium"|"strong"}` picks the voice strength
 (`true` is `medium`).
 
+An `overlays[]` entry draws one of `"logo": true`, `"image"`, `"text"` or
+`"video"` (#326: a picture-in-picture or green-screen layer, `overlay.py
+--video`), with `position`, `scale`, `opacity`, `start`, `end`, `margin`,
+`platform` (and `fade`, `box`, `font*` for the still/text kinds) mapping to
+overlay.py's flags. `"chromakey": "0x00ff00"`, `"chromakey_similarity"` and
+`"chromakey_blend"` key a colour out of the video layer. The stage runs after
+`fit`, so `"scale": 480` is 480 px of the delivered frame, and a template's
+safe margins apply as they do to a logo. Refused (`kind: input`) before the
+first stage: `video` together with `logo`/`image`/`text` in one entry (a
+logo, image and text together still draw the first of them, as before), a
+`chromakey*` key without `video`, `chromakey_similarity`/`_blend` without
+`chromakey`, and a layer file that does not exist (under `--dry-run` too: no
+earlier stage writes it). The layer's content is in the stage's `--cache`
+key, so replacing the file re-runs `overlays` and what follows it; paths are
+relative to the project file; `--export-timeline` lists the layer under
+`not_exported`.
+
 `"chapters"` is a chapters file path, or an inline list of `{"at": TIME,
 "title": STR}`; it runs `metadata.py` on the delivered file as the last stage
 before `check`, so the markers are in the file that ships (streams copied). The
