@@ -8,6 +8,10 @@
 
 - **A per-machine speech model, and `--model` on `silence.py --filler --transcribe` (#328).** `FFMPEG_SKILL_ASR_MODEL` is the model `caption.py --transcribe` and `silence.py --filler --transcribe` use when no `--model` is given (else `base`, as before), so a machine with `ggml-large-v3-turbo.bin` no longer needs `--model` on every call, and filler timing is no longer stuck on `base`. An explicit `--model` still wins and still goes to whichever engine runs. A Parakeet model in the variable (an `mlx-community/parakeet-*` repo or a `.gguf`) is offered to the Parakeet engines only and the Whisper engines keep `base`, so a machine default never makes auto's Whisper route for another language fail on a model it cannot load; a Whisper name leaves Parakeet routing and Parakeet's own model as they were. The result's `transcription.model` names the model that ran. `caption.py --model` no longer advertises a `base` default in its schema (it is resolved at run time); `silence.py`'s MCP schema gains `model`.
 
+### Fixed
+
+- **`check.py`'s colour row reads the matrix tag.** It decided "untagged" from the primaries and transfer alone, so a file whose only colour tag is a BT.601 matrix (`smpte170m`/`bt470bg`, as some renderers write) passed as `untagged (players assume bt709)` although a player that honours the tag decodes it as BT.601. A non-BT.709 matrix is now a tag: the row is WARN, and so is a BT.709 primaries/transfer file with a BT.601 matrix. For a BT.601 matrix the fix no longer offers `color.py --retag bt709`, which only relabels the pixels (as every SDR re-encode here does); it says to re-export from the master as BT.709. A file tagged only with a BT.709 matrix still passes, worded `bt709 matrix, primaries/transfer untagged (players assume bt709)` instead of "untagged" (#325).
+
 ## 2.8.6
 
 _Automated release: version and notes generated from pull requests merged since 2.8.5._
