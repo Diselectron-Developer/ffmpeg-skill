@@ -353,7 +353,9 @@ def main() -> int:
         tag = "lut"
 
     cmd = ffmpeg_base() + ["-i", args.input, "-vf", vf, "-map", "0:v:0", "-map", f"0:a:{args.audio_stream}?"]
-    cmd += x264_args(args.crf, args.preset) + cfr_args(meta) + (aac_args() if has_audio else [])
+    # --lut/--correct grade the source's own pixels, so a BT.601 source is converted to the BT.709
+    # the line is tagged with; --to-sdr's zscale chain already writes BT.709 and converts nothing more
+    cmd += x264_args(args.crf, args.preset, source=None if args.to_sdr else meta) + cfr_args(meta) + (aac_args() if has_audio else [])
     dropped_streams = run_keeping_subtitles(cmd, output)
     r = probe(output, role="output")
     info(f"wrote {output} ({fmt_secs(r['duration'])}, {r['video']['width']}x{r['video']['height']}, "

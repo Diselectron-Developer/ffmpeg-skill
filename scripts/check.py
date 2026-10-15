@@ -175,10 +175,10 @@ def main() -> int:
                 # untagged 8-bit video is treated as BT.709 by every player and platform; nothing to fix
                 row("colour", "PASS", shown + " (players assume bt709)" if matrix else "untagged (players assume bt709)", "bt709/bt709 tagged (or HDR)")
             elif matrix in ("smpte170m", "bt470bg"):
-                # The pixels are BT.601-encoded. Nothing here converts the matrix: --retag bt709 and
-                # every SDR re-encode (bt709_tag_args) only relabel it, which shifts the colours.
+                # The pixels are BT.601-encoded. A re-encode here converts them to the BT.709 it tags
+                # (bt709_matrix_filter); --retag bt709 is a stream copy and only relabels the matrix.
                 row("colour", "WARN", shown, "bt709/bt709 tagged (or HDR)",
-                    "re-export from the master as BT.709; color.py --retag bt709 (like any re-encode here) only relabels the matrix: right only if the pixels really are BT.709",
+                    "export.py (any re-encode here converts the BT.601 matrix to BT.709); color.py --retag bt709 only relabels it: right only if the pixels really are BT.709",
                     reason="a player that honours the BT.601 tag and one that ignores it on HD video (decoding it as BT.709) show different colours")
             else:
                 row("colour", "WARN", shown, "bt709/bt709 tagged (or HDR)", "color.py --retag bt709 when the picture really is 709; color.py --to-sdr when it is HDR")

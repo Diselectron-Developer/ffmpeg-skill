@@ -1030,6 +1030,70 @@ class ContractTests(unittest.TestCase):
         finally:
             _common._FFMPEG_VERSION = saved
 
+    def test_bt601_matrix_conversion_rides_on_the_encoder_line(self):
+        """The BT.709 tags are a label (above); a source whose matrix is BT.601 also needs its pixels
+        converted, or it comes out BT.709-labelled over BT.601 pixels. The encoder line carries that
+        conversion as a -vf, from the source's probe only: an untagged, BT.709 or HDR source, prores
+        (which keeps the source's tags) and a tool that converts per input get nothing."""
+        def meta(**v):
+            return {"file": "src.mp4", "video": dict({"bt2020_or_hdr": False}, **v)}
+        conv = "colorspace=ispace={}:iprimaries=bt709:itrc=bt709:space=bt709:primaries=bt709:trc=bt709"
+        for matrix in ("smpte170m", "bt470bg", "fcc", "smpte240m"):
+            self.assertEqual(_common.bt709_matrix_filter(meta(color_space=matrix)), conv.format(matrix), matrix)
+        for m in (None, {}, meta(), meta(color_space="bt709"), meta(color_space="unknown"), meta(color_space="gbr"),
+                  meta(color_space="bt2020nc", bt2020_or_hdr=True), meta(color_space="smpte170m", bt2020_or_hdr=True)):
+            self.assertIsNone(_common.bt709_matrix_filter(m), m)
+        saved = (_common.STATE.codec, _common.STATE.hw)
+        try:
+            _common.STATE.hw = False
+            for codec in (None, "h264", "hevc"):
+                _common.STATE.codec = codec
+                line = _common.video_args(meta(color_space="smpte170m"))
+                self.assertEqual(line[-2:], ["-vf", conv.format("smpte170m")], codec)
+                self.assertNotIn("-vf", _common.video_args(meta(color_space="bt709")), codec)
+                self.assertNotIn("-vf", _common.video_args(meta()), codec)
+                self.assertNotIn("-vf", _common.video_args(meta(color_space="smpte170m"), convert_matrix=False), codec)
+                self.assertEqual(_common.x264_args(source=meta(color_space="bt470bg"))[-2:], ["-vf", conv.format("bt470bg")], codec)
+                self.assertNotIn("-vf", _common.x264_args(), codec)
+                self.assertEqual(_common.matrix_chain(meta(color_space="smpte170m"), meta()), conv.format("smpte170m") + ",")
+                self.assertEqual(_common.matrix_chain(meta(), meta()), "")
+            # an HDR line keeps its own tags: a BT.601 clip joined into it is not "converted to BT.709"
+            self.assertEqual(_common.matrix_chain(meta(color_space="smpte170m"), meta(bt2020_or_hdr=True)), "")
+            _common.STATE.codec = "prores"
+            self.assertNotIn("-vf", _common.video_args(meta(color_space="smpte170m")))
+            self.assertEqual(_common.matrix_chain(meta(color_space="smpte170m"), meta()), "")
+        finally:
+            _common.STATE.codec, _common.STATE.hw = saved
+
+    def test_fold_bt709_matrix_into_the_tools_graph(self):
+        """run() moves the encoder line's conversion -vf into the tool's own graph, first: with no
+        other filter it is the graph; a -vf gets it prepended; a -filter_complex reads every input
+        that opens input 0's file through it (once per input, split when read twice), other inputs
+        untouched. A command without it is returned as it was."""
+        conv = _common.bt709_matrix_filter({"video": {"color_space": "smpte170m"}})
+        fold = _common.fold_bt709_matrix
+        enc = ["-c:v", "libx264", "-crf", "18", "-vf", conv, "out.mp4"]
+        self.assertEqual(fold(["ffmpeg", "-i", "a.mp4"] + enc), ["ffmpeg", "-i", "a.mp4"] + enc)
+        self.assertEqual(fold(["ffmpeg", "-i", "a.mp4", "-vf", "scale=2:2,setsar=1"] + enc),
+                         ["ffmpeg", "-i", "a.mp4", "-vf", f"{conv},scale=2:2,setsar=1", "-c:v", "libx264", "-crf", "18", "out.mp4"])
+        # speedramp reads [0:v] once per segment; a logo (input 1) is not the source
+        got = fold(["ffmpeg", "-i", "a.mp4", "-i", "logo.png", "-filter_complex",
+                    "[0:v]trim=0:1[x];[0:v]trim=1:2[y];[1:v]scale=9:9[l];[x][y]concat[c];[c][l]overlay[out]", "-map", "[out]"] + enc)
+        self.assertEqual(got[got.index("-filter_complex") + 1],
+                         f"[0:v]{conv},split=2[bt709src0][bt709src1];"
+                         "[bt709src0]trim=0:1[x];[bt709src1]trim=1:2[y];[1:v]scale=9:9[l];[x][y]concat[c];[c][l]overlay[out]")
+        self.assertNotIn(conv, got[got.index("-filter_complex") + 2:])
+        # cut.py's segment join opens the source once per segment; join.py's second clip is another file
+        got = fold(["ffmpeg", "-ss", "1", "-i", "a.mp4", "-ss", "5", "-i", "a.mp4", "-i", "b.mp4", "-filter_complex",
+                    "[0:v:0]trim=0:1[v0];[1:v:0]trim=0:1[v1];[2:v]null[v2];[v0][v1][v2]concat=n=3[v]", "-map", "[v]"] + enc)
+        self.assertEqual(got[got.index("-filter_complex") + 1],
+                         f"[0:v:0]{conv}[bt709src0];[1:v:0]{conv}[bt709src1];"
+                         "[bt709src0]trim=0:1[v0];[bt709src1]trim=0:1[v1];[2:v]null[v2];[v0][v1][v2]concat=n=3[v]")
+        plain = ["ffmpeg", "-i", "a.mp4", "-vf", "scale=2:2", "-c:v", "libx264", "out.mp4"]
+        self.assertEqual(fold(plain), plain)
+        with self.assertRaises(SystemExit):
+            fold(["ffmpeg", "-i", "a.mp4", "-filter_complex", "color=red[v]", "-map", "[v]"] + enc)
+
     # ------------------------------------------------------------------ consistency: MCP and installer
     def test_mcp_tools_match_contract(self):
         """FFMPEG_SKILL_MCP_FULL=1 is the escape hatch back to the pre-1.18.3 behaviour: every
@@ -1710,6 +1774,51 @@ class ContractTests(unittest.TestCase):
         # the read-only tools keep working under --dry-run (ffprobe still runs)
         self.assertEqual(tool("probe", self.src, "--dry-run", env=env).returncode, 0)
         self.assertEqual(tool("check", self.src, "--platform", "x", "--no-loudness", "--dry-run", env=env).returncode, 0)
+
+    def test_every_reencoding_tool_plans_the_bt601_conversion(self):
+        """Through 2.10.0 a BT.601-matrix source came out of every SDR re-encode tagged BT.709 with its
+        pixels untouched. The conversion rides on the shared encoder line and run() folds it into each
+        tool's own graph, so this plans every tool that re-encodes one or several sources: on a
+        BT.601 source each input read from that file is converted once (cut's segment join opens it
+        once per segment), a mixed join/multicam/broll/overlay --video converts only the BT.601
+        input, and copies, the prores master and an untagged source plan no conversion at all."""
+        s601 = OUT / "c_source601.mp4"
+        if not s601.exists():
+            ffmpeg("-i", self.src, "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-x264-params",
+                   "colorprim=smpte170m:transfer=smpte170m:colormatrix=smpte170m", "-c:a", "copy", s601)
+        self.assertEqual(json.loads(tool("probe", s601, "--json").stdout)["video"]["color_space"], "smpte170m")
+        conv = "colorspace=ispace=smpte170m:"
+        cases = [  # (tool, args after the input, conversions on a BT.601 input)
+            ("export", ["--preset", "reels"], 1), ("export", ["--preset", "prores"], 0), ("export", ["--preset", "copy"], 0),
+            ("export", ["--preset", "x", "--pad-fill", "blur"], 1),
+            ("fit", ["--width", "320", "--height", "320"], 1), ("cut", ["--start", "1", "--end", "3", "--accurate"], 1),
+            ("cut", ["--segments", "0.5-1.5,2-3", "--accurate"], 2), ("cut", ["--start", "1", "--end", "3"], 0),
+            ("crop", ["--x", "0", "--y", "0", "--width", "100", "--height", "100"], 1), ("deinterlace", [], 1), ("denoise", [], 1),
+            ("freeze", ["--at", "1", "--hold", "1"], 1), ("graphics", ["--template", "title", "--title", "T"], 1),
+            ("loop", ["--times", "2"], 1), ("loop", ["--times", "2", "--boomerang"], 1),
+            ("overlay", ["--image", self.logo], 1), ("overlay", ["--text", "hi"], 1), ("overlay", ["--video", self.camb], 1),
+            ("pad", ["--start", "1"], 1), ("proxy", [], 1), ("redact", ["--x", "0", "--y", "0", "--width", "100", "--height", "100"], 1),
+            ("reverse", [], 1), ("speedramp", ["--segment", "0-3:2", "--segment", "3-6:1"], 1), ("straighten", ["--degrees", "2"], 1),
+            ("caption", ["--text", self.cues], 1), ("color", ["--correct", "--exposure", "0.2"], 1),
+            ("join", [self.camb], 1), ("broll", ["--insert", self.camb, "--at", "1", "--duration", "1"], 1),
+            ("multicam", [self.camb, "--switch", "0-2:0,2-4:1"], 2),  # camera 0 also fills 4-6 s: one chain per window
+        ]
+        for n, (name, args, want) in enumerate(cases):
+            for src, expected in ((s601, want), (self.src, 0)):
+                with self.subTest(tool=name, args=args, source=src.name):
+                    ext = ".mov" if "prores" in args else ".mp4"
+                    proc = tool(name, src, *args, "-o", self.out(f"bt601_{n}{ext}"), "--dry-run", "--json", check=False)
+                    self.assertEqual(proc.returncode, 0, proc.stderr[-600:])
+                    commands = " ".join(json.loads(proc.stdout)["commands"])
+                    self.assertEqual(commands.count(conv), expected, commands)
+                    if src == self.src:
+                        self.assertNotIn("colorspace=", commands)
+        # the other way round: the BT.601 file as the second input is converted in its own chain
+        for name, args in (("join", [self.camb, s601]), ("broll", [self.camb, "--insert", s601, "--at", "1", "--duration", "1"]),
+                           ("overlay", [self.camb, "--video", s601])):
+            with self.subTest(tool=name, second=True):
+                commands = " ".join(json.loads(tool(name, *args, "-o", self.out(f"bt601_2nd_{name}.mp4"), "--dry-run", "--json").stdout)["commands"])
+                self.assertEqual(commands.count(conv), 1, commands)
 
     def test_json_success_and_failure_shapes_and_exit_codes(self):
         doc = json.loads(tool("cut", self.wav, "--start", "1", "--end", "3", "-o", self.out("shape.wav"), "--json").stdout)

@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **A BT.601 source is converted to the BT.709 its re-encode is tagged with, not just relabelled.** Every SDR re-encode (`export.py`'s presets, and `fit`, `cut --accurate`, `crop`, `caption`, `overlay`, `graphics`, `color --lut/--correct` and the other tools that re-encode a video source) tags its output BT.709, and those tags never touch the pixels; through 2.10.0 nothing else did either, so a source tagged `smpte170m` or `bt470bg` (fully, or with only the matrix tag) came out `bt709/bt709/bt709` over unconverted BT.601 pixels (48.5 dB YUV PSNR against the source on FFmpeg 6.1), and every player that honours the tags showed shifted colours. The matrix is now converted with FFmpeg's `colorspace` filter as the first step of the tool's own graph (`_common.bt709_matrix_filter()`; `fcc` and `smpte240m` matrices too); primaries, transfer and range pass through. `join`, `multicam`, `broll` and `overlay --video` convert each input by its own tags. An untagged or BT.709 source, an HDR/BT.2020 source, a stream copy and the `prores` master are unchanged: their commands are what they were. `check.py`'s colour row for a BT.601 matrix now names `export.py` as the fix (any re-encode converts) and says `color.py --retag bt709` only relabels.
 
 ## 2.10.0
 

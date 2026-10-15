@@ -91,10 +91,12 @@ exists. When a decision changes, edit the entry in the same PR.
   its frames change colour tags; on 8.1.2 that rebuild at a *later* input deadlocked at 0% CPU (an
   in-band SPS going from untagged to bt470bg/tv, #316), so a 36-segment job sat until `--timeout`.
   With the option the graph keeps the format it was configured with and the retagged frames pass as
-  decoded. That is acceptable because the tool never converts colour in a cut: an SDR output is
-  tagged BT.709 explicitly and tag-only (`bt709_tag_args`; "without touching its pixels"), and an
-  untagged source is relabelled the same way, so the BT.601-tagged later segment is no different from
-  an untagged one. The rebuild would have converted the retagged side toward the graph's first (unknown)
+  decoded. That is acceptable because no colour conversion in a cut follows the frames' own tags: an
+  SDR output is tagged BT.709 explicitly and tag-only (`bt709_tag_args`), and the one conversion a cut
+  can carry (a source whose *probed* matrix is BT.601, `bt709_matrix_filter`) takes the source's
+  matrix as an explicit input property, so every segment of one source goes through the same one. An
+  untagged source (#316's starts untagged) is relabelled, as before, so the BT.601-tagged later
+  segment is no different from an untagged one. The rebuild would have converted the retagged side toward the graph's first (unknown)
   tag (the issue's debug log: `csp:bt470bg -> csp:unknown`), not toward BT.709, so it was no closer to
   the output's label. A BT.2020/HDR source
   still takes the HDR path chosen from the first video stream's probe. The cost: a source whose
@@ -115,12 +117,40 @@ exists. When a decision changes, edit the entry in the same PR.
   is a deliverable, keep the HDR (10-bit HEVC) path. Test: `test_grid_composites_cols_rows_with_labels`.
 - **`look.py -o` is used verbatim only for a single `--at` with an image extension**; several frames,
   or `-o` given as a stem, produce `<stem>_<t>s.png` names. Test: `test_hdr_source_stays_hdr_through_reencodes`.
-- **`check.py`'s colour row WARNs on a BT.601 matrix without naming a command.** The matrix is a
-  tag (#325): a file tagged only `smpte170m`/`bt470bg` is BT.601, not "untagged". No tool here
-  converts the matrix -- `color.py --retag bt709`, and every SDR re-encode (`bt709_tag_args`), only
-  relabels it, which shifts the colours of BT.601 pixels -- so the fix says to re-export from the
-  master as BT.709. Untagged 8-bit video, or a BT.709 matrix alone, still passes: players assume
-  BT.709. Code: `check.py`, the colour row. Test: `test_check_colour_row_reads_the_matrix_tag`.
+- **`check.py`'s colour row WARNs on a BT.601 matrix and names `export.py`, not `--retag`.** The
+  matrix is a tag (#325): a file tagged only `smpte170m`/`bt470bg` is BT.601, not "untagged". Every
+  re-encode here converts it to the BT.709 it tags (the entry below; through 2.10.0 nothing did, and
+  this fix said to re-export from the master); `color.py --retag bt709` is a stream copy that only
+  relabels it, which shifts the colours of BT.601 pixels, so the fix says that too. Untagged 8-bit
+  video, or a BT.709 matrix alone, still passes: players assume BT.709. Code: `check.py`, the colour
+  row. Test: `test_check_colour_row_reads_the_matrix_tag`.
+- **A source with a BT.601 matrix is converted to BT.709 when it is re-encoded; an untagged one is
+  not.** Every SDR line but prores is tagged BT.709, and the tags are labels (`bt709_tag_args`), so
+  a `smpte170m`/`bt470bg` (or `fcc`/`smpte240m`) source used to come out labelled BT.709 over
+  BT.601 pixels: 48.5 dB YUV PSNR against its source on 6.1, every tag-honouring player showing
+  shifted colours. `bt709_matrix_filter()` now converts it with the `colorspace` filter (in every
+  FFmpeg build, explicit input properties, so no build's tag negotiation decides it). Untagged
+  stays a relabel on purpose: players take untagged SDR as BT.709, and converting it is exactly the
+  7.1 auto-conversion `bt709_tag_args` avoids. Only the **matrix** is converted; primaries and
+  transfer pass through: the matrix is what every decoder applies, SMPTE-C/EBU primaries are
+  shown as BT.709 by every player that does not colour-manage, a full conversion moved testsrc2 to
+  22.5 dB RGB PSNR from what such a player shows, and a `bt470bg` (gamma 2.8) transfer tag on SD
+  material is usually a label, not the camera's curve. The range is left as it is. The filter
+  rides on the encoder line as a `-vf` (`video_args()`, `x264_args(source=...)`, export's preset
+  line) and `run()` folds it into the
+  tool's own graph as its first step (`fold_bt709_matrix()`), so the tools that re-encode one
+  source needed no edit of their own; `join`, `multicam`, `broll` and `overlay --video` convert each
+  input by its own tags in its own chain (`matrix_chain()`), since one source's tags say nothing
+  about another's. Not converted: a stream copy, a prores master, an HDR/BT.2020 source, `grid.py`
+  (an inspection sheet), stills, and the second input of a tool that composites a still over the
+  source. Measured on 5.1.1, 6.1 and a 7.1 development snapshot that predates 7.1's colour
+  negotiation (CI runs 8.x): 42.2 dB RGB PSNR between the source decoded
+  as BT.601 and the output decoded as BT.709 (24.8 dB for the old relabel), untagged and BT.709
+  sources unchanged. Code: `_common/color.py`. Tests:
+  `test_a_bt601_source_is_converted_to_the_bt709_it_is_tagged_with`,
+  `test_an_untagged_or_bt709_source_is_not_converted`,
+  `test_every_reencoding_tool_plans_the_bt601_conversion`,
+  `test_fold_bt709_matrix_into_the_tools_graph`.
 - **`--correct` converts through bt601 on both legs** (not bt709), because on every tested
   FFmpeg the 709 round trip through 8-bit 4:2:0 loses ~5 dB more than 601. Code:
   `color.py _rgb_stage()`. Test: `test_color_correct_identity_holds_on_a_bt709_tagged_source`.

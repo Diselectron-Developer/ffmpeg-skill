@@ -14,7 +14,7 @@ import argparse
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from _common.color import bt709_tag_args, _sdr_bt709
+from _common.color import bt709_matrix_args, bt709_matrix_filter, bt709_tag_args, _sdr_bt709
 from _common.emit import die
 from _common.runner import CODECS, STATE, ffmpeg_encoders, ffmpeg_version, hw_platform_reason
 
@@ -497,28 +497,53 @@ def _x264_raw(crf: int, preset: str, keep_bt709: bool = True) -> List[str]:
     return args
 
 
-def x264_args(crf: int = 18, preset: str = "medium", keep_bt709: bool = True) -> List[str]:
+def x264_args(crf: int = 18, preset: str = "medium", keep_bt709: bool = True,
+              source: Optional[Dict[str, Any]] = None) -> List[str]:
     """SDR H.264 encoder args -- or, when --codec named another encoder, that encoder's SDR args
-    (color.py's --to-sdr path builds its own H.264 line; the flag still has to reach it)."""
+    (color.py's --to-sdr path builds its own H.264 line; the flag still has to reach it).
+
+    `source`: the probe of the file being re-encoded, when the pixels reaching the encoder are
+    still that file's. A BT.709-tagged line then carries the conversion of a non-BT.709 matrix
+    (bt709_matrix_args); a caller whose graph already outputs BT.709 (--to-sdr) leaves it out."""
     if STATE.codec and STATE.codec != "h264":
-        return encoder_args(STATE.codec, crf, preset, None, keep_bt709)
-    return _maybe_hw("h264", crf, None, keep_bt709, _x264_raw(crf, preset, keep_bt709))
+        args = encoder_args(STATE.codec, crf, preset, None, keep_bt709)
+    else:
+        args = _maybe_hw("h264", crf, None, keep_bt709, _x264_raw(crf, preset, keep_bt709))
+    return args + (bt709_matrix_args(source) if keep_bt709 and STATE.codec != "prores" else [])
 
 
-def video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "medium") -> List[str]:
+def video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "medium", convert_matrix: bool = True) -> List[str]:
     """Encoder args that preserve what the source is.
 
     SDR sources -> H.264 8-bit tagged BT.709 (x264_args). HDR sources (HDR10/PQ, HLG,
     Dolby Vision base layer, BT.2020) -> HEVC Main10 with the source's own colour tags,
     so cutting/captioning/fitting an iPhone HDR clip stays HDR instead of becoming a
     washed-out file mislabelled as BT.709. Use color.py --to-sdr when SDR is wanted.
+
+    An SDR source tagged with a BT.601 (or another non-BT.709) matrix is converted to BT.709
+    before it is tagged so: the line ends with the `-vf` of bt709_matrix_args(), which run()
+    folds into the tool's own graph (color.fold_bt709_matrix). `convert_matrix=False` is for a
+    tool that mixes several sources and converts each one in its own graph (join, multicam,
+    broll, overlay --video). --codec prores keeps the source's tags, so it converts nothing.
     """
-    if STATE.codec:
-        return encoder_args(STATE.codec, crf, preset, meta)
     v = (meta or {}).get("video") or {}
+    fix = bt709_matrix_args(meta) if convert_matrix and STATE.codec != "prores" else []
+    if STATE.codec:
+        return encoder_args(STATE.codec, crf, preset, meta) + fix
     if not v.get("bt2020_or_hdr"):
-        return x264_args(crf, preset)
+        return x264_args(crf, preset) + fix
     return _maybe_hw("hevc", crf, meta, True, _x265_hdr_default(v, crf, preset))
+
+
+def matrix_chain(meta: Optional[Dict[str, Any]], line_meta: Optional[Dict[str, Any]]) -> str:
+    """For a tool that mixes several sources in one graph and encodes it through
+    video_args(line_meta, convert_matrix=False): the conversion one source's own chain starts
+    with ("<filter>," -- bt709_matrix_filter), or "" when that source needs none or the line does
+    not tag BT.709 (an HDR/BT.2020 line keeps its tags, --codec prores keeps the source's)."""
+    if STATE.codec == "prores" or ((line_meta or {}).get("video") or {}).get("bt2020_or_hdr"):
+        return ""
+    f = bt709_matrix_filter(meta)
+    return f + "," if f else ""
 
 
 def source_codec_video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "medium",
@@ -530,7 +555,7 @@ def source_codec_video_args(meta: Optional[Dict[str, Any]], crf: int = 18, prese
     source always takes video_args()'s Main10 line, and --codec always wins."""
     v = (meta or {}).get("video") or {}
     if keep_hevc and not STATE.codec and v.get("codec") == "hevc" and not v.get("bt2020_or_hdr"):
-        return encoder_args("hevc", crf, preset, meta)
+        return encoder_args("hevc", crf, preset, meta) + bt709_matrix_args(meta)
     return video_args(meta, crf, preset)
 
 

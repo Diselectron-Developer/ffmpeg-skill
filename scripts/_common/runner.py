@@ -878,6 +878,11 @@ def run(cmd: Sequence[str], *, quiet: bool = False, check: bool = True, ctx: "Op
     ctx = ctx or STATE
     is_ffmpeg = _is_ffmpeg(cmd)
     if is_ffmpeg:
+        # an encoder line that converts a BT.601 source to the BT.709 it is tagged with carries
+        # that conversion as a -vf; it joins the tool's own graph here, before anything records
+        # or runs the command (color.py imports this module, hence the late import)
+        from _common.color import fold_bt709_matrix
+        cmd = fold_bt709_matrix(cmd)
         _check_no_overwrite_input(cmd)
         _check_output_path(cmd)
         _check_existing_output(cmd)

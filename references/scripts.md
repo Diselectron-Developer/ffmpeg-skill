@@ -1615,7 +1615,7 @@ export.py INPUT --preset youtube|youtube4k|reels|tiktok|shorts|linkedin|facebook
                 [--fit pad|crop] [--no-scale] [--allow-long] [--crf N] [--normalize] [-o OUT]
 export.py --list
 ```
-Scales into the preset frame (pad by default), tags BT.709, sets `+faststart`,
+Scales into the preset frame (pad by default), tags BT.709 (a BT.601-matrix source is converted to it, as by every re-encode), sets `+faststart`,
 trims to platform maximums (Reels 90 s, X 140 s) unless `--allow-long`. It
 does not touch levels: for youtube / youtube4k / reels / x the written file is
 measured and the result's `loudness` (and a `notes` line) says when it is

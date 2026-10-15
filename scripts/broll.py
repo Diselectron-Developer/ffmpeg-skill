@@ -21,7 +21,7 @@ import argparse
 import sys
 from typing import Any, Dict, List
 
-from _common import STATE, add_common, aac_args, apply_common, cfr_args, default_output, die, emit, ffmpeg_base, info, time_arg, probe, run, validate_color, video_args, X264_PRESETS, fmt_secs
+from _common import STATE, add_common, aac_args, apply_common, cfr_args, default_output, die, emit, ffmpeg_base, info, time_arg, matrix_chain, probe, run, validate_color, video_args, X264_PRESETS, fmt_secs
 
 
 def main() -> int:
@@ -87,7 +87,7 @@ def main() -> int:
             die(f"cutaway {i + 1}: {path} has only {dur_b - start_b:.3f}s from {start_b:g}s, {length:g}s asked for")
         if cutaways and at < cutaways[-1]["at"] + cutaways[-1]["length"]:
             die(f"cutaway {i + 1} at {at:g}s overlaps the previous one (ends {cutaways[-1]['at'] + cutaways[-1]['length']:g}s)")
-        cutaways.append({"path": path, "at": at, "length": length, "from": start_b, "has_audio": bool(meta_b.get("audio"))})
+        cutaways.append({"path": path, "at": at, "length": length, "from": start_b, "has_audio": bool(meta_b.get("audio")), "meta": meta_b})
     if args.audio != "a" and not all(c["has_audio"] for c in cutaways):
         die("--audio b/mix needs audio on every B-roll clip")
 
@@ -101,10 +101,14 @@ def main() -> int:
     # A shows through unchanged, so A's timeline is never touched.
     parts: List[str] = []
     cur = "[0:v]"
+    # every clip is converted by its own colour tags to the BT.709 the output is tagged with
+    if matrix_chain(meta_a, meta_a):
+        parts.append(f"[0:v]{matrix_chain(meta_a, meta_a)}null[a709]")
+        cur = "[a709]"
     for i, c in enumerate(cutaways):
         geo = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={args.pad_color}"
         parts.append(f"[{i + 1}:v]trim=start={c['from']:.3f}:duration={c['length']:.3f},setpts=PTS-STARTPTS+{c['at']:.3f}/TB,"
-                     f"{geo},setsar=1,fps={fps:g},format={'yuv420p10le' if (meta_a.get('video') or {}).get('bt2020_or_hdr') else 'yuv420p'}[b{i}]")
+                     f"{matrix_chain(c['meta'], meta_a)}{geo},setsar=1,fps={fps:g},format={'yuv420p10le' if (meta_a.get('video') or {}).get('bt2020_or_hdr') else 'yuv420p'}[b{i}]")
         parts.append(f"{cur}[b{i}]overlay=0:0:eof_action=pass:enable='between(t,{c['at']:.3f},{c['at'] + c['length']:.3f})'[v{i}]")
         cur = f"[v{i}]"
     vout = cur
@@ -131,7 +135,7 @@ def main() -> int:
     cmd += ["-filter_complex", ";".join(parts), "-map", vout]
     if aout:
         cmd += ["-map", aout]
-    cmd += video_args(meta_a, args.crf, args.preset) + cfr_args(meta_a, None)
+    cmd += video_args(meta_a, args.crf, args.preset, convert_matrix=False) + cfr_args(meta_a, None)
     if aout == "0:a:0":
         cmd += ["-c:a", "copy"]
     elif aout:
