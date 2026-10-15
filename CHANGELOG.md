@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Added
+
+- **A `render.py` project can carry a video layer (#326).** An `overlays[]` entry takes `"video": "webcam.mp4"` as a fourth kind next to `logo`/`image`/`text`, mapped to `overlay.py --video` with the same `position`/`scale`/`opacity`/`start`/`end`/`margin`/`platform` keys, plus `"chromakey"`, `"chromakey_similarity"` and `"chromakey_blend"` for green-screen removal. The layer is composited in the overlays stage, after `fit`, so its size is relative to the delivered frame and a template's safe margins apply; `--cache` keys the stage on the layer file's content, `--dry-run` plans the `overlay.py` command, and `--export-timeline` names the layer under `not_exported`. Refused before the first stage (`kind: input`): `video` with another kind in the same entry, a `chromakey*` key without `video`, a similarity or blend without `chromakey`, and a layer file that does not exist. No existing key changes meaning; a project without `video` renders as before. Reported by [@rymalia](https://github.com/rymalia).
 
 ## 2.9.0
 

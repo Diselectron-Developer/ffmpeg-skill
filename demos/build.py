@@ -282,6 +282,19 @@ def build_fixtures(force=False):
         }
         path.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
 
+    # 9b. #326: a project with a keyed video layer, composited after the 9:16 reframe.
+    path = need("project_pip.json")
+    if path:
+        project = {
+            "output": str(OUT / "render_pip_after.mp4"),
+            "frame": {"aspect": "9:16", "width": 540, "fit": "blur"},
+            "clips": [{"src": str(FIX / "motion.mp4"), "in": 0, "out": 4}],
+            "overlays": [{"video": str(FIX / "green.mp4"), "chromakey": "0x00b140",
+                          "chromakey_similarity": 0.18, "chromakey_blend": 0.05,
+                          "position": "bottom", "scale": 540}],
+        }
+        path.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+
     # 10. A letterboxed clip: real picture in the middle, black bars top and bottom, so
     #     cropdetect.py has something to measure and crop.py something to remove.
     path = need("letterbox.mp4")
@@ -768,6 +781,17 @@ def demo_render_project(ctx):
     if not timeline.exists():
         raise BuildError("render.py --export-timeline did not write %s" % timeline)
     ctx.note("the same project also opens in an editor: --export-timeline writes .otio / .fcpxml / .edl")
+    return before, after
+
+
+def demo_render_pip(ctx):
+    """#326: a video layer in a project's overlays[], keyed and placed after fit."""
+    before = FIX / "motion.mp4"
+    after = ctx.path("after.mp4")
+    ctx.script("render.py", FIX / "project_pip.json", "--fast")
+    if not after.exists():
+        raise BuildError("render.py did not write %s" % after)
+    ctx.note('overlays[]: {"video": "green.mp4", "chromakey": "0x00b140", "position": "bottom", "scale": 540}')
     return before, after
 
 
@@ -1475,6 +1499,9 @@ _ROWS = [
     ("render_project", PROJECTS, "Whole edit from one project file",
      "Clips, a transition, captions and a title card described as JSON and rendered in one pass.",
      demo_render_project, "video", "latin"),
+    ("render_pip", PROJECTS, "A keyed video layer in a project",
+     "The 16:9 master is reframed to 9:16 on a blurred background, then a green-screen clip is keyed and composited at the bottom. The overlays stage runs after fit, so \"scale\": 540 is the full width of the delivered frame.",
+     demo_render_pip, "video", None),
     ("contact_sheet", PROJECTS, "Contact sheet",
      "Twelve timecoded frames in one PNG: the fastest way to confirm an edit landed where it should.",
      demo_contact_sheet, "video", None),

@@ -22,7 +22,8 @@ Project format (all keys optional except clips):
   ],
   "overlays": [
     {"logo": true},
-    {"text": "Episode 12", "position": "bottom", "start": 1, "end": 5, "fade": 0.3, "box": true}
+    {"text": "Episode 12", "position": "bottom", "start": 1, "end": 5, "fade": 0.3, "box": true},
+    {"video": "webcam.mp4", "position": "bottom-right", "scale": 480, "chromakey": "0x00ff00"}
   ],
   "audio": {"voice": "medium", "music": "bed.mp3", "music_volume": -16, "duck": true, "music_fade_out": 2,
             "effects": "sfx.wav", "stems": {"dialogue": 0, "music": -18, "effects": -22}},
@@ -37,6 +38,9 @@ Stages run in this order: clips (cut) → join → silence → fit → captions 
 graphics → overlays → audio → loudness → export → chapters → check. Missing stages are
 skipped. "brand" points caption/graphics/overlay at a brand.json (fonts,
 colours, logo, safe margin); {"logo": true} in overlays places the brand logo.
+An overlay entry draws one of logo, image, text or video (a picture-in-picture
+layer, overlay.py --video; "chromakey", "chromakey_similarity" and
+"chromakey_blend" key a colour out of that video and need "video").
 
 "check" mirrors check.py's own exit code: a delivery-spec FAIL (or check.py
 itself failing to run) exits 1, same as running check.py directly would --
@@ -140,8 +144,10 @@ OBJECT_KEYS: Dict[str, frozenset] = {
     "graphics[]": frozenset({"template", "name", "title", "subtitle", "start", "end", "position",
                              "from", "scale", "primary", "text_color", "lang",
                              "text", "top", "bottom", "duration", "margin", "platform"}),
+    # #326: "video" is a fourth layer kind (overlay.py --video), keyed with the chromakey* keys
     "overlays[]": frozenset({"logo", "image", "text", "position", "start", "end", "fade", "opacity",
-                             "scale", "font_size", "font", "font_file", "margin", "box", "platform"}),
+                             "scale", "font_size", "font", "font_file", "margin", "box", "platform",
+                             "video", "chromakey", "chromakey_similarity", "chromakey_blend"}),
     "audio": frozenset({"music", "replace", "music_volume", "fade_in", "fade_out", "music_fade_out",
                         "gain", "duck_amount", "duck_threshold", "duck_attack", "duck_release",
                         "voice", "denoise", "duck", "music_loop", "stereo", "mono", "downmix",
@@ -410,6 +416,28 @@ def check_keys(obj: Any, schema: str, label: str) -> None:
             else f" (valid keys: {', '.join(sorted(valid))})"))
 
 
+def check_overlay(ov: Any, label: str) -> None:
+    """#326: a video layer is one kind of overlay, as overlay.py's --image/--text/--logo/--video
+    are one mutually exclusive choice, and the chromakey* keys only act on it. A logo, image and
+    text in one entry still draw the first of them, as before; only a combination with the new
+    "video" key is refused, so no project 2.8.6 rendered is refused now."""
+    if not isinstance(ov, dict):
+        return
+    if ov.get("video"):
+        others = [k for k in ("logo", "image", "text") if ov.get(k)]
+        if others:
+            die(f"{label}: give one of logo, image, text or video per entry, not video and {others[0]} "
+                "(add a second overlays[] entry for the other layer)")
+    else:
+        keyed = [k for k in ("chromakey", "chromakey_similarity", "chromakey_blend") if ov.get(k) is not None]
+        if keyed:
+            die(f"{label}: {keyed[0]} keys a colour out of a video layer and needs \"video\" (overlay.py --chromakey needs --video)")
+    if ov.get("chromakey") is None:
+        tuned = [k for k in ("chromakey_similarity", "chromakey_blend") if ov.get(k) is not None]
+        if tuned:
+            die(f"{label}: {tuned[0]} tunes \"chromakey\", which this entry does not set")
+
+
 def require_object(obj: Any, label: str) -> None:
     """Refuse a value that is not an object where the run reads it with .get(): "export": "reels"
     in a render, a string frame, a clip written as a bare path. 2.2.1 died there with a traceback
@@ -470,6 +498,8 @@ def validate_project(proj: Dict[str, Any], timeline: bool = False, stop_after: O
                     die(f"{name}[{i}]: must be an object {{...}}, got {type(item).__name__} {item!r:.60}")
         for i, item in enumerate(items if isinstance(items, list) else []):
             check_keys(item, f"{name}[]", f"{name}[{i}]")
+            if name == "overlays":
+                check_overlay(item, f"overlays[{i}]")
             if name != "clips":
                 continue
             # every clip stage starts from rel(c["src"]): without one it was a KeyError traceback
@@ -954,6 +984,15 @@ def main() -> int:
     output = rel(proj.get("output") or "final.mp4")
     # the final stage is a copy from the work dir, so run()'s own guard never sees the sources (review 5)
     refuse_output_is_input(output, *[rel(c.get("src")) for c in clips if c.get("src")])
+    if _reaches("overlays", args.stop_after):
+        # #326: an overlay video is the caller's file, never an earlier stage's output, so a
+        # missing one is refused here, under --dry-run too, not after every stage before it ran
+        for i, ov in enumerate(proj.get("overlays") or []):
+            if ov.get("video"):
+                layer = rel(ov["video"])
+                refuse_output_is_input(output, layer)
+                if not os.path.isfile(layer):
+                    die(f"overlays[{i}].video: file not found: {layer}", kind="input")
     # 2.0 refuses an existing output without --overwrite; the final place_output() would, but
     # only after every stage had run -- say so before the first one instead
     _check_existing_output(["ffmpeg", output])
@@ -1248,9 +1287,13 @@ def main() -> int:
             argv += ["--image", rel(ov["image"])]
         elif ov.get("text"):
             argv += ["--text", ov["text"]]
+        elif ov.get("video"):
+            # #326: sized and placed here, after fit, against the frame that ships
+            argv += ["--video", rel(ov["video"])]
         else:
-            die(f"overlays[{i}] needs image or text")
-        for k, flag in (("position", "--position"), ("start", "--start"), ("end", "--end"), ("fade", "--fade"), ("opacity", "--opacity"), ("scale", "--scale"), ("font_size", "--font-size"), ("font", "--font"), ("font_file", "--font-file"), ("margin", "--margin"), ("platform", "--platform")):
+            die(f"overlays[{i}] needs logo, image, text or video")
+        for k, flag in (("position", "--position"), ("start", "--start"), ("end", "--end"), ("fade", "--fade"), ("opacity", "--opacity"), ("scale", "--scale"), ("font_size", "--font-size"), ("font", "--font"), ("font_file", "--font-file"), ("margin", "--margin"), ("platform", "--platform"),
+                        ("chromakey", "--chromakey"), ("chromakey_similarity", "--chromakey-similarity"), ("chromakey_blend", "--chromakey-blend")):
             if ov.get(k) is not None:
                 argv += [flag, str(ov[k])]
         if ov.get("box"):

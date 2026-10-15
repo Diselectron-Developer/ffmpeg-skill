@@ -659,7 +659,7 @@ class OrchestrationTests(MediaFixtures):
             "empty_clips": ([self._proj("render_e1.json", {"clips": []})], "clips is empty"),
             "captions_key": ([self._proj("render_e2.json", {"clips": full["clips"], "captions": {"size": 20}}), "--dry-run"], "captions needs text, srt or ass"),
             "graphics_key": ([self._proj("render_e3.json", {"clips": full["clips"], "graphics": [{"name": "x"}]}), "--dry-run"], "needs a template"),
-            "overlay_key": ([self._proj("render_e4.json", {"clips": full["clips"], "overlays": [{"opacity": 1}]}), "--dry-run"], "needs image or text"),
+            "overlay_key": ([self._proj("render_e4.json", {"clips": full["clips"], "overlays": [{"opacity": 1}]}), "--dry-run"], "needs logo, image, text or video"),
             "child_failed": ([self._proj("render_e5.json", {"clips": [{"src": "source.mp4", "in": "not-a-time", "out": 2}]}), "--dry-run"], "cut.py failed"),
         }
         for name, (argv, message) in cases.items():
@@ -690,6 +690,113 @@ class OrchestrationTests(MediaFixtures):
         proc = script("render.py", tmpl, "--dry-run", expect_fail=True)  # only REPLACE_ME.mp4 is missing
         self.assertIn("clip 0: missing: ", proc.stderr)
         self.assertNotIn("unknown key", proc.stderr)
+
+    # ------------------------------------------------ #326: a video layer in overlays[]
+    def _pip_plate(self, name, color, inset=False):
+        """A 200x50 plate of one colour, 2 s; `inset` adds a white 40x40 square at (80,5)."""
+        path = OUT / name
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={color}:s=200x50:r=30:d=2"]
+        if inset:
+            cmd += ["-f", "lavfi", "-i", "color=c=white:s=40x40:r=30:d=2", "-filter_complex", "[0][1]overlay=80:5"]
+        sh(*cmd, "-c:v", "libx264", "-pix_fmt", "yuv420p", path)
+        return path
+
+    @staticmethod
+    def _rgb_at(path, x, y, at=1.0):
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(at), "-i", str(path),
+                            "-vf", f"crop=2:2:{x}:{y}", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return tuple(r.stdout[:3])
+
+    def test_render_video_overlay_is_placed_after_fit_against_the_final_frame(self):
+        """#326: overlays[] took only logo/image/text, so a webcam PiP or a keyed green screen in a
+        project was "unknown key 'video'", and running overlay.py before render.py sized the layer
+        against the source frame. The layer is now composited in the overlays stage, after fit:
+        scale 120 on a 360x640 frame is 120 px of it (on the 1280x720 source before fit it would
+        have come out about 34 px wide)."""
+        blue = self._pip_plate("pip326_blue.mp4", "blue")
+        frame = {"aspect": "9:16", "width": 360, "fit": "pad"}
+        proj = self._proj("render_pip326.json", {
+            "clips": [{"src": "source.mp4", "in": 0, "out": 2}], "frame": frame,
+            "overlays": [{"video": blue.name, "position": "bottom-right", "scale": 120, "margin": 0}]})
+        data = json.loads(script("render.py", proj, "--fast", "--json").stdout)
+        self.assertEqual(data["stages"], ["clips", "fit", "overlays"])
+        out = Path(data["output"])
+        m = probe(str(out))
+        self.assertEqual((m["video"]["width"], m["video"]["height"]), (360, 640))
+        # 120x30 at the bottom-right corner: x 240..360, y 610..640, over the black pad
+        r, g, b = self._rgb_at(out, 250, 620)
+        self.assertTrue(b > 150 and r < 80, f"the PiP's left part should be blue at x=250, got {(r, g, b)}")
+        self.assertLess(max(self._rgb_at(out, 230, 620)), 60, "left of the 120 px PiP the pad must remain")
+        # chroma key: the green plate's green goes, its white inset stays
+        green = self._pip_plate("pip326_green.mp4", "0x00ff00", inset=True)
+        keyed = self._proj("render_pip326_key.json", {
+            "clips": [{"src": "source.mp4", "in": 0, "out": 2}], "frame": frame,
+            "overlays": [{"video": green.name, "chromakey": "0x00ff00", "chromakey_similarity": 0.2,
+                          "chromakey_blend": 0.05, "position": "bottom-right", "scale": 120, "margin": 0}]})
+        proc = script("render.py", keyed, "--fast", "--json")
+        self.assertIn("--chromakey 0x00ff00 --chromakey-similarity 0.2 --chromakey-blend 0.05", proc.stderr)
+        out = Path(json.loads(proc.stdout)["output"])
+        self.assertLess(self._rgb_at(out, 250, 620)[1], 80, "the keyed green must show the pad through it")
+        self.assertGreater(min(self._rgb_at(out, 298, 620)), 150, "the white inset is not keyed")
+
+    def test_render_video_overlay_refusals_and_dry_run_plan(self):
+        """#326: one layer kind per entry (overlay.py's --image/--text/--logo/--video are mutually
+        exclusive), the chromakey* keys only with a video, and a missing layer file named before
+        the first stage -- under --dry-run too, since no earlier stage writes it. The plan carries
+        the overlay.py command with the layer as an input."""
+        pip = self._pip_plate("pip326_plan.mp4", "blue")
+        clips = [{"src": "source.mp4", "in": 0, "out": 2}]
+        cases = {
+            "video_and_image": ({"video": pip.name, "image": "logo.png"}, "not video and image"),
+            "video_and_logo": ({"video": pip.name, "logo": True}, "not video and logo"),
+            "key_without_video": ({"image": "logo.png", "chromakey": "green"}, 'chromakey keys a colour out of a video layer and needs "video"'),
+            "tune_without_key": ({"video": pip.name, "chromakey_blend": 0.1}, 'chromakey_blend tunes "chromakey"'),
+            "missing_layer": ({"video": "pip326_gone.mp4"}, "overlays[0].video: file not found"),
+        }
+        for name, (overlay, message) in cases.items():
+            proc = script("render.py", self._proj(f"render_pip326_{name}.json", {"clips": clips, "overlays": [overlay]}),
+                          "--dry-run", "--json", expect_fail=True)
+            self.assertIn(message, proc.stderr, f"{name}: {proc.stderr[-400:]}")
+            doc = json.loads(proc.stdout)
+            self.assertEqual(doc["error"]["kind"], "input", name)
+            self.assertNotIn("cut.py", proc.stderr, f"{name}: refused before the first stage")
+        # a run that stops before the overlays stage never reads the layer
+        gone = self._proj("render_pip326_stop.json", {"clips": clips, "overlays": [{"video": "pip326_gone.mp4"}]})
+        script("render.py", gone, "--dry-run", "--stop-after", "clips")
+        # an entry with a logo, an image or text draws the first of them, as in 2.8.6
+        script("render.py", self._proj("render_pip326_old.json", {"clips": clips, "overlays": [{"image": "logo.png", "text": "x"}]}), "--dry-run")
+        # the plan: overlay.py with --video, and the layer is an input of its planned command
+        proj = self._proj("render_pip326_plan.json", {"clips": clips, "overlays": [{"video": pip.name, "position": "top-left"}]})
+        proc = script("render.py", proj, "--dry-run", "--json")
+        plan = json.loads(proc.stdout)
+        self.assertEqual(plan["stages"], ["clips", "overlays"])
+        layer = str((OUT / pip.name).resolve())   # relative to the project file, as every project path is
+        self.assertIn(f"--video {layer}", proc.stderr)
+        self.assertTrue(any(layer in c and "overlay=" in c for c in plan["commands"]), plan["commands"])
+        # an editor timeline cannot hold the layer, and says so
+        doc = json.loads(script("render.py", proj, "--export-timeline", OUT / "render_pip326.otio", "--json").stdout)
+        self.assertIn("video layers", " ".join(doc["timeline"]["not_exported"]))
+
+    def test_render_cache_misses_the_overlays_stage_when_the_layer_video_changes(self):
+        """#326: the layer file is part of the overlays stage's cache key (its content, not its
+        name), so replacing webcam.mp4 re-runs the overlay and serves the earlier stages."""
+        cdir = OUT / "rcache_pip326"
+        shutil.rmtree(cdir, ignore_errors=True)
+        self._pip_plate("pip326_cache.mp4", "blue")
+        proj = self._proj("render_pip326_cache.json", {
+            "clips": [{"src": "source.mp4", "in": 0, "out": 2}],
+            "overlays": [{"video": "pip326_cache.mp4", "scale": 100}]})
+        first = json.loads(script("render.py", proj, "--cache", cdir, "--fast", "--json").stdout)
+        self.assertEqual(first["cache"]["hits"], [])
+        same = json.loads(script("render.py", proj, "--cache", cdir, "--fast", "--json").stdout)
+        self.assertEqual(sorted(same["cache"]["hits"]), ["clips", "overlays"])
+        self._pip_plate("pip326_cache.mp4", "red")   # same path, other picture
+        changed = json.loads(script("render.py", proj, "--cache", cdir, "--fast", "--json").stdout)
+        self.assertEqual(changed["cache"]["hits"], ["clips"])
+        self.assertEqual(changed["cache"]["misses"], ["overlays"])
+        r, g, b = self._rgb_at(changed["output"], 1240, 30)
+        self.assertTrue(r > 150 and b < 80, f"the new red layer is the one composited, got {(r, g, b)}")
 
     def test_render_names_every_unusable_clip_source_before_cutting(self):
         """2.2.1: a missing third clip used to surface after the first two were cut, and a second
