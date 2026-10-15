@@ -131,7 +131,8 @@ def main() -> int:
         cmd = ffmpeg_base() + ["-f", "concat", "-safe", "0", "-i", str(list_path)]
         vf = [f"scale={out_w}:{out_h}", "setsar=1", f"fps={args.fps:g}"]
         cmd += ["-vf", ",".join(vf)]
-        cmd += video_args(None, args.crf, args.preset)
+        # RGB (PNG) frames are converted to the BT.709 the line is tagged with (the first frame's probe)
+        cmd += video_args(None, args.crf, args.preset, source=frame_meta)
         # The concat demuxer's trailing repeated-last-file trick (needed so the last real file's
         # duration line takes effect) has been observed to produce an extra frame's worth of
         # duration on some ffmpeg builds -- force the exact intended length rather than trust it.

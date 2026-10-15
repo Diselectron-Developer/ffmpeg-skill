@@ -141,9 +141,8 @@ exists. When a decision changes, edit the entry in the same PR.
   tool's own graph as its first step (`fold_bt709_matrix()`), so the tools that re-encode one
   source needed no edit of their own; `join`, `multicam`, `broll` and `overlay --video` convert each
   input by its own tags in its own chain (`matrix_chain()`), since one source's tags say nothing
-  about another's. Not converted: a stream copy, a prores master, an HDR/BT.2020 source, `grid.py`
-  (an inspection sheet), stills, and the second input of a tool that composites a still over the
-  source. Measured on 5.1.1, 6.1 and a 7.1 development snapshot that predates 7.1's colour
+  about another's. Not converted: a stream copy, a prores master, an HDR/BT.2020 source.
+  Measured on 5.1.1, 6.1 and a 7.1 development snapshot that predates 7.1's colour
   negotiation (CI runs 8.x): 42.2 dB RGB PSNR between the source decoded
   as BT.601 and the output decoded as BT.709 (24.8 dB for the old relabel), untagged and BT.709
   sources unchanged. Code: `_common/color.py`. Tests:
@@ -151,6 +150,43 @@ exists. When a decision changes, edit the entry in the same PR.
   `test_an_untagged_or_bt709_source_is_not_converted`,
   `test_every_reencoding_tool_plans_the_bt601_conversion`,
   `test_fold_bt709_matrix_into_the_tools_graph`.
+- **An RGB picture is converted to BT.709 YUV by an explicit `scale`, where it enters; an untagged
+  picture that meets a converted one is labelled, not converted.** An RGB picture (PNG/JPEG still,
+  logo, emoji PNG, PNG sequence, qtrle clip) has no matrix of its own: FFmpeg gives it one wherever
+  the graph first needs YUV, and its default there is BT.601 (5.1.1, 6.1; 7.1+ follows the link's
+  tag, "unknown" = BT.601), so through 2.10.1 every such output was BT.601 under a BT.709 tag: pure
+  red decoded (255,24,0), green (0,216,0), mean ΔRGB 8.8 / max 38.9, on 5.1.1, 6.1, 7.1.1 and 8.1.3.
+  `scale=out_color_matrix=bt709:out_range=tv,format=…` pins the conversion, so no build's default or
+  negotiation decides it: a source gets it as the encoder line's `-vf` (`bt709_matrix_filter()`,
+  folded like the BT.601 one, `format=yuv444p` so the tool's own scaling still sees full chroma), a
+  still a tool made RGBA (`overlay --image`, emoji, `waveform --image`'s composite) at the end of its
+  own chain (`rgb_chain_to_bt709()`, `yuva420p` for overlay). Converting the logo there, not letting
+  the overlay filter do it, matters for the video too: with an RGBA input `overlay=format=auto`
+  composites in RGB, so the whole main picture went to RGB and came back BT.601 (9.04 mean / 40.6
+  max on a BT.709 main with 5.1.1/6.1, 7.93 / 37.4 untagged on every build); with a `yuva420p` logo
+  it composites in YUV and the main's pixels are not touched. A palette PNG is expanded to RGB first:
+  swscale converts a palette with fixed BT.601 whatever `out_color_matrix` says (9.1 → 0.9 mean on
+  5.1.1/6.1). A JPEG probes as `yuvj420p`/`bt470bg` and is a BT.601 source like any other.
+  `grid.py` converts each cell by its own tags (`matrix_chain()`): it is an inspection sheet, but one
+  whose cells are compared with each other, and on 7.1+ `xstack` converted the cells to one
+  another's matrix, so a BT.601 cell first took the BT.709 cell with it. FFmpeg 7.1+ negotiates one
+  colourspace for all inputs of a mixing filter and converts the rest to it, taking "unknown" as
+  BT.601: with a converted logo the *untagged main* shifted (7.08 mean / 25 max on 7.1.1 and 8.1.3,
+  already 7.93 / 37.4 before this fix on 8.1), or the converted picture was converted back. So where
+  a converted picture meets an untagged one, the untagged one is labelled BT.709 (`setparams`, tags
+  only; `label_chain()`), which is what the output's tag says it is: no conversion is left to
+  negotiate, and on 5.1/6.1 the label changes nothing. It is applied only there (a still over the
+  video, a grid with a converted cell), so a one-input re-encode of an untagged source, and a grid of
+  untagged/BT.709 clips, keep their commands; `join`/`multicam`/`broll`/`overlay --video` do not
+  label yet, and on 7.1+ mixing an untagged and a BT.601 clip there still shifts one of them (a
+  separate change). Known on FFmpeg 7.0.x only (not in CI): its `colorspace` filter does not declare
+  the converted link, so a BT.601 clip *first* in `grid`/`join` still takes the others with it.
+  Code: `_common/color.py`, `_common/decision.py`. Tests:
+  `test_an_rgb_or_jpeg_source_is_converted_to_the_bt709_it_is_tagged_with`,
+  `test_a_still_composited_over_the_video_is_converted_to_bt709`,
+  `test_grid_converts_each_cell_by_its_own_tags`,
+  `test_an_rgb_source_or_a_still_is_converted_to_the_bt709_it_is_tagged_with`,
+  `test_still_and_rgb_tools_plan_the_bt709_conversion`.
 - **`--correct` converts through bt601 on both legs** (not bt709), because on every tested
   FFmpeg the 709 round trip through 8-bit 4:2:0 loses ~5 dB more than 601. Code:
   `color.py _rgb_stage()`. Test: `test_color_correct_identity_holds_on_a_bt709_tagged_source`.

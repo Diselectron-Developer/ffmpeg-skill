@@ -34,7 +34,7 @@ from typing import List, Optional
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
 from _common import (aac_args, add_common, brand_caption_style, script_font_for_text, apply_common, cfr_args,
                      color_hex, default_font_file, default_output, die, emit, escape_drawtext, escape_filter_path,
-                     ffmpeg_base, info, load_brand, parse_time, probe, run, run_keeping_subtitles, video_args,
+                     ffmpeg_base, info, label_chain, load_brand, parse_time, probe, rgb_chain_to_bt709, run, run_keeping_subtitles, video_args,
                      drawtext_boxborderw, drawtext_center_align, X264_PRESETS, time_arg, fmt_secs, STATE, drawtext_text_opts,
                      LANGUAGE_NAMES, needs_shaping, detect_script, BIDI_SCRIPTS, font_family_of_file, font_family_for_script, has_emoji,
                      emoji_clusters, emoji_codepoint_name, char_script, emoji_filter_chain, emoji_asset_for, emoji_support, resolve_emoji_assets,
@@ -599,7 +599,9 @@ def main() -> int:
                 vf += f":fontsdir={escape_filter_path(fdir)}"
             chains.append(f"[{last}]{vf}[vtxt]")
             last = "vtxt"
-        eo, emoji_inputs = emoji_filter_chain({"overlays": emoji_overlays}, last, "vfinal", first_input=1)
+        eo, emoji_inputs = emoji_filter_chain({"overlays": emoji_overlays}, last, "vfinal", first_input=1,
+                                              to_yuv=rgb_chain_to_bt709(meta),
+                                              base_chain=label_chain(meta, meta) if rgb_chain_to_bt709(meta) else "")
         for spec in emoji_inputs:
             cmd += spec
             asset = spec[-1]

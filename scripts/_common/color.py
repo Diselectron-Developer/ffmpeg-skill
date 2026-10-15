@@ -51,8 +51,26 @@ def _sdr_bt709(encoder: str) -> "Tuple[str, List[str]]":
 # pre-BT.709 ones the colorspace filter also reads. bt2020nc/c sources take the HDR/BT.2020 path.
 NON_BT709_MATRICES = ("smpte170m", "bt470bg", "fcc", "smpte240m")
 
-_MATRIX_FILTER_RE = re.compile(r"^colorspace=ispace=(?:%s):iprimaries=bt709:itrc=bt709:space=bt709:primaries=bt709:trc=bt709$"
-                               % "|".join(NON_BT709_MATRICES))
+# RGB pictures (ffprobe's pix_fmt names: PNG rgb24/rgba/pal8/rgb48be, qtrle, gbrp...). Their
+# conversion to YUV is wherever the graph first needs YUV, and FFmpeg's default for it is BT.601
+# (5.1, 6.1, 7.0; 7.1+ follows the link's tag, unspecified = BT.601). Gray has no matrix.
+_RGB_PIX_FMT_RE = re.compile(r"^(?:rgb|bgr|argb|abgr|0rgb|0bgr|gbr|x2rgb|x2bgr|pal8)")
+
+
+def rgb_to_bt709_filter(pix_fmt: str = "yuv444p") -> str:
+    """An RGB picture converted to BT.709 limited-range YUV right here, in `pix_fmt`, so no later
+    conversion (an auto-inserted one, with FFmpeg's BT.601 default) decides the matrix. 4:4:4 by
+    default: the tool's own scaling and the encoder's 4:2:0 come after, as they did on the RGB."""
+    return f"scale=out_color_matrix=bt709:out_range=tv,format={pix_fmt}"
+
+
+def is_rgb(meta: Optional[Dict[str, Any]]) -> bool:
+    """True when the probed picture is RGB (a PNG/still, a qtrle/png-in-mov clip, an image sequence)."""
+    return bool(_RGB_PIX_FMT_RE.match(str(((meta or {}).get("video") or {}).get("pix_fmt") or "")))
+
+
+_MATRIX_FILTER_RE = re.compile(r"^(?:colorspace=ispace=(?:%s):iprimaries=bt709:itrc=bt709:space=bt709:primaries=bt709:trc=bt709|(?:format=rgb24,)?%s)$"
+                               % ("|".join(NON_BT709_MATRICES), re.escape(rgb_to_bt709_filter())))
 _INPUT_VIDEO_REF = re.compile(r"\[(\d+):v(?::0)?\]")
 
 
@@ -67,12 +85,42 @@ def bt709_matrix_filter(meta: Optional[Dict[str, Any]]) -> Optional[str]:
     (iprimaries/itrc = the output's), so the picture a player that decodes with the source's
     matrix showed is the picture the BT.709 output shows. The `colorspace` filter is in every
     FFmpeg build (no zscale needed) and takes explicit input properties, so the conversion does
-    not depend on how a build reads or negotiates the frames' own tags. The range is left as it is."""
+    not depend on how a build reads or negotiates the frames' own tags. The range is left as it is.
+
+    An RGB source (is_rgb: a PNG/still, an image sequence, a qtrle clip) has no matrix of its own
+    but gets one where the graph first needs YUV, and FFmpeg's default there is BT.601: through
+    2.10.1 such a source came out labelled BT.709 over BT.601-encoded pixels (pure red decoded as
+    (255,24,0), pure green as (0,216,0), on 5.1.1 to 8.1). It is converted to BT.709 YUV here
+    (rgb_to_bt709_filter). A JPEG (yuvj, tagged bt470bg) is a BT.601 source like any other."""
     v = (meta or {}).get("video") or {}
     matrix = v.get("color_space")
-    if v.get("bt2020_or_hdr") or matrix not in NON_BT709_MATRICES:
+    if v.get("bt2020_or_hdr"):
+        return None
+    if is_rgb(meta):
+        # a palette is turned into YUV with fixed BT.601 coefficients whatever out_color_matrix
+        # says (5.1.1, 6.1): expand it to RGB first
+        return ("format=rgb24," if v.get("pix_fmt") == "pal8" else "") + rgb_to_bt709_filter()
+    if matrix not in NON_BT709_MATRICES:
         return None
     return f"colorspace=ispace={matrix}:iprimaries=bt709:itrc=bt709:space=bt709:primaries=bt709:trc=bt709"
+
+
+def bt709_label_filter(meta: Optional[Dict[str, Any]]) -> Optional[str]:
+    """For an UNTAGGED SDR YUV picture that meets a converted (BT.709-tagged) one in a filter that
+    mixes pictures (overlay, xstack): its BT.709 label, tags only (setparams), or None for any
+    other picture (tagged, RGB, HDR, no probe).
+
+    FFmpeg 7.1+ negotiates one colourspace for all of a mixing filter's inputs and converts the
+    others to it, taking "unknown" as BT.601: the untagged main under a converted logo, or an
+    untagged grid cell beside a converted one, was shifted (7.08 mean / 25 max RGB on 7.1.1 and
+    8.1.3), or the converted picture converted back. Labelled as what the output says it is, the
+    inputs agree and nothing is converted; on 5.1-7.0 the label changes nothing. The pixels are not
+    touched, as for the untagged source of a one-input re-encode (bt709_tag_args)."""
+    v = (meta or {}).get("video") or {}
+    if (not v.get("pix_fmt") or v.get("bt2020_or_hdr") or is_rgb(meta)
+            or (v.get("color_space") or "unknown") not in ("unknown", "unspecified")):
+        return None
+    return "setparams=colorspace=bt709" + ("" if v.get("color_range") == "pc" else ":range=tv")
 
 
 def bt709_matrix_args(meta: Optional[Dict[str, Any]]) -> List[str]:

@@ -14,7 +14,7 @@ import argparse
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from _common.color import bt709_matrix_args, bt709_matrix_filter, bt709_tag_args, _sdr_bt709
+from _common.color import bt709_label_filter, bt709_matrix_args, bt709_matrix_filter, bt709_tag_args, rgb_to_bt709_filter, _sdr_bt709
 from _common.emit import die
 from _common.runner import CODECS, STATE, ffmpeg_encoders, ffmpeg_version, hw_platform_reason
 
@@ -512,7 +512,8 @@ def x264_args(crf: int = 18, preset: str = "medium", keep_bt709: bool = True,
     return args + (bt709_matrix_args(source) if keep_bt709 and STATE.codec != "prores" else [])
 
 
-def video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "medium", convert_matrix: bool = True) -> List[str]:
+def video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "medium", convert_matrix: bool = True,
+               source: Optional[Dict[str, Any]] = None) -> List[str]:
     """Encoder args that preserve what the source is.
 
     SDR sources -> H.264 8-bit tagged BT.709 (x264_args). HDR sources (HDR10/PQ, HLG,
@@ -525,9 +526,14 @@ def video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "med
     folds into the tool's own graph (color.fold_bt709_matrix). `convert_matrix=False` is for a
     tool that mixes several sources and converts each one in its own graph (join, multicam,
     broll, overlay --video). --codec prores keeps the source's tags, so it converts nothing.
+    An RGB source (a PNG, an image sequence, a qtrle clip) is converted the same way.
+
+    `source`: the probe of the picture the encoder gets when the line is chosen without it
+    (insert.py and sequence.py make a still or a PNG sequence into video on the SDR line,
+    video_args(None)); its RGB or BT.601 pixels are converted to the BT.709 that line is tagged with.
     """
     v = (meta or {}).get("video") or {}
-    fix = bt709_matrix_args(meta) if convert_matrix and STATE.codec != "prores" else []
+    fix = bt709_matrix_args(meta if source is None else source) if convert_matrix and STATE.codec != "prores" else []
     if STATE.codec:
         return encoder_args(STATE.codec, crf, preset, meta) + fix
     if not v.get("bt2020_or_hdr"):
@@ -544,6 +550,28 @@ def matrix_chain(meta: Optional[Dict[str, Any]], line_meta: Optional[Dict[str, A
         return ""
     f = bt709_matrix_filter(meta)
     return f + "," if f else ""
+
+
+def label_chain(meta: Optional[Dict[str, Any]], line_meta: Optional[Dict[str, Any]]) -> str:
+    """For a picture that meets a converted one in a mixing filter (a still over the video, a grid
+    cell beside a converted cell), encoded through video_args(line_meta): the BT.709 label an
+    untagged one's chain starts with ("<setparams>," -- bt709_label_filter), or "" (a tagged, RGB or
+    HDR picture, or a line that does not tag BT.709)."""
+    if STATE.codec == "prores" or ((line_meta or {}).get("video") or {}).get("bt2020_or_hdr"):
+        return ""
+    f = bt709_label_filter(meta)
+    return f + "," if f else ""
+
+
+def rgb_chain_to_bt709(line_meta: Optional[Dict[str, Any]], pix_fmt: str = "yuva420p") -> str:
+    """For a picture the tool's own graph has made RGB(A) -- a still's `format=rgba` chain
+    (overlay.py --image, an emoji PNG) or an RGBA composite (waveform.py's --image plate) -- that
+    is encoded through video_args(line_meta): "," + the conversion to BT.709 YUV to end that chain
+    with (rgb_to_bt709_filter), or "" when the line does not tag BT.709 (the lines matrix_chain()
+    leaves alone). Without it the graph's own RGB-to-YUV step used FFmpeg's BT.601 default."""
+    if STATE.codec == "prores" or ((line_meta or {}).get("video") or {}).get("bt2020_or_hdr"):
+        return ""
+    return "," + rgb_to_bt709_filter(pix_fmt)
 
 
 def source_codec_video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "medium",

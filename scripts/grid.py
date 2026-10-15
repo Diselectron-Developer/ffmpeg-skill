@@ -26,7 +26,7 @@ import os
 import sys
 
 from _common import add_common, apply_common, aac_args, cfr_args, default_font_file, default_output, die, emit, X264_PRESETS, fmt_secs, \
-    escape_drawtext, escape_filter_path, ffmpeg_base, info, probe, run, validate_color, video_args
+    escape_drawtext, escape_filter_path, ffmpeg_base, info, label_chain, matrix_chain, probe, run, validate_color, video_args
 
 LABEL_MARGIN = 10
 
@@ -91,6 +91,13 @@ def main() -> int:
     for p in args.inputs:
         cmd += ["-i", p]
 
+    # each cell converted by its own tags to the BT.709 the grid is tagged with (a BT.601 or an RGB
+    # input): without it 5.1/6.1 relabelled them, and 7.1+ converted cells to one another's matrix.
+    # Beside a converted cell an untagged one gets a BT.709 label, so 7.1+'s xstack has nothing to
+    # convert; a grid of untagged/BT.709 clips is what it was.
+    convert = [matrix_chain(m, None) for m in metas]
+    if any(convert):
+        convert = [c or label_chain(m, None) for c, m in zip(convert, metas)]
     parts = []
     for i, p in enumerate(args.inputs):
         chain = [
@@ -109,7 +116,7 @@ def main() -> int:
             chain.append(f"drawtext=text='{escape_drawtext(stem)}':{font_opt}:fontsize={args.font_size}:"
                          f"fontcolor={args.font_color}:x=w-tw-{LABEL_MARGIN}:y=h-th-{LABEL_MARGIN}:"
                          f"box=1:boxcolor=black@0.5:boxborderw=4")
-        parts.append(f"[{i}:v]{','.join(chain)}[v{i}]")
+        parts.append(f"[{i}:v]{convert[i]}{','.join(chain)}[v{i}]")
 
     cw, ch = args.cell_width + args.gap, args.cell_height + args.gap
     layout = "|".join(f"{c * cw}_{r * ch}" for r in range(args.rows) for c in range(args.cols))
