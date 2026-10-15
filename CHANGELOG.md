@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.9.0
+
+_Automated release: version and notes generated from pull requests merged since 2.8.7._
+
 ### Added
 
 - **A per-machine speech model, and `--model` on `silence.py --filler --transcribe` (#328).** `FFMPEG_SKILL_ASR_MODEL` is the model `caption.py --transcribe` and `silence.py --filler --transcribe` use when no `--model` is given (else `base`, as before), so a machine with `ggml-large-v3-turbo.bin` no longer needs `--model` on every call, and filler timing is no longer stuck on `base`. An explicit `--model` still wins and still goes to whichever engine runs. A Parakeet model in the variable (an `mlx-community/parakeet-*` repo or a `.gguf`) is offered to the Parakeet engines only and the Whisper engines keep `base`, so a machine default never makes auto's Whisper route for another language fail on a model it cannot load; a Whisper name leaves Parakeet routing and Parakeet's own model as they were. The result's `transcription.model` names the model that ran. `caption.py --model` no longer advertises a `base` default in its schema (it is resolved at run time); `silence.py`'s MCP schema gains `model`.
+- feat: per-machine ASR model (FFMPEG_SKILL_ASR_MODEL) and silence.py --model (#330)
 
 ## 2.8.7
 
