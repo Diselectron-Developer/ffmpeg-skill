@@ -33,7 +33,7 @@ from typing import List, Optional
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
 from _common import (aac_args, add_common, brand_caption_style, script_font_for_text, apply_common, cfr_args,
-                     color_hex, default_font_file, default_output, die, emit, escape_drawtext, escape_filter_path,
+                     color_hex, default_font_file, default_output, die, draws_chroma, drawn_chain, emit, escape_drawtext, escape_filter_path,
                      ffmpeg_base, info, label_chain, load_brand, parse_time, probe, rgb_chain_to_bt709, run, run_keeping_subtitles, video_args,
                      drawtext_boxborderw, drawtext_center_align, X264_PRESETS, time_arg, fmt_secs, STATE, drawtext_text_opts,
                      LANGUAGE_NAMES, needs_shaping, detect_script, BIDI_SCRIPTS, font_family_of_file, font_family_for_script, has_emoji,
@@ -42,6 +42,9 @@ from _common import (aac_args, add_common, brand_caption_style, script_font_for_
                      SAFE_WIDTH_FRACTION)
 from _ass_overlay import text_overlay_ass, EMOJI_SENTINEL
 
+# where the template's text chain goes in a filter_complex it builds (graphics.main fills it in)
+TEXT = "@TEXT@"
+BOX = "@BOX@"  # a box's place in the filter chain, followed by its index (graphics.main fill_box)
 TEMPLATES = ["lower-third", "title", "chapter", "progress", "countdown", "bug", "sticker", "hook", "meme"]
 
 
@@ -185,6 +188,35 @@ def main() -> int:
     en = f"enable='between(t,{s:.3f},{e:.3f})'"
     base = min(W, H) * args.scale  # scale everything from the short side
     filters: List[str] = []
+    rate = f"{meta['video'].get('fps') or 30:g}"
+    # A drawn colour lands in the BT.709 the output is tagged with. When a template's box has
+    # chroma, its boxes are colour sources made in RGB and converted (rgb_chain_to_bt709), overlaid
+    # under the text, in order: drawbox turns its colour into YUV with BT.601 on every FFmpeg (and
+    # blends 4:2:0 chroma four times over, so a translucent box was nearly opaque in colour). A
+    # template whose boxes are all grey keeps its drawboxes, which are the same under every matrix.
+    # The text (drawtext, libass) goes through drawn_chain() at the end.
+    boxes: List[tuple] = []  # (colour, alpha, drawbox geometry, x, y, w, h, enable, x_expr), in order
+    layers: List[tuple] = []  # (colour source chain, overlay position and enable), under the text
+    converted: List[str] = []  # the colour sources layer_src() converted
+
+    def fill_box(colour: str, alpha: float, drawbox_geo: str, x: int, y: int, w: int, h: int, enable: str,
+                 x_expr: Optional[str] = None) -> None:
+        """A filled box: a drawbox (`drawbox_geo`) at its place in the filter chain, or a colour layer
+        of w x h at x, y (or at the per-frame `x_expr`) -- decided for all of a template's boxes."""
+        filters.append(f"{BOX}{len(boxes)}")
+        boxes.append((colour, alpha, drawbox_geo, x, y, w, h, enable, x_expr))
+
+    def layer_src(colour: str, alpha: float, w: int, h: int, left: int = 0, top: int = 0) -> str:
+        """A colour source to overlay (a box, the lower-third bar, the progress fill), converted when it
+        has chroma. overlay places a 4:2:0 picture on even rows and columns only: a box that starts on
+        an odd one is placed one earlier with a transparent first column/row (`left`, `top`), so it
+        covers the rows and columns the drawbox did."""
+        conv = rgb_chain_to_bt709(meta) if draws_chroma([colour], meta) else ""
+        if conv:
+            converted.append(colour)
+        edge = f",pad={w + left}:{h + top}:{left}:{top}:color=black@0" if left or top else ""
+        return (f"color=c=0x{colour}" + (f"@{alpha:g}" if alpha < 1 else "") + f":s={w}x{h}:r={rate},format=rgba"
+                + edge + conv)
     fade_a = f"if(lt(t,{s:.3f}+0.3),(t-{s:.3f})/0.3,if(gt(t,{e:.3f}-0.3),({e:.3f}-t)/0.3,1))"
 
     # --- which renderer draws the text (1.15) --------------------------------------------------
@@ -333,8 +365,8 @@ def main() -> int:
         y0 = H - m_bottom - bar_h
         # slide in from the left over 0.4 s, slide out over 0.3 s (overlay evaluates x per frame)
         x_expr = f"if(lt(t,{s:.3f}+0.4),-{bar_w}+({bar_w}+{m_left})*((t-{s:.3f})/0.4),if(gt(t,{e:.3f}-0.3),{m_left}-({bar_w}+{m_left})*(1-({e:.3f}-t)/0.3),{m_left}))"
-        fc.append(f"color=c=0x{bg}@0.85:s={bar_w}x{bar_h}:r={meta['video'].get('fps') or 30:g},format=rgba[bar]")
-        fc.append(f"color=c=0x{primary}:s={int(base * 0.012)}x{bar_h}:r={meta['video'].get('fps') or 30:g},format=rgba[acc]")
+        fc.append(f"{layer_src(bg, 0.85, bar_w, bar_h)}[bar]")
+        fc.append(f"{layer_src(primary, 1.0, int(base * 0.012), bar_h)}[acc]")
         fc.append(f"[0:v][bar]overlay=x='{x_expr}':y={y0}:{en}:eof_action=pass[v1]")
         fc.append(f"[v1][acc]overlay=x='{x_expr}':y={y0}:{en}:eof_action=pass[v2]")
         tx_pad = int(base * 0.035)
@@ -361,14 +393,16 @@ def main() -> int:
                                      align=7, x=x_rest, y=ty, outline=max(1.0, fs / 16.0),
                                      outline_color="000000", start=max(s, e - 0.3), end=e,
                                      move=(x_rest, ty, x_off, ty, 0, 300), x_expr=tx))
-        fc.append(f"[v2]{','.join(draws)}[vout]" if route != "ass" else "[v2]null[vout]")
+        fc.append(f"[v2]{TEXT}[vout]" if route != "ass" else "[v2]null[vout]")
+        if route != "ass":
+            filters.extend(draws)  # the text chain, which drawn_chain() places at TEXT
 
     elif args.template == "title":
         if not args.title:
             die("title needs --title")
         h1 = int(base * 0.11)
         h2 = int(base * 0.045)
-        filters.append(f"drawbox=x=0:y=0:w=iw:h=ih:color={ff_color(bg, 0.55)}:t=fill:{en}")
+        fill_box(bg, 0.55, "x=0:y=0:w=iw:h=ih", 0, 0, W, H, en)
         # the title is centred as a block, so the bar and the subtitle sit below its last line:
         # `title_h` is the block's height, as the one-line layout has always taken h1; a further
         # subtitle line hangs below the first, whose position the one-line layout fixes
@@ -380,7 +414,9 @@ def main() -> int:
                  size=h1, color=text_c, font=ass_font_family(), align=5, x=W / 2,
                  y=H / 2 - (h2 if args.subtitle else 0), outline=max(1.0, h1 / 20.0),
                  outline_color="000000", start=s, end=e, fade=(300, 300))
-        filters.append(f"drawbox=x=(iw-{int(base * 0.12)})/2:y=(ih)/2+{title_h // 2}:w={int(base * 0.12)}:h={max(2, int(base * 0.006))}:color={ff_color(primary)}:t=fill:{en}")
+        acc_w, acc_h = int(base * 0.12), max(2, int(base * 0.006))
+        fill_box(primary, 1.0, f"x=(iw-{acc_w})/2:y=(ih)/2+{title_h // 2}:w={acc_w}:h={acc_h}",
+                 (W - acc_w) // 2, H // 2 + title_h // 2, acc_w, acc_h, en)
         if args.subtitle:
             add_text(args.subtitle,
                      f"drawtext={drawtext_text_opts(args.subtitle)}:{fo}:fontsize={h2}:fontcolor={ff_color(primary)}{drawtext_center_align()}:x=(w-text_w)/2:y=(h-text_h)/2+{sub_y + sub_extra // 2}:alpha='{fade_a}':{en}",
@@ -412,8 +448,12 @@ def main() -> int:
     elif args.template == "progress":
         h = max(3, int(base * 0.008))
         fps = meta['video'].get('fps') or 30
-        fc.append(f"color=c=0x{primary}:s={W}x{h}:r={fps:g},format=rgba[pb]")
-        fc.append(f"[0:v]drawbox=x=0:y=ih-{h}:w=iw:h={h}:color={ff_color(bg, 0.5)}:t=fill:{en}[v1]")
+        fc.append(f"{layer_src(primary, 1.0, W, h)}[pb]")
+        if draws_chroma([bg], meta):
+            fc.append(f"{layer_src(bg, 0.5, W, h, 0, (H - h) % 2)}[pbg]")
+            fc.append(f"[0:v][pbg]overlay=x=0:y={(H - h) // 2 * 2}:{en}:eof_action=pass[v1]")
+        else:
+            fc.append(f"[0:v]drawbox=x=0:y=ih-{h}:w=iw:h={h}:color={ff_color(bg, 0.5)}:t=fill:{en}[v1]")
         fc.append(f"[v1][pb]overlay=x='-w+w*min(1,max(0,(t-{s:.3f})/{e - s:.3f}))':y={H - h}:{en}:eof_action=pass[vout]")
 
     elif args.template == "sticker":
@@ -465,14 +505,15 @@ def main() -> int:
         # drawing white text on the bare video. The band is clipped at the frame edges.
         band_h = min(H, max(int(base * 0.30), block_h(hook_title, h1) + int(h1 * 0.7)))
         y0 = (H - band_h) // 2
-        filters.append(f"drawbox=x=0:y={y0}:w=iw:h={band_h}:color={ff_color(bg, 0.78)}:t=fill:{hen}")
+        fill_box(bg, 0.78, f"x=0:y={y0}:w=iw:h={band_h}", 0, y0, W, band_h, hen)
         add_text(hook_title,
                  f"drawtext={drawtext_text_opts(hook_title)}:{fo}:fontsize={h1}:fontcolor={ff_color(text_c)}"
                  f"{drawtext_center_align()}:x=(w-text_w)/2:y=(h-text_h)/2:{hen}",
                  size=h1, color=text_c, font=ass_font_family(), align=5, x=W / 2, y=H / 2,
                  outline=max(1.0, h1 / 20.0), outline_color="000000", start=s, end=he)
-        filters.append(f"drawbox=x=0:y=0:w='iw*max(0,1-(t-{s:.3f})/{max(0.001, he - s):.3f})':h={bar_h}:"
-                       f"color={ff_color(primary)}:t=fill:{hen}")
+        # the bar empties from the right: the overlay slides a full-width bar out to the left
+        fill_box(primary, 1.0, f"x=0:y=0:w='iw*max(0,1-(t-{s:.3f})/{max(0.001, he - s):.3f})':h={bar_h}", 0, 0, W, bar_h,
+                 hen, x_expr=f"'-W*min(1,max(0,(t-{s:.3f})/{max(0.001, he - s):.3f}))'")
 
     elif args.template == "meme":
         # The classic layout: heavy white upper-case lines with a black outline, top and bottom,
@@ -588,15 +629,42 @@ def main() -> int:
                         "clusters": sorted({emoji_codepoint_name(cl) for _i, cl in emoji_clusters(all_text)}),
                         "assets": emoji_assets, "missing": [], "overlays": 0}
 
+    # The boxes with chroma (layers) go under the text, and the picture they and a converted colour
+    # source are overlaid on gets its BT.709 label (an untagged one, tags only), so 7.1+'s overlay
+    # converts neither picture to the other's matrix. The text is drawn in BT.709 (drawn_chain).
+    as_layers = any(draws_chroma([b[0]], meta) for b in boxes)
+    drawboxes = []
+    for colour, alpha, geo, x, y, w, h, enable, x_expr in boxes:
+        if as_layers:
+            layers.append((layer_src(colour, alpha, w, h, x % 2, y % 2), f"x={x_expr or x - x % 2}:y={y - y % 2}:{enable}"))
+        drawboxes.append(f"drawbox={geo}:color={ff_color(colour, alpha)}:t=fill:{enable}")
+    filters = [("" if as_layers else drawboxes[int(f[len(BOX):])]) if f.startswith(BOX) else f for f in filters]
+    filters = [f for f in filters if f]
+    base_label = label_chain(meta, meta) if (layers or converted) else ""
+    text = (drawn_chain(",".join(filters), meta, re.findall(r"color=([0-9A-Za-z#@.]+)", ",".join(filters)),
+                        labelled=bool(base_label)) if filters else "")
+    if layers:
+        cur = "0:v"
+        for k, (src, pos) in enumerate(layers):
+            fc.append(f"{src}[gl{k}]")
+            fc.append(f"[{cur}][gl{k}]overlay={pos}:eof_action=pass[gv{k}]")
+            cur = f"gv{k}"
+        fc.append(f"[{cur}]{TEXT}[vout]")
+    fc = [c.replace(TEXT, text or "null") for c in fc]
+    if fc and base_label:
+        fc = [f"[0:v]{base_label}null[gbase]"] + [c.replace("[0:v]", "[gbase]") for c in fc]
+
     cmd = ffmpeg_base() + ["-i", args.input]
     if route == "ass" or emoji_overlays:
-        chains = list(fc) if fc else [f"[0:v]{','.join(filters) if filters else 'null'}[vout]"]
+        chains = list(fc) if fc else [f"[0:v]{text or 'null'}[vout]"]
         last = "vout"
         if route == "ass":
             vf = f"ass={escape_filter_path(ass_path)}"
             fdir = ass_fonts_dir()
             if fdir:
                 vf += f":fontsdir={escape_filter_path(fdir)}"
+            vf = drawn_chain(vf, meta, [el.get(k) for el in elements for k in ("color", "outline_color", "box_color")],
+                             labelled=bool(base_label))
             chains.append(f"[{last}]{vf}[vtxt]")
             last = "vtxt"
         eo, emoji_inputs = emoji_filter_chain({"overlays": emoji_overlays}, last, "vfinal", first_input=1,
@@ -615,7 +683,7 @@ def main() -> int:
     elif fc:
         cmd += ["-filter_complex", ";".join(fc), "-map", "[vout]", "-map", f"0:a:{args.audio_stream}?"]
     else:
-        cmd += ["-vf", ",".join(filters), "-map", "0:v:0", "-map", f"0:a:{args.audio_stream}?"]
+        cmd += ["-vf", text, "-map", "0:v:0", "-map", f"0:a:{args.audio_stream}?"]
     cmd += video_args(meta, args.crf, args.preset) + cfr_args(meta)
     cmd += aac_args() if meta.get("audio") else ["-an"]
     dropped_streams = run_keeping_subtitles(cmd, output)

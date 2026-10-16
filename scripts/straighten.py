@@ -22,7 +22,7 @@ import argparse
 import math
 import sys
 
-from _common import add_common, apply_common, aac_args, cfr_args, default_output, die, emit, ffmpeg_base, info, probe, run_keeping_subtitles, validate_color, video_args, X264_PRESETS, fmt_secs
+from _common import add_common, apply_common, aac_args, cfr_args, default_output, die, drawn_chain, emit, ffmpeg_base, info, probe, run_keeping_subtitles, validate_color, video_args, X264_PRESETS, fmt_secs
 
 
 def main() -> int:
@@ -63,8 +63,10 @@ def main() -> int:
 
     radians = math.radians(args.degrees)
     if args.fit == "pad":
-        rotate = (f"rotate={radians:.8f}:fillcolor={args.fill_color}:"
-                  f"ow=trunc(rotw({radians:.8f})/2)*2:oh=trunc(roth({radians:.8f})/2)*2")
+        geometry = f"ow=trunc(rotw({radians:.8f})/2)*2:oh=trunc(roth({radians:.8f})/2)*2"
+        # a --fill-color with chroma lands in the BT.709 the output is tagged with (drawn_chain)
+        rotate = drawn_chain(f"rotate={radians:.8f}:fillcolor={args.fill_color}:{geometry}", meta, [args.fill_color],
+                             f"rotate={radians:.8f}:fillcolor=black:{geometry}")
     else:
         # Pre-scale the frame up by a safe, conservative factor (|cos|+|sin|, the exact growth
         # factor for a square, over-generous for a rectangle) so the rotated content fully

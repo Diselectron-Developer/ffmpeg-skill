@@ -39,7 +39,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from _common import STATE, AUDIO_MEDIA_EXT, matrix_chain, video_args, aac_args, add_common, apply_common, audio_codec_for, default_output, die, dry_run_input_pending, emit, ffmpeg_base, info, measured_level_dbfs, is_audio_output, probe, require_tool, run, validate_color, X264_PRESETS, fmt_secs
+from _common import STATE, AUDIO_MEDIA_EXT, draws_chroma, drawn_chain, label_chain, matrix_chain, video_args, aac_args, add_common, apply_common, audio_codec_for, default_output, die, dry_run_input_pending, emit, ffmpeg_base, info, measured_level_dbfs, is_audio_output, probe, require_tool, run, validate_color, X264_PRESETS, fmt_secs
 
 TRANSITIONS = ["fade", "dissolve", "wipeleft", "wiperight", "wipeup", "wipedown", "slideleft", "slideright",
                "circleopen", "circleclose", "fadeblack", "fadewhite", "smoothleft", "smoothright", "radial", "none"]
@@ -478,14 +478,26 @@ def main() -> int:
             added += 1
     cmd += extra_inputs
 
-    if args.fit == "crop":
-        geo = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
-    else:
-        geo = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color={args.pad_color}"
     # Any HDR input makes the join HDR (10-bit, HEVC via video_args on that clip's tags): an SDR
     # first clip used to drag an HDR second clip down to 8-bit without a tone map.
     hdr_meta = next((m for m in metas if (m.get("video") or {}).get("bt2020_or_hdr")), None)
     pixfmt = "yuv420p10le" if hdr_meta else "yuv420p"
+    line = hdr_meta or metas[0]
+    # a BT.601 or RGB clip is converted to the BT.709 the join is tagged with, each clip by its own
+    # tags; beside a converted clip (or under a --pad-color with chroma) an untagged one gets its
+    # BT.709 label, tags only, so 7.1+'s concat/xfade and pad have nothing to convert or misread
+    convert = [matrix_chain(m, line) for m in metas]
+    chroma_pad = args.fit != "crop" and draws_chroma([args.pad_color], line)
+    if any(convert) or chroma_pad:
+        convert = [c or label_chain(m, line) for c, m in zip(convert, metas)]
+
+    def geo(i: int) -> str:
+        if args.fit == "crop":
+            return f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+        pad = f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color="
+        return (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                + drawn_chain(pad + args.pad_color, metas[i], [args.pad_color], pad + "black", line_meta=line,
+                              tag=f"pad{i}", labelled=True))
     # the audio-only join keeps the widest layout; the video join used to force stereo and
     # silently dropped the centre/LFE of 5.1 material. A pending input's stub has no measured
     # layout: plan from the inputs that exist, as join_audio() does.
@@ -497,8 +509,7 @@ def main() -> int:
     if len(set(chans)) > 1:
         info(f"channel counts differ ({', '.join(str(c) for c in chans)}); every clip becomes {layout}")
     for i in range(n):
-        # a BT.601 clip is converted to the BT.709 the join is tagged with, each clip by its own tags
-        parts.append(f"[{i}:v]{matrix_chain(metas[i], hdr_meta or metas[0])}{geo},setsar=1,fps={fps:g},format={pixfmt},settb=AVTB[v{i}]")
+        parts.append(f"[{i}:v]{convert[i]}{geo(i)},setsar=1,fps={fps:g},format={pixfmt},settb=AVTB[v{i}]")
         parts.append(f"[{audio_src[i]}]aformat=sample_rates=48000:channel_layouts={layout},asetpts=PTS-STARTPTS[a{i}]")
 
     # pad the shorter stream to the clip's length: the audio with silence, the picture by holding

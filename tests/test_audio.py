@@ -471,7 +471,17 @@ class AudiogramTests(MediaFixtures):
                 expected.extend(bt709_tag_args())
             else:
                 expected.append(part.format(ffmpeg=plan[0], input=str(self.src), output=str(out)))
+        # 2.10.3: the default lime waves have chroma, so they and the plate are made in RGB and
+        # converted to the BT.709 the output is tagged with (drawn colours); 1.15.1's graph is
+        # otherwise unchanged -- and byte for byte unchanged for grey waves (below)
+        graph = expected.index("-filter_complex") + 1
+        pinned = expected[graph]
+        expected[graph] = (pinned.replace("r=25[bg]", "r=25,format=rgb24,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[bg]")
+                           .replace("colors=lime[vis]", "colors=lime,scale=out_color_matrix=bt709:out_range=tv,format=yuva420p[vis]"))
         self.assertEqual(plan, expected)
+        grey = self._plan(self.src, "--width", "640", "--height", "360", "--color", "white", "-o", out)
+        expected[graph] = pinned.replace("colors=lime", "colors=white")
+        self.assertEqual(grey, expected)
 
     def test_audiogram_graph_has_one_overlay_per_layer(self):
         plate = self._plate(640, 360)

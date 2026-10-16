@@ -14,7 +14,9 @@ by every re-encode (through 2.10.0 only the label changed); `color.py --retag bt
 stream copy and still only relabels. Untagged sources are taken as BT.709 and left alone. An RGB
 picture (PNG/JPEG still, logo, emoji PNG, PNG sequence, qtrle clip) is converted to BT.709 YUV
 explicitly (through 2.10.1 FFmpeg's BT.601 default did it), and `grid.py` converts each cell by its
-own tags. When `probe.py` reports
+own tags. A colour the tools draw (pad and background colours, text, boxes, captions, waveform
+colours) is drawn in BT.709 too; through 2.10.2 it was BT.601 under the BT.709 tag (pure red
+showed as (255,24,0)). When `probe.py` reports
 `bt2020_or_hdr: true` (HDR10/PQ, HLG, Dolby Vision, or BT.2020 SDR), every editing script keeps
 the output on the 10-bit path (HEVC Main10, source colour tags) so nothing is silently
 flattened. Decide with the user: keep HDR (fine for YouTube/phones) or run

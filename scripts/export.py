@@ -165,7 +165,10 @@ def main() -> int:
             if args.fit == "crop":
                 vf += [f"scale={p['w']}:{p['h']}:force_original_aspect_ratio=increase", f"crop={p['w']}:{p['h']}"]
             else:
-                vf.append(pad_filters(p["w"], p["h"], args.pad_fill, args.pad_color, args.pad_blur))
+                # a --pad-color with chroma is drawn in the BT.709 the line is tagged with; a GIF is
+                # not tagged, and palettegen reads the pad back with the same BT.601 it was drawn in
+                vf.append(pad_filters(p["w"], p["h"], args.pad_fill, args.pad_color, args.pad_blur,
+                                      meta=None if args.preset == "gif" else meta))
             vf.append("setsar=1")
         else:
             vf.append(f"scale={p['w']}:-2")

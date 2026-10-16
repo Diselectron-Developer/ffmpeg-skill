@@ -14,12 +14,14 @@ import argparse
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
-from _common.color import bt709_label_filter, bt709_matrix_args, bt709_matrix_filter, bt709_tag_args, rgb_to_bt709_filter, _sdr_bt709
+from _common.color import (bt709_label_filter, bt709_matrix_args, bt709_matrix_filter, bt709_tag_args, drawn_stream_format,
+                           is_neutral_color, rgb_island, rgb_to_bt709_filter, _sdr_bt709)
 from _common.emit import die
 from _common.runner import CODECS, STATE, ffmpeg_encoders, ffmpeg_version, hw_platform_reason
 
 
-def pad_filters(out_w: int, out_h: int, fill: str, color: str, blur: int, darken: float = 0.0) -> str:
+def pad_filters(out_w: int, out_h: int, fill: str, color: str, blur: int, darken: float = 0.0,
+                meta: Optional[Dict[str, Any]] = None) -> str:
     """The letterbox/pillarbox step shared by fit.py and export.py, as one -vf segment.
 
     fill="color": scale to fit, then pad with a solid colour (the historical behaviour).
@@ -30,7 +32,10 @@ def pad_filters(out_w: int, out_h: int, fill: str, color: str, blur: int, darken
     needed beyond the usual scale/pad set, and that is already required by redact.py.
     `darken` > 0 also dims that background copy by that much brightness (eq), so the picture in
     front reads as the subject instead of competing with a bright blurred copy of itself --
-    what `fit.py --fit blur` uses (1.14)."""
+    what `fit.py --fit blur` uses (1.14).
+    `meta`: the probe of the picture being padded, when the output is that picture's re-encode: a
+    --pad-color with chroma is then drawn in the BT.709 the line tags (drawn_chain()). Without it
+    (a still made RGB, an export to GIF) the pad is what it always was."""
     if fill == "blur":
         # boxblur rejects a radius larger than half the smaller dimension ("radius 20, must be
         # <= 8" on a 16 px target); clamp instead of failing an otherwise valid request
@@ -40,7 +45,9 @@ def pad_filters(out_w: int, out_h: int, fill: str, color: str, blur: int, darken
                 f"boxblur={radius}:2" + (f",eq=brightness=-{darken:g}" if darken else "") + "[__fitbgb];"
                 f"[__fitfg]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[__fitfgs];"
                 f"[__fitbgb][__fitfgs]overlay=(W-w)/2:(H-h)/2:format=auto")
-    return f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color={color}"
+    pad = f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color="
+    return (f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+            + (pad + color if meta is None else drawn_chain(pad + color, meta, [color], pad + "black", tag="pad")))
 
 
 def add_pad_fill_args(parser: "argparse.ArgumentParser") -> None:
@@ -572,6 +579,39 @@ def rgb_chain_to_bt709(line_meta: Optional[Dict[str, Any]], pix_fmt: str = "yuva
     if STATE.codec == "prores" or ((line_meta or {}).get("video") or {}).get("bt2020_or_hdr"):
         return ""
     return "," + rgb_to_bt709_filter(pix_fmt)
+
+
+def draws_chroma(colours: Sequence[Any], line_meta: Optional[Dict[str, Any]]) -> bool:
+    """True when one of `colours` has chroma (is_neutral_color) and the line video_args(line_meta)
+    tags the output BT.709 -- when a drawn colour needs drawn_chain() at all."""
+    return (not all(is_neutral_color(c) for c in colours if c is not None) and STATE.codec != "prores"
+            and not ((line_meta or {}).get("video") or {}).get("bt2020_or_hdr"))
+
+
+def drawn_chain(colour_chain: str, meta: Optional[Dict[str, Any]], colours: Sequence[Any], neutral_chain: str = "null",
+                line_meta: Any = "same", tag: str = "d", labelled: bool = False) -> str:
+    """`colour_chain` -- filters that draw a colour into the picture `meta` probes (drawtext's
+    font/box/border colours, pad/tpad's fill, rotate's fillcolor, libass) -- so that a colour of
+    `colours` lands in the BT.709 the line video_args(line_meta) tags the output with (line_meta
+    defaults to meta).
+
+    FFmpeg's drawing filters turn an RGB colour into YUV with a matrix of their own (ff_draw):
+    BT.601 always up to 7.0, the link's colourspace from 7.1 on, "unknown" read as BT.601. Through
+    2.10.2 a drawn colour was BT.601 under a BT.709 tag on every build (pure red decoded as
+    (255,24,0)), and on 5.1/6.1 for a BT.709-tagged source too. From 7.1 an untagged picture gets
+    its BT.709 label (label_chain(): tags only) and the filters follow it; before 7.1 the drawing
+    runs in RGB (rgb_island(), `neutral_chain` being the same filters with a black fill, or null).
+
+    Unchanged: a chain whose colours are all greys (the same YUV under every matrix: the default
+    black pads and white text), a line that does not tag BT.709 (HDR, prores). `labelled`: the
+    caller's graph already labels this picture (label_chain()) earlier in the same chain."""
+    line = meta if line_meta == "same" else line_meta
+    if not draws_chroma(colours, line):
+        return colour_chain
+    if ffmpeg_version() >= (7, 1):
+        return ("" if labelled else label_chain(meta, line)) + colour_chain
+    pix_fmt, full = drawn_stream_format(meta)
+    return rgb_island(colour_chain, neutral_chain, pix_fmt, full, tag)
 
 
 def source_codec_video_args(meta: Optional[Dict[str, Any]], crf: int = 18, preset: str = "medium",

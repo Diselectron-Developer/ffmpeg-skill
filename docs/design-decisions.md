@@ -176,17 +176,61 @@ exists. When a decision changes, edit the entry in the same PR.
   a converted picture meets an untagged one, the untagged one is labelled BT.709 (`setparams`, tags
   only; `label_chain()`), which is what the output's tag says it is: no conversion is left to
   negotiate, and on 5.1/6.1 the label changes nothing. It is applied only there (a still over the
-  video, a grid with a converted cell), so a one-input re-encode of an untagged source, and a grid of
-  untagged/BT.709 clips, keep their commands; `join`/`multicam`/`broll`/`overlay --video` do not
-  label yet, and on 7.1+ mixing an untagged and a BT.601 clip there still shifts one of them (a
-  separate change). Known on FFmpeg 7.0.x only (not in CI): its `colorspace` filter does not declare
-  the converted link, so a BT.601 clip *first* in `grid`/`join` still takes the others with it.
-  Code: `_common/color.py`, `_common/decision.py`. Tests:
+  video, a grid with a converted cell, and since 2.10.3 a `join`/`multicam`/`broll`/`overlay --video`
+  with a converted clip, where an untagged clip beside a BT.601 one was shifted on 7.1+: 7.08 mean /
+  25.0 max with the BT.601 clip first, 9.12 / 40.1 with it second, on 7.1.1 and 8.1.3), so a
+  one-input re-encode of an untagged source, and a grid or join of untagged/BT.709 clips, keep their
+  commands. Known on FFmpeg 7.0.x only (not in CI): its `colorspace` filter does not declare the
+  converted link, so a BT.601 clip *first* in `grid`/`join` still takes the others with it; the fix
+  would change #332's conversion filter for every tool, so it is left. Code: `_common/color.py`,
+  `_common/decision.py`. Tests:
   `test_an_rgb_or_jpeg_source_is_converted_to_the_bt709_it_is_tagged_with`,
   `test_a_still_composited_over_the_video_is_converted_to_bt709`,
   `test_grid_converts_each_cell_by_its_own_tags`,
+  `test_mixing_tools_label_an_untagged_clip_beside_a_converted_one`,
   `test_an_rgb_source_or_a_still_is_converted_to_the_bt709_it_is_tagged_with`,
-  `test_still_and_rgb_tools_plan_the_bt709_conversion`.
+  `test_still_and_rgb_tools_plan_the_bt709_conversion`. These tests' "untagged" clips were tagged
+  bt709 when the fixtures were made by FFmpeg 7.1+ (the scale that drew them labels its output, and
+  x264 wrote that label): they are relabelled unknown before the encode since 2.10.3, so 7.1+ CI runs
+  the untagged case too.
+- **A colour the skill draws is drawn in the BT.709 its output is tagged with: on FFmpeg 7.1+ by
+  labelling an untagged picture, before 7.1 by drawing on an RGB copy and keeping every pixel the
+  drawing did not touch.** A pad, `tpad`, `rotate` fill, `drawtext` font/box/border colour or libass
+  colour is turned into YUV by the drawing filter itself (`ff_draw`): with BT.601 on 5.1-7.0 whatever
+  the picture is tagged, with the link's colourspace from 7.1 on, "unknown" read as BT.601; `drawbox`
+  uses BT.601 on every version, the `color`/`gradients` sources and an RGBA layer went through the
+  encoder line's BT.601 default. Through 2.10.2 every drawn colour was BT.601 under the BT.709 tag
+  (pure red (255,24,0), pure green (0,216,0): 8.80 mean / 38.9 max ΔRGB on 5.1.1, 6.1, 7.1.1 and
+  8.1.3; on 7.1+ only a BT.709-tagged or converted source's pads were right). `drawn_chain()` picks
+  the cheapest way that is exact on each build. 7.1+: the untagged picture is labelled BT.709
+  (`label_chain()`, tags only) and the filters follow the label; generated ASS says `YCbCr Matrix:
+  None`, because 8.x's `ass`/`subtitles` read an absent header as BT.601 whatever the link says
+  (FFmpeg's own SRT header already says None). Before 7.1 nothing makes `ff_draw` use another matrix,
+  so the drawing runs on an RGB copy (`rgb_island()`: in RGB a colour is written as it is, converted
+  back with BT.709), and maskedmerge takes the drawn copy only where it differs from the same round
+  trip without the colour: the RGB round trip is not lossless, so the untouched pixels come from the
+  YUV picture itself (bit-identical, `--quality 0`). The alternatives: a numeric pre-compensation of
+  the colour (the RGB that BT.601 maths turns into the BT.709 YUV) is out of gamut for saturated
+  colours -- pure red needs G = -27, and clamped it is as wrong as before (22.6 max), 15% of the RGB
+  cube cannot be reached; drawing everything in an RGB copy without the mask changes the whole
+  picture; the island on every build costs four scales per frame where 7.1+ needs none, and on 8.x
+  an RGB link with a non-None ASS header is drawn in limited range. Boxes, bars and backgrounds are
+  colour sources made in RGB and converted (`rgb_chain_to_bt709()`, as #333's logos): a `graphics.py`
+  template with a box of chroma draws all its boxes as overlaid colour layers, in their order and
+  under its text, which also ends drawbox's 4:2:0 quirk of blending chroma four times over (a 0.55
+  box was ~0.96 opaque in colour; the layer blends at the stated alpha; a box starting on an odd row
+  or column, which overlay cannot place in 4:2:0, gets a transparent first row/column, so it covers
+  the drawbox's pixels); `background.py`'s `color`/`gradients` and `waveform.py`'s plate and RGBA waves are
+  converted where they are made. Only a colour whose 8-bit YUV differs between the two matrices
+  (`is_neutral_color()`: not a grey, not graphics.py's near-black 101418) changes a command, so the
+  default black pads, white text and black/grey boxes plan what they did. Not converted: a GIF export
+  (untagged, and palettegen reads the pad back with the BT.601 it was drawn in), a prores or HDR line,
+  a caller's own `--ass` file (its colours and YCbCr header are the file's, as libass/FFmpeg read
+  them), and the PNG contact sheets of `look.py`/`scenes.py` (RGB outputs, not tagged video). Code:
+  `_common/color.py` (`is_neutral_color`, `rgb_island`), `_common/decision.py` (`drawn_chain`,
+  `pad_filters`), and each drawing tool. Tests: `test_a_pad_fill_or_background_lands_in_the_bt709_its_output_is_tagged_with`,
+  `test_drawn_text_and_boxes_land_in_the_bt709_their_output_is_tagged_with`,
+  `test_a_picture_that_only_passes_through_keeps_its_pixels`, `test_drawn_colours_are_drawn_in_bt709`.
 - **`--correct` converts through bt601 on both legs** (not bt709), because on every tested
   FFmpeg the 709 round trip through 8-bit 4:2:0 loses ~5 dB more than 601. Code:
   `color.py _rgb_stage()`. Test: `test_color_correct_identity_holds_on_a_bt709_tagged_source`.

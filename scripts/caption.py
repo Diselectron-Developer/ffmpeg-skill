@@ -44,7 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from _platforms import (PLATFORMS, PLATFORM_CHOICES, ASS_SCRIPT_HEIGHT, ass_units,
                         resolve as resolve_platform)
 from _ass_overlay import EMOJI_SENTINEL, emoji_placeholder, ass_escape
-from _common import emoji_filter_chain, EMOJI_ASSET_HINT, emoji_asset_for, emoji_codepoint_name, emoji_support, resolve_emoji_assets, ADVANCE_EM, LATIN_EM, NO_SPACE_SCRIPTS, _char_em, char_script, text_width_em, emoji_clusters, has_emoji, detect_script, BIDI_SCRIPTS, STATE, brand_states_font, script_font_for_text, signed_time_arg, brand_caption_style, color_hex, label_chain, load_brand, rgb_chain_to_bt709, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, fmt_srt_time, fmt_smpte_time, info, MissingFpsError, parse_time, probe, run, x264_args, X264_PRESETS, read_text_or_die, fmt_secs, refuse_existing_outputs
+from _common import emoji_filter_chain, EMOJI_ASSET_HINT, emoji_asset_for, emoji_codepoint_name, emoji_support, resolve_emoji_assets, ADVANCE_EM, LATIN_EM, NO_SPACE_SCRIPTS, _char_em, char_script, text_width_em, emoji_clusters, has_emoji, detect_script, BIDI_SCRIPTS, STATE, brand_states_font, script_font_for_text, signed_time_arg, brand_caption_style, color_hex, drawn_chain, label_chain, load_brand, rgb_chain_to_bt709, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, fmt_srt_time, fmt_smpte_time, info, MissingFpsError, parse_time, probe, run, x264_args, X264_PRESETS, read_text_or_die, fmt_secs, refuse_existing_outputs
 # The line breaker, lifted into _common/text.py in 1.16.0 so graphics.py can use the same rules.
 # The ASR bridge and the SRT reader/writer live in _common.asr since 1.17 (silence.py --filler
 # shares them). They stay caption.py's public names -- every caller and test that reached for
@@ -633,7 +633,9 @@ def write_ass(cues: List[Tuple[float, float, str]], path: str, args, play_w: int
     # jump every time the highlight advances (the trap the issue this implements is filed against).
     header = [
         "[Script Info]", "ScriptType: v4.00+", f"PlayResX: {play_w}", f"PlayResY: {play_h}",
-        f"WrapStyle: {2 if word_style else 0}", "ScaledBorderAndShadow: yes", "",
+        # YCbCr Matrix: None -- the colours are RGB, to be put in the video's own matrix: FFmpeg 8.x's
+        # ass filter reads an absent header as BT.601 whatever the picture is tagged (drawn_chain)
+        f"WrapStyle: {2 if word_style else 0}", "ScaledBorderAndShadow: yes", "YCbCr Matrix: None", "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         f"Style: Default,{ass_font_name(args.font)},{size},{primary},{secondary},{outline},{back},{-1 if args.bold else 0},0,0,0,100,100,0,0,{3 if args.box else 1},{args.outline * scale:.1f},{args.shadow * scale:.1f},{ALIGN[args.position]},{margin_l},{margin_r},{margin},1",
@@ -1560,6 +1562,12 @@ def main() -> int:
         vf = f"subtitles={escape_filter_path(srt_path)}:force_style='{force}'"
         if args.fonts_dir:
             vf += f":fontsdir={escape_filter_path(args.fonts_dir)}"
+    if generated_ass or not args.ass:
+        # a text/outline/karaoke colour with chroma lands in the BT.709 the output is tagged with
+        # (drawn_chain). A caller's own --ass is burned as libass and FFmpeg read it: its colours,
+        # and its YCbCr Matrix header, are the file's.
+        vf = drawn_chain(vf, meta, [args.color, args.outline_color]
+                         + ([args.highlight_color, args.upcoming_color] if args.karaoke else []))
 
     cmd = ffmpeg_base() + ["-i", args.input]
     chains, emoji_inputs = (emoji_filter_chain(emoji_plan or {}, "vsub", "vout", to_yuv=rgb_chain_to_bt709(meta),
