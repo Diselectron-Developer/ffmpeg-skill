@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **`join.py` no longer leaves a one-frame hole where a clip's picture starts after 0.** A cut part often has its first video packet a little after its first audio packet (0.08 s against 0.058 s here). Every clip's sound chain already started at 0 (`asetpts=PTS-STARTPTS`), but its picture chain kept the offset, so the concat filter (and `xfade`'s offsets) placed it one frame late: a `--transition none` join of a 2.53 s and a 3.0 s clip at 30 fps came out 166 frames over 5.567 s (29.82 fps, `verified: false`). video-editing-skill's CONCAT correctly refused the file. This was introduced in 2.4.1 (#302), when the plain cut started trimming every clip to `clip_length`. The picture now starts at 0 like its sound: 166 frames over 5.533 s at exactly 30 fps.
 
 ## 2.10.3
 
