@@ -1123,6 +1123,28 @@ class EditingTests(MediaFixtures):
         self.assertEqual(self._pts_steps(out), {0.0333})
         self.assertEqual(len(self._gray_frames(out)), 2 * 90)
 
+    def test_join_none_starts_a_late_picture_at_its_cut(self):
+        """A clip whose picture starts after 0 (a cut part whose first video packet sits at 0.08 s): the
+        audio chains started at 0 but the video chain kept that offset, and the concat filter placed it
+        after the previous clip -- a one-frame hole and 29.82 fps where 30 was asked (video-editing-skill's
+        CONCAT refused the file). Each clip's picture now starts at 0 like its sound."""
+        d = OUT / "join_none_late"
+        d.mkdir(exist_ok=True)
+        a = self._moving_clip(d / "a.mp4", 3, 3, 700)
+        b = self._moving_clip(d / "b.mp4", 3, 3, 1900)
+        late = d / "b_late.mp4"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-itsoffset", "0.08", "-i", str(b), "-i", str(b),
+                        "-map", "0:v", "-map", "1:a", "-c", "copy", str(late)], check=True)
+        start = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=start_time",
+                                "-of", "csv=p=0", str(late)], stdout=subprocess.PIPE, text=True, check=True).stdout
+        self.assertAlmostEqual(float(start), 0.08, places=2, msg="the premise: the picture starts at 0.08 s")
+        out = d / "late.mp4"
+        doc = json.loads(script("join.py", a, late, "--transition", "none", "--preset", "ultrafast", "--json",
+                                "-o", out).stdout)
+        self.assertTrue(doc["verified"], doc["verification"])
+        self.assertEqual(self._pts_steps(out), {0.0333}, "no hole at the cut")
+        self.assertEqual(len(self._gray_frames(out)), 2 * 90)
+
     def test_join_dissolve_of_short_parts_keeps_the_frame_count(self):
         """Two 1 s parts at 30 fps whose AAC sound runs 20 ms past the picture (a cut part) dissolved
         over 0.3 s: 30 + 30 - 9 = 51 frames. Offsetting by the container length added frames and
