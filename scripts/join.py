@@ -509,7 +509,7 @@ def main() -> int:
     if len(set(chans)) > 1:
         info(f"channel counts differ ({', '.join(str(c) for c in chans)}); every clip becomes {layout}")
     for i in range(n):
-        parts.append(f"[{i}:v]{convert[i]}{geo(i)},setsar=1,fps={fps:g},format={pixfmt},settb=AVTB,setpts=PTS-STARTPTS[v{i}]")
+        parts.append(f"[{i}:v]{convert[i]}{geo(i)},setsar=1,setpts=PTS-STARTPTS,fps={fps:g},format={pixfmt},settb=AVTB[v{i}]")
         parts.append(f"[{audio_src[i]}]aformat=sample_rates=48000:channel_layouts={layout},asetpts=PTS-STARTPTS[a{i}]")
 
     # pad the shorter stream to the clip's length: the audio with silence, the picture by holding
