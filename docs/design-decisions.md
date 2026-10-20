@@ -14,7 +14,10 @@ exists. When a decision changes, edit the entry in the same PR.
 - **`FFMPEG_SKILL_TIMEOUT=0` (or `--timeout 0`) means no limit anywhere**, including the outer
   ceiling on sibling-script runs and the MCP dispatch. 0 is the documented "off" value, chosen so
   a genuinely multi-hour job can opt out; the default (1800 s) is what protects an unattended
-  agent. Code: `_common.child_limit()`, `_common._limit_for()`. Test: `test_timeout_kills_a_hung_ffmpeg_and_reports_kind_timeout` (the `--timeout 0` case).
+  agent. Code: `_common.child_limit()`, `_common._limit_for()`, `mcp/server.py` `timeout_from_call()`
+  (a raw `argv` list's `--timeout` sets the same ceiling as the structured `timeout` key). Test:
+  `test_timeout_kills_a_hung_ffmpeg_and_reports_kind_timeout` (the `--timeout 0` case) and
+  `test_mcp_argv_timeout_zero_clears_the_outer_ceiling`.
 - **The outer ceiling is 4x the per-call limit plus 60 s, not the per-call limit itself.** A tool
   runs several ffmpeg/ffprobe calls (two-pass loudness, copy-then-re-encode fallbacks), each under
   its own limit; the outer ceiling only exists to end a child hung for a non-ffmpeg reason. Code:
@@ -284,7 +287,10 @@ exists. When a decision changes, edit the entry in the same PR.
 
 - **`references/process-pitfalls.md` is a maintainer diary and is not in the npm package**;
   `scripts.md`, `devices.md`, `ci-platform-pitfalls.md` and `docs/contract.md` are. Code:
-  `package.json` `files`, `bin/install.js` `PAYLOAD`. Test: `tests/release_check.sh`.
+  `package.json` `files`, `bin/install.js` `PAYLOAD`. Test: `tests/release_check.sh` (the packed
+  tarball and the install made from it must not contain the file; that script needs npm) and
+  `test_npm_package_omits_the_maintainer_diary` (pins the `files` allow-list, which is what CI
+  runs — Windows cannot spawn `npm`, and the debian-trixie job has nodejs without npm).
 - **`npm test` calls `python3`**; the Windows CI job gets it from `actions/setup-python`. A
   Windows machine with only `py` should run the test files directly.
 - **The release bump commit carries the skip-CI marker in its message**; it is pushed by the

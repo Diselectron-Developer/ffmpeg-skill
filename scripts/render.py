@@ -40,7 +40,9 @@ skipped. "brand" points caption/graphics/overlay at a brand.json (fonts,
 colours, logo, safe margin); {"logo": true} in overlays places the brand logo.
 An overlay entry draws one of logo, image, text or video (a picture-in-picture
 layer, overlay.py --video; "chromakey", "chromakey_similarity" and
-"chromakey_blend" key a colour out of that video and need "video").
+"chromakey_blend" key a colour out of that video and need "video"). "scale"
+is that layer's width in px for a logo, image or video; a text entry's size
+is "font_size", and "scale" on a text entry is refused.
 
 "check" mirrors check.py's own exit code: a delivery-spec FAIL (or check.py
 itself failing to run) exits 1, same as running check.py directly would --
@@ -436,6 +438,10 @@ def check_overlay(ov: Any, label: str) -> None:
         tuned = [k for k in ("chromakey_similarity", "chromakey_blend") if ov.get(k) is not None]
         if tuned:
             die(f"{label}: {tuned[0]} tunes \"chromakey\", which this entry does not set")
+    # scale is a layer width (overlay.py --scale). A text entry that carries it used to complete
+    # with the default font size, because the text branch never reads the flag.
+    if ov.get("text") and not any(ov.get(k) for k in ("logo", "image", "video")) and ov.get("scale") is not None:
+        die(f"{label}: scale sizes an image, logo or video layer; text size is font_size", kind="input")
 
 
 def require_object(obj: Any, label: str) -> None:

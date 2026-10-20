@@ -36,6 +36,17 @@ from _common import video_args, add_common, apply_common, emit, aac_args, audio_
 
 SR = 8000  # decode sample rate
 
+
+def sync_meaning(offset: float) -> str:
+    """The sentence a caller reads next to offset_seconds.
+
+    A zero offset used to take the else branch of `later if offset > 0` and say the second
+    file starts earlier. Values that print as 0.000 s (under half a millisecond) say the two
+    recordings start together; anything larger keeps later/earlier."""
+    if abs(offset) < 5e-4:
+        return "second starts together with the reference"
+    return "second starts %.3fs %s than reference" % (abs(offset), "later" if offset > 0 else "earlier")
+
 # Scoring constants for coarse alignment. Both come from tests/bench_sync.py on real dialogue and
 # music with +/-30 s offsets, gain, noise and EQ (see evals/results and CHANGELOG 0.8.0):
 #
@@ -307,7 +318,7 @@ def main() -> int:
             "second": args.second,
             "offset_seconds": offset,
             "confidence": score,
-            "meaning": ("second starts %.3fs %s than reference" % (abs(offset), "later" if offset > 0 else "earlier")),
+            "meaning": sync_meaning(offset),
             "sources": sources_block,
         }
         if drift_info:

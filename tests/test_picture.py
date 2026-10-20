@@ -1078,6 +1078,22 @@ class PictureTests(MediaFixtures):
         script("overlay.py", self.src, "--text", "Episode 12", "--position", "bottom", "--box", "--start", "1", "--end", "5", "--fade", "0.3", "-o", out2)
         self.assertClose(probe(str(out2))["duration"], 12.0, 0.15)
 
+    def test_overlay_text_scale_is_refused(self):
+        """--scale is a layer width. On --text it used to be accepted and ignored, so the draw
+        stayed at fontsize 42 while the result said completed."""
+        for flag in ("--scale", "--scale-percent"):
+            value = "200" if flag == "--scale" else "40"
+            proc = script("overlay.py", self.src, "--text", "Hello", flag, value, "--dry-run", "--json",
+                          "-o", OUT / "ov_text_scale.mp4", expect_fail=True)
+            doc = json.loads(proc.stdout)
+            self.assertEqual(doc["error"]["kind"], "input", flag)
+            self.assertIn("--font-size", doc["error"]["message"])
+            self.assertEqual(doc["commands"], [])
+        # an image layer still takes the width
+        plan = json.loads(script("overlay.py", self.src, "--image", self.logo, "--scale", "80",
+                                 "--dry-run", "--json", "-o", OUT / "ov_img_scale.mp4").stdout)
+        self.assertTrue(any("scale=80:" in c for c in plan["commands"]))
+
     def test_hdr_to_sdr_tonemap(self):
         out = OUT / "sdr.mp4"
         script("color.py", self.hdr, "--to-sdr", "--preset", "veryfast", "-o", out)

@@ -755,10 +755,13 @@ An `overlays[]` entry draws one of `"logo": true`, `"image"`, `"text"` or
 `"video"` (#326: a picture-in-picture or green-screen layer, `overlay.py
 --video`), with `position`, `scale`, `opacity`, `start`, `end`, `margin`,
 `platform` (and `fade`, `box`, `font*` for the still/text kinds) mapping to
-overlay.py's flags. `"chromakey": "0x00ff00"`, `"chromakey_similarity"` and
-`"chromakey_blend"` key a colour out of the video layer. The stage runs after
-`fit`, so `"scale": 480` is 480 px of the delivered frame, and a template's
-safe margins apply as they do to a logo. Refused (`kind: input`) before the
+overlay.py's flags. `scale` is the layer width in px for a logo, image or
+video (`"scale": 480` is 480 px of the delivered frame, because the stage
+runs after `fit`). A text entry's size is `font_size`; `scale` on a text-only
+entry is refused (`kind: input`) rather than drawn at the default font size.
+`"chromakey": "0x00ff00"`, `"chromakey_similarity"` and
+`"chromakey_blend"` key a colour out of the video layer. A template's
+safe margins apply as they do to a logo. Also refused before the
 first stage: `video` together with `logo`/`image`/`text` in one entry (a
 logo, image and text together still draw the first of them, as before), a
 `chromakey*` key without `video`, `chromakey_similarity`/`_blend` without
@@ -1464,7 +1467,9 @@ overlay.py INPUT --image PNG [--scale W | --scale-percent P] | --text "..." [--f
 (`scripts/_platforms.py`), so a template's top-left logo clears TikTok's status bar instead of
 sitting 24 px into it; an explicit `--margin` (or a brand `safe_margin`) wins.
 Alpha in PNGs is respected. Fades apply to the overlay only; the video keeps
-playing. `--video` composites a second video as a picture-in-picture layer
+playing. `--scale` / `--scale-percent` set the width of an image, logo or
+`--video` layer. They are refused with `--text`: text size is `--font-size`.
+`--video` composites a second video as a picture-in-picture layer
 (same position/scale/opacity/time-range knobs as `--image`); only the main
 input's audio is kept, the PiP layer's own audio is dropped. `--chromakey`
 (with `--video`) keys out that colour first for green-screen compositing.

@@ -21,6 +21,12 @@ LIST="$(tar -tzf "$TGZ")"
 for need in package/SKILL.md package/scripts/_common/__init__.py package/scripts/_contract.py package/scripts/probe.py package/references/scripts.md package/references/devices.md package/mcp/server.py package/bin/install.js; do
   echo "$LIST" | grep -qx "$need" || { echo "FAIL: $need missing from the package"; exit 1; }
 done
+# docs/design-decisions.md: the maintainer diary stays in git and out of the tarball.
+# scripts.md, devices.md, ci-platform-pitfalls.md and docs/contract.md are the ones that ship.
+if echo "$LIST" | grep -qx "package/references/process-pitfalls.md"; then
+  echo "FAIL: references/process-pitfalls.md must not be in the npm package"
+  exit 1
+fi
 echo "   ok ($(echo "$LIST" | wc -l | tr -d ' ') files)"
 
 echo "== 2. install from the tarball into a temp HOME"
@@ -30,6 +36,10 @@ HOME="$TMP/home" node "$TMP/pkg/package/bin/install.js" >/dev/null
 for d in SKILL.md scripts references mcp package.json; do
   [ -e "$TMP/home/.claude/skills/ffmpeg-skill/$d" ] || { echo "FAIL: $d not installed"; exit 1; }
 done
+if [ -e "$TMP/home/.claude/skills/ffmpeg-skill/references/process-pitfalls.md" ]; then
+  echo "FAIL: references/process-pitfalls.md was installed from the package"
+  exit 1
+fi
 echo "   ok"
 
 echo "== 3. every script answers --help"
@@ -41,7 +51,10 @@ done
 echo "   ok"
 
 echo "== 4. MCP server lists tools"
-n="$(python3 "$TMP/home/.claude/skills/ffmpeg-skill/mcp/server.py" --list | wc -l | tr -d ' ')"
+# Default tools/list is the core 12 (1.18.3). This step checks the full catalogue, which is
+# what step 6 compares to the contract. FFMPEG_SKILL_MCP_FULL=1 is that catalogue; without it
+# --list prints 12 and the >= 15 floor below fails, and step 6's names == contract fails too.
+n="$(FFMPEG_SKILL_MCP_FULL=1 python3 "$TMP/home/.claude/skills/ffmpeg-skill/mcp/server.py" --list | wc -l | tr -d ' ')"
 [ "$n" -ge 15 ] || { echo "FAIL: MCP server lists only $n tools"; exit 1; }
 echo "   ok ($n tools)"
 
@@ -63,9 +76,10 @@ PY
 
 echo "== 6. MCP tools == contract tools; doctor"
 python3 - "$TMP/contract_inst.json" "$INST" <<'PY'
-import json, subprocess, sys
+import json, os, subprocess, sys
 doc = json.load(open(sys.argv[1]))
-listed = subprocess.run([sys.executable, sys.argv[2] + "/mcp/server.py", "--list"], stdout=subprocess.PIPE, text=True, check=True).stdout
+env = dict(os.environ, FFMPEG_SKILL_MCP_FULL="1")
+listed = subprocess.run([sys.executable, sys.argv[2] + "/mcp/server.py", "--list"], stdout=subprocess.PIPE, text=True, check=True, env=env).stdout
 names = {l.split()[0] for l in listed.splitlines() if l.strip()}
 want = {t["name"] for t in doc["tools"]}
 assert names == want, f"MCP {sorted(names ^ want)} differs from contract"
@@ -73,7 +87,7 @@ assert names == want, f"MCP {sorted(names ^ want)} differs from contract"
 sys.path.insert(0, sys.argv[2] + "/scripts")
 import _contract
 req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"
-resp = json.loads(subprocess.run([sys.executable, sys.argv[2] + "/mcp/server.py"], input=req, stdout=subprocess.PIPE, text=True, check=True).stdout.splitlines()[0])
+resp = json.loads(subprocess.run([sys.executable, sys.argv[2] + "/mcp/server.py"], input=req, stdout=subprocess.PIPE, text=True, check=True, env=env).stdout.splitlines()[0])
 mcp_tools = resp["result"]["tools"]
 assert [t["name"] for t in mcp_tools] == [t["name"] for t in doc["tools"]], "MCP order differs from contract"
 for entry, spec in zip(mcp_tools, doc["tools"]):

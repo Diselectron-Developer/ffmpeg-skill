@@ -1646,6 +1646,80 @@ class ContractTests(unittest.TestCase):
         self.assertEqual([t["id"] for t in doc["tools"]], [t["id"] for t in self.contract["tools"]])
         self.assertEqual(sh("node", ROOT / "bin" / "install.js", "doctor", "--json").returncode, 0)
 
+    def test_windows_store_python_stub_is_not_treated_as_an_interpreter(self):
+        """The Microsoft Store python3 alias is a real executable: spawn succeeds (no ENOENT) and
+        the process exits non-zero. install.js used to stop there. A probe that fails falls
+        through to python, then py; a probe that succeeds does not, even when the script itself
+        exits non-zero. Linux still tries python3 only."""
+        probe = self.out("python_probe.js")
+        probe.write_text(
+            "const inst = require(process.argv[2]);\n"
+            "function callsOf(fn) { return fn.calls.map(c => c[0] + ' ' + c[1]).join('|'); }\n"
+            "function stub(cmd, args) {\n"
+            "  stub.calls.push([cmd, args[0]]);\n"
+            "  if (cmd === 'python3') return { status: 9009, error: null };\n"
+            "  if (cmd === 'python' && args[0] === '-c') return { status: 0, error: null };\n"
+            "  if (cmd === 'python') return { status: 7, error: null };\n"
+            "  return { error: Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), status: null };\n"
+            "}\n"
+            "stub.calls = [];\n"
+            "const fallen = inst.runWithPython(['doctor'], 'win32', stub);\n"
+            "if (fallen.missing || fallen.status !== 7) process.exit(2);\n"
+            "if (callsOf(stub) !== 'python3 -c|python -c|python doctor') process.exit(3);\n"
+            "function kept(cmd, args) {\n"
+            "  kept.calls.push([cmd, args[0]]);\n"
+            "  if (args[0] === '-c') return { status: 0, error: null };\n"
+            "  return { status: 2, error: null };\n"
+            "}\n"
+            "kept.calls = [];\n"
+            "const scriptFailed = inst.runWithPython(['doctor'], 'win32', kept);\n"
+            "if (scriptFailed.missing || scriptFailed.status !== 2) process.exit(4);\n"
+            "if (kept.calls.some(c => c[0] !== 'python3')) process.exit(5);\n"
+            "function missing(cmd, args) {\n"
+            "  missing.calls.push(cmd);\n"
+            "  return { error: Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), status: null };\n"
+            "}\n"
+            "missing.calls = [];\n"
+            "const none = inst.runWithPython(['doctor'], 'linux', missing);\n"
+            "if (!none.missing || missing.calls.join() !== 'python3') process.exit(6);\n"
+            "if (inst.pythonCandidates('linux').join() !== 'python3') process.exit(7);\n"
+            "if (inst.pythonCandidates('win32').join() !== 'python3,python,py') process.exit(8);\n",
+            encoding="utf-8")
+        proc = subprocess.run(["node", str(probe), str(ROOT / "bin" / "install.js")],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
+    def test_npm_package_omits_the_maintainer_diary(self):
+        """docs/design-decisions.md: references/process-pitfalls.md stays out of the npm package.
+
+        release_check.sh is the live `npm pack`. This is the check CI actually runs, and it
+        does not spawn npm: Windows Python cannot CreateProcess `npm` (the runner ships
+        npm.cmd), and the debian-trixie job installs nodejs without the npm package. When
+        `files` is set, `npm pack` includes that allow-list and nothing else, so a directory
+        entry or a glob under references/ is what would pull the diary in.
+        """
+        pkg = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        files = pkg["files"]
+        self.assertIsInstance(files, list)
+        shipped = {
+            "references/scripts.md",
+            "references/devices.md",
+            "references/ci-platform-pitfalls.md",
+            "references/gotchas.md",
+            "docs/contract.md",
+        }
+        self.assertTrue(shipped <= set(files))
+        for entry in files:
+            norm = entry.replace("\\", "/").strip()
+            self.assertNotIn("process-pitfalls", norm, entry)
+            base = norm.rstrip("/")
+            self.assertNotEqual(base, "references", entry)
+            if base.startswith("references/") and any(ch in base for ch in "*?["):
+                self.fail(f"{entry} would pack every file under references/, including the diary")
+        script = (ROOT / "tests" / "release_check.sh").read_text(encoding="utf-8")
+        self.assertIn("package/references/process-pitfalls.md", script)
+        self.assertGreaterEqual(script.count("FFMPEG_SKILL_MCP_FULL"), 2)
+
     def test_installer_agent_targets_are_the_directories_those_agents_actually_read(self):
         """`--codex` installed into ~/.codex/skills for weeks -- a location Codex's own docs never
         list (they name $HOME/.agents/skills, .agents/skills up the repo tree, /etc/codex/skills).
@@ -2145,6 +2219,43 @@ class ContractTests(unittest.TestCase):
         self.assertEqual((doc["status"], doc["error"]["kind"], doc["error"]["code"]), ("failed", "timeout", "TIMEOUT"))
         self.assertIn("sleeper.py", doc["error"]["message"])
         _common.STATE.reset()
+
+    def test_mcp_argv_timeout_zero_clears_the_outer_ceiling(self):
+        """docs/design-decisions.md: --timeout 0 means no limit, including MCP dispatch. The
+        structured `timeout` key already did. A raw argv list ignores every other key, so
+        `--timeout 0` inside it left the outer ceiling at 4x the 1800 s default while the child
+        ran with no limit. A negative value matches apply_common and is also no limit."""
+        captured = {}
+
+        def fake_run_tool(argv, per_call=None):
+            captured["per_call"] = per_call
+            captured["ceiling"] = _common.child_limit(per_call)
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+        saved = mcp_server._common.run_tool
+        mcp_server._common.run_tool = fake_run_tool
+        try:
+            mcp_server.call_tool("probe", {"argv": [str(self.wav), "--timeout", "0"]})
+            self.assertEqual(captured["per_call"], 0.0)
+            self.assertIsNone(captured["ceiling"])
+            self.assertEqual(mcp_server.build_argv("probe", {"argv": [str(self.wav), "--timeout", "0"]}),
+                             [str(self.wav), "--timeout", "0"])
+            mcp_server.call_tool("probe", {"argv": [str(self.wav), "--timeout=0"]})
+            self.assertIsNone(captured["ceiling"])
+            mcp_server.call_tool("probe", {"input": str(self.wav), "timeout": 0})
+            self.assertEqual(captured["per_call"], 0.0)
+            self.assertIsNone(captured["ceiling"])
+            mcp_server.call_tool("probe", {"argv": [str(self.wav), "--timeout", "30"]})
+            self.assertEqual(captured["per_call"], 30.0)
+            self.assertEqual(captured["ceiling"], 180.0)
+            mcp_server.call_tool("probe", {"argv": [str(self.wav), "--timeout", "-5"]})
+            self.assertEqual(captured["per_call"], 0.0)
+            self.assertIsNone(captured["ceiling"])
+            mcp_server.call_tool("probe", {"argv": [str(self.wav)]})
+            self.assertEqual(captured["per_call"], _common._env_timeout())
+            self.assertEqual(captured["ceiling"], _common.child_limit(_common._env_timeout()))
+        finally:
+            mcp_server._common.run_tool = saved
 
     def test_dry_run_plans_rest_on_real_measurements(self):
         """silence.py, loudness.py, check.py and stabilize.py ran their measurement through run(),

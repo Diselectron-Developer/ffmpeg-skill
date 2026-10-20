@@ -627,6 +627,31 @@ class EditingTests(MediaFixtures):
     def test_speedramp_must_start_at_zero_refused(self):
         script("speedramp.py", self.src, "--segment", "1-12:1.0", expect_fail=True)
 
+    def test_speedramp_last_segment_inside_the_coverage_slack_keeps_its_end(self):
+        """The last segment omitted its end bound, and the coverage check allows that end to sit
+        up to 0.5 s before the file. A last segment ending 0.4 s early therefore played the tail
+        at that segment's speed (1.5 s out of a 2 s source, instead of 1.3 s). The bound is
+        omitted only when the stated end is the file's end."""
+        src = OUT / "ramp_slack.mp4"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30",
+           "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+           "-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", src)
+        out = OUT / "ramp_slack_out.mp4"
+        doc = json.loads(script("speedramp.py", src, "--segment", "0-1:1", "--segment", "1-1.6:2",
+                                "--preset", "ultrafast", "--json", "-o", out).stdout)
+        graph = " ".join(doc["commands"])
+        self.assertIn("trim=start=1.000:end=1.600", graph)
+        self.assertIn("atrim=start=1.000:end=1.600", graph)
+        self.assertClose(probe(str(out))["duration"], 1.3, 0.15)
+        # an end that is the file's end still runs to the last packet (no end bound to clip it)
+        plan = json.loads(script("speedramp.py", src, "--segment", "0-2:1", "--dry-run", "--json",
+                                 "-o", OUT / "ramp_slack_eof.mp4").stdout)
+        joined = " ".join(plan["commands"])
+        self.assertIn("trim=start=0.000", joined)
+        self.assertNotIn("trim=start=0.000:end=", joined)
+        self.assertNotIn("atrim=start=0.000:end=", joined)
+
     # ---------------------------------------------------------------- loop
     def test_loop_times_multiplies_duration(self):
         out = OUT / "loop1.mp4"
@@ -1297,12 +1322,15 @@ class EditingTests(MediaFixtures):
         # PQ/HLG, so an HDR source keeps its background at its own levels (review 12)
         sdr_plan = json.loads(script("fit.py", self.src, "--aspect", "9:16", "--fit", "blur",
                                      "--dry-run", "--json", "-o", str(OUT / "blur_sdr.mp4")).stdout)
-        hdr_plan = json.loads(script("fit.py", self.hdr, "--aspect", "9:16", "--fit", "blur",
-                                     "--dry-run", "--json", "-o", str(OUT / "blur_hdr.mp4")).stdout)
+        hdr_proc = script("fit.py", self.hdr, "--aspect", "9:16", "--fit", "blur",
+                          "--dry-run", "--json", "-o", str(OUT / "blur_hdr.mp4"))
+        hdr_plan = json.loads(hdr_proc.stdout)
         self.assertTrue(any("eq=brightness" in c for c in sdr_plan["commands"]))
         self.assertTrue(any("boxblur" in c for c in hdr_plan["commands"]))
         self.assertFalse(any("eq=brightness" in c for c in hdr_plan["commands"]),
                          "an HDR source must not be dimmed by an SDR-shaped eq")
+        self.assertIn("not the -15% dim it is on SDR", hdr_proc.stderr)
+        self.assertNotIn("-15%%", hdr_proc.stderr)
 
     def test_join_list_checks_every_segment_before_joining(self):
         """Reported by a user generating shorts on a VPS: TTS writes one audio file per line,
