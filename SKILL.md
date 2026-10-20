@@ -86,6 +86,7 @@ Timestamp flags (`--start`, `--end`, `--at`, `--from`, `--duration`, `--offset`,
 | "this old footage is interlaced" | `deinterlace.py input.mp4` |
 | "it's grainy/noisy, clean it up" | `denoise.py input.mp4 --strength medium` |
 | "blur/pixelate this face/plate" (known box) | `redact.py input.mp4 --x 820 --y 140 --width 240 --height 240 --mode pixelate` |
+| "remove this fixed logo" (known box) | `redact.py input.mp4 --x 40 --y 20 --width 180 --height 60 --mode delogo` |
 | "stabilize this shaky footage" | `stabilize.py input.mp4` |
 | "are there black bars on this?" | `cropdetect.py input.mp4` |
 | "iPhone Dolby Vision clip looks wrong" | `color.py clip.mov --to-sdr` or `--strip-dovi` (keep HDR, drop the DV layer) |
@@ -196,9 +197,9 @@ Notes: send a valid .cube, or say if you want the clip left as is
 Those filler lines are sentences, not labels: the same report for a Japanese request ends
 `Check: 検証するものなし` / `Look: 不要`.
 
-A refusal uses the same shape: `Failed:` names what was refused and why, `Steps:` lists what did run, `Look: not needed`. The shortest failure gets all five labels, never headings. A partial result is `Done:` with the shortfall in `Notes:`; a refusal that still delivers something is `Failed:` — never a third label like `Done (partially):`. Quote a failure's `error.hint` in `Notes:` — the flag change a retry needs.
+A refusal uses the same shape: `Failed:` names what was refused and why, `Steps:` lists what did run, `Look: not needed`. A partial result is `Done:` with the shortfall in `Notes:`; a refusal that still delivers something is `Failed:` — never a third label like `Done (partially):`. Quote a failure's `error.hint` in `Notes:`.
 
-Every script prints `{"status": "failed", "error": {"kind": input | ffmpeg | output | missing_tool | timeout | verification | interrupted, "message": ...}}` with `--json` and exits non-zero; quote the message, never paraphrase it.
+A failure's `--json` is `status: failed` plus `error.kind` and `error.message`; quote the message, never paraphrase it.
 
 ## Things that look right but are wrong
 

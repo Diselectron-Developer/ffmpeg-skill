@@ -4,7 +4,14 @@
 
 ## Unreleased
 
-(nothing yet)
+### Added
+
+- **README FAQ.** Answers the questions that followed the tool being shared: a caller cannot pass a filter graph or other raw ffmpeg arguments (schemas come from each script's argparse, and CI fails on drift; `doctor` checks the filters beforehand); Remotion and HyperFrames render a picture from code, and a file they write is an ordinary input here; a fixed logo or burned-in line can be interpolated with `redact.py --mode delogo`, while inpainting and anything that moves stay out of scope; nothing tracks a face or a subject; the GPU encode path is Apple VideoToolbox.
+- **`redact.py --mode delogo`.** ffmpeg's `delogo` filter, with the same typed rectangle as blur and pixelate (`--x`, `--y`, `--width`, `--height`). It fills that rectangle from the picture around it. The box has to sit at least 1 px inside the frame (the filter's band is fixed at 1, and the option is gone), and an HDR or 10-bit source is refused. A separate script was not added: this is the known-box operation `redact.py` already owns, and the tool count stays 42.
+
+### Fixed
+
+- **Windows 11 resolves Nirmala UI for Hindi, Bengali and Tamil (#339).** The font ships as `C:\Windows\Fonts\Nirmala.ttc`. `WINDOWS_FONTS` only named `Nirmala.ttf` and `NirmalaB.ttf`, so `doctor` reported no font for `hi`, `bn` and `ta`. The collection is now in those three lists, after the `.ttf` names, so a machine that still has Mangal or `Nirmala.ttf` keeps that file.
 
 ## 2.10.4
 
