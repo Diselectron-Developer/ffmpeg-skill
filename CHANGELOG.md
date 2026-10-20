@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.10.5
+
+_Automated release: version and notes generated from pull requests merged since 2.10.4._
+
 ### Added
 
 - **README FAQ.** Answers the questions that followed the tool being shared: a caller cannot pass a filter graph or other raw ffmpeg arguments (schemas come from each script's argparse, and CI fails on drift; `doctor` checks the filters beforehand); Remotion and HyperFrames render a picture from code, and a file they write is an ordinary input here; a fixed logo or burned-in line can be interpolated with `redact.py --mode delogo`, while inpainting and anything that moves stay out of scope; nothing tracks a face or a subject; the GPU encode path is Apple VideoToolbox.
@@ -13,6 +19,10 @@
 
 - **`cut.py --accurate` starts the picture at 0 (#336).** The re-encode passed `-avoid_negative_ts make_zero`, which shifts every stream so the earliest timestamp is 0. That timestamp is the AAC encoder's priming (21.3 ms at 48 kHz) or a negative B-frame decode time, so the picture started after 0 and the sound at 0. `fit.py --fps` then changed the frame count. The video re-encode no longer passes the flag. When `--start` lands on a frame, that frame is at 0. A start between frames begins on the next source frame and may keep up to one frame of its timestamp. An MP4/MOV edit list hides the priming, and a source whose audio starts late keeps that offset. A stream copy still uses `make_zero` (or `--edit-list`). An audio-only `--accurate` cut still uses it, which is the priming `precision: codec_frame` counts in the length.
 - **Windows 11 resolves Nirmala UI for Hindi, Bengali and Tamil (#339).** The font ships as `C:\Windows\Fonts\Nirmala.ttc`. `WINDOWS_FONTS` only named `Nirmala.ttf` and `NirmalaB.ttf`, so `doctor` reported no font for `hi`, `bn` and `ta`. The collection is now in those three lists, after the `.ttf` names, so a machine that still has Mangal or `Nirmala.ttf` keeps that file.
+- fix(cut): start an accurate re-encode's picture at 0 (#342)
+- docs: answer the shared questions, and remove a fixed logo as a redact mode (#341)
+
+Closes: #336, #339
 
 ## 2.10.4
 
