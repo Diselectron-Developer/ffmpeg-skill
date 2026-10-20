@@ -1691,15 +1691,31 @@ class ContractTests(unittest.TestCase):
 
     def test_npm_package_omits_the_maintainer_diary(self):
         """docs/design-decisions.md: references/process-pitfalls.md stays out of the npm package.
-        release_check.sh asserts the same on the packed tarball; this is the check CI actually runs."""
-        proc = subprocess.run(["npm", "pack", "--dry-run", "--json"], cwd=ROOT,
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        raw = proc.stdout
-        listing = json.loads(raw[raw.find("["):])
-        paths = [entry["path"] for entry in listing[0]["files"]]
-        self.assertFalse(any(path.endswith("process-pitfalls.md") for path in paths))
-        self.assertTrue(any(path.endswith("references/scripts.md") for path in paths))
-        self.assertTrue(any(path.endswith("docs/contract.md") for path in paths))
+
+        release_check.sh is the live `npm pack`. This is the check CI actually runs, and it
+        does not spawn npm: Windows Python cannot CreateProcess `npm` (the runner ships
+        npm.cmd), and the debian-trixie job installs nodejs without the npm package. When
+        `files` is set, `npm pack` includes that allow-list and nothing else, so a directory
+        entry or a glob under references/ is what would pull the diary in.
+        """
+        pkg = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+        files = pkg["files"]
+        self.assertIsInstance(files, list)
+        shipped = {
+            "references/scripts.md",
+            "references/devices.md",
+            "references/ci-platform-pitfalls.md",
+            "references/gotchas.md",
+            "docs/contract.md",
+        }
+        self.assertTrue(shipped <= set(files))
+        for entry in files:
+            norm = entry.replace("\\", "/").strip()
+            self.assertNotIn("process-pitfalls", norm, entry)
+            base = norm.rstrip("/")
+            self.assertNotEqual(base, "references", entry)
+            if base.startswith("references/") and any(ch in base for ch in "*?["):
+                self.fail(f"{entry} would pack every file under references/, including the diary")
         script = (ROOT / "tests" / "release_check.sh").read_text(encoding="utf-8")
         self.assertIn("package/references/process-pitfalls.md", script)
         self.assertGreaterEqual(script.count("FFMPEG_SKILL_MCP_FULL"), 2)

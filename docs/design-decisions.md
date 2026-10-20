@@ -288,8 +288,9 @@ exists. When a decision changes, edit the entry in the same PR.
 - **`references/process-pitfalls.md` is a maintainer diary and is not in the npm package**;
   `scripts.md`, `devices.md`, `ci-platform-pitfalls.md` and `docs/contract.md` are. Code:
   `package.json` `files`, `bin/install.js` `PAYLOAD`. Test: `tests/release_check.sh` (the packed
-  tarball and the install made from it must not contain the file) and
-  `test_npm_package_omits_the_maintainer_diary`.
+  tarball and the install made from it must not contain the file; that script needs npm) and
+  `test_npm_package_omits_the_maintainer_diary` (pins the `files` allow-list, which is what CI
+  runs — Windows cannot spawn `npm`, and the debian-trixie job has nodejs without npm).
 - **`npm test` calls `python3`**; the Windows CI job gets it from `actions/setup-python`. A
   Windows machine with only `py` should run the test files directly.
 - **The release bump commit carries the skip-CI marker in its message**; it is pushed by the
