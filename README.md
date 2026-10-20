@@ -46,7 +46,7 @@ npx ffmpeg-skill
   </tr>
 </table>
 
-Left half is the input, right half is what the command produced. **[All 53 before/after demos, with the exact command under each one →](docs/demos.md)** — all of it generated from synthetic footage by `python3 demos/build.py`, so you can rebuild every frame of it yourself.
+Left half is the input, right half is what the command produced. **[All 66 before/after demos, with the exact command under each one →](docs/demos.md)** — all of it generated from synthetic footage by `python3 demos/build.py`, so you can rebuild every frame of it yourself.
 
 `ffmpeg-skill` is an [Agent Skill](https://docs.anthropic.com/en/docs/agents-and-tools/agent-skills) for Claude Code, Cursor, Codex and any agent that reads `SKILL.md`. It teaches the agent a fixed workflow (probe → edit losslessly where possible → check → verify) and ships **42 tools** that do the actual work with `ffmpeg` / `ffprobe`: cut, join, silence removal, fit to duration and aspect, captions and karaoke, overlays and motion graphics, HDR → SDR and LUTs, audio clean-up and typed dynamics, sync with drift correction, multicam, loudness, delivery checks, whole-edit project rendering, batch folders. Every tool is also callable as an MCP tool (`tools/list` advertises a core 12 by default to keep client context small, with `FFMPEG_SKILL_MCP_FULL=1` listing all 42; every tool is reachable by name through `tools/call` either way), and the whole set is described by a machine-readable contract.
 
@@ -77,7 +77,7 @@ Other repos in the ecosystem — [`media-analysis-skill`](https://github.com/kaj
 ---
 
 **Contents**
-[Standalone, and in an ecosystem](#standalone-and-in-an-ecosystem) · [Why](#why) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Design principles](#design-principles) · [Tools](#tools) · [Audio](#audio-is-a-first-class-input) · [Built for agents](#built-for-agents) · [FFmpeg compatibility](#ffmpeg-compatibility) · [Tested on real footage](#tested-on-real-footage) · [Install](#install) · [Requirements](#requirements) · [Development](#development) · [Docs](#docs)
+[Standalone, and in an ecosystem](#standalone-and-in-an-ecosystem) · [Why](#why) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Design principles](#design-principles) · [Tools](#tools) · [Audio](#audio-is-a-first-class-input) · [Built for agents](#built-for-agents) · [FAQ](#faq) · [FFmpeg compatibility](#ffmpeg-compatibility) · [Tested on real footage](#tested-on-real-footage) · [Install](#install) · [Requirements](#requirements) · [Development](#development) · [Docs](#docs)
 
 ---
 
@@ -217,7 +217,7 @@ These are the rules the skill file gives the agent and the code enforces.
 | `cropdetect.py` | Measure existing black letterbox/pillarbox bars and report the `crop.py`-ready rectangle that removes them — analysis only, writes no file; `--motion-centre` reports the per-second motion centroid instead, for a 9:16 reframe — report only, the calling agent picks the crop, no auto-reframing |
 | `deinterlace.py` | Deinterlace interlaced source footage (`yadif`), `--mode frame`/`field`, `--parity` |
 | `denoise.py` | Reduce video noise/grain (`hqdn3d`), `--strength low/medium/high` or individual spatial/temporal overrides |
-| `redact.py` | Blur or pixelate an exact pixel rectangle for the whole clip (privacy/compliance redaction) |
+| `redact.py` | Blur, pixelate, or (`--mode delogo`) interpolate away an exact pixel rectangle for the whole clip. The box is given: nothing here finds a face, a plate or a logo, and `delogo` is a border blend, not inpainting |
 | `sphere.py` | Extract a flat rectilinear viewport from a 360/spherical video (`--yaw --pitch --roll --h-fov --v-fov`); no subject tracking, only the aim you give it |
 | `straighten.py` | Rotate by an arbitrary angle for horizon correction (`--degrees`, `--fit crop/pad`) — distinct from `fit.py --rotate`'s exact 90-degree turns |
 | `insert.py` | Turn a still image into a silent, fixed-duration video clip (title card, end slate) at an exact frame size / fps, with an optional Ken Burns zoom/pan |
@@ -388,6 +388,28 @@ The short list for humans. The agent-facing version, with the reasoning, is the 
 - **Sync results carry a confidence.** Below 0.3, or an offset near the edge of the analysis window, is probably wrong: enlarge `--analyze-seconds` or find a clap. Recordings over ten minutes from separate devices need `sync.py --fix-drift`.
 - **Outputs are never overwritten silently.** An existing output path is refused (`kind: input`, before anything runs); pass `--overwrite` where a replacement is intended.
 - **Long chains belong in a plan.** Three hand-chained re-encodes lose quality and are hard to change; `render.py` runs the whole edit from one JSON file, and `--dry-run` shows every ffmpeg command before anything is written.
+
+## FAQ
+
+### Can I pass raw ffmpeg arguments, or a filter_complex?
+
+Each operation is a script whose flags are its argparse parser, and that parser is what `contract --json` and the MCP `inputSchema` are built from. CI fails the build when those drift from the scripts. A caller-supplied filter graph, `-vf` string, or other ffmpeg option is not an argument any script accepts. `doctor` reads `ffmpeg -filters` (and `-encoders`, `-bsfs`) and reports a filter a tool needs before a job runs into it. MCP does accept an `argv` array, and that array is the named script's own CLI flags, still bound to that script: the script's flags, never an ffmpeg command line and never a shell.
+
+### How does this differ from Remotion or HyperFrames? Can they be used together?
+
+Remotion renders a video from React components. HyperFrames renders one from HTML. This repository does neither, and it does not call either of them. It edits a media file you already have, on the machine, with ffmpeg and ffprobe, then probes the file it wrote. A render from either tool is an ordinary input: `probe.py`, `cut.py`, `fit.py`, `export.py` and `check.py` take the file the same way they take any other clip.
+
+### Can it remove burned-in subtitles or logos?
+
+A rectangle you already know, sitting still for the whole clip, can be filled from the picture around it with `redact.py --mode delogo` (ffmpeg's `delogo` filter). That is a 1 px border blend. It is not inpainting: a logo that moves, or burned-in subtitles whose position changes, is out of scope. The same known box can be obscured instead, with `--mode blur` or `--mode pixelate`. None of the three finds the box. `delogo` also needs the box at least 1 px inside the frame, and it only interpolates 8-bit YUV, so an HDR or 10-bit source is refused until `color.py --to-sdr`.
+
+### Does it auto-track faces or subjects for reframing?
+
+`fit.py --fit crop` centres the crop unless you pass `--crop-x` and `--crop-y`. `crop.py` cuts the rectangle you pass. `cropdetect.py` measures letterbox bars, and `--motion-centre` reports where motion sat each second; it writes no file and picks no crop. `sphere.py` points a 360 view where you aim it. `look.py` writes a contact sheet. Nothing in this repository detects a face, a product or a subject. Choosing what to keep in frame is the caller's.
+
+### Does it encode on the GPU?
+
+The encode path a tool will actually take is Apple VideoToolbox, for h264, hevc and prores, and only on Apple Silicon. `--hw` asks for it on that call. `FFMPEG_SKILL_HW=1` makes it the default for every re-encoding tool except `export.py`'s delivery presets, which take `--hw` on their own (or `render.py --hw` for a whole project). AV1 stays on SVT-AV1. nvenc, QSV, VAAPI and AMF are reported by `doctor --json`'s `gpu_encoders` when the ffmpeg build was compiled with them, and no tool encodes with them. One build is the exception to opt-in: with no `libx264` and no `libx265`, and with `h264_videotoolbox` or `hevc_videotoolbox`, those encodes use VideoToolbox without `--hw` and the result says `hw.source` is `"auto"`. `--no-hw` still asks for the CPU encoder. A VideoToolbox job the hardware refuses is re-encoded on the CPU and the result says so (`hw.fallback`).
 
 ## FFmpeg compatibility
 

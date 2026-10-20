@@ -978,6 +978,19 @@ def demo_redact_blur(ctx):
     return before, after
 
 
+def demo_delogo(ctx):
+    """A fixed white block stands in for a burned-in logo. redact.py --mode delogo fills that
+    rectangle from the picture around it. The box is given; nothing finds it."""
+    before = ctx.path("before.mp4")
+    ffmpeg("-i", str(FIX / "motion.mp4"), "-t", "4",
+           "-vf", "drawbox=x=48:y=36:w=240:h=96:color=white:t=fill",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "copy", str(before))
+    after = ctx.path("after.mp4")
+    ctx.script("redact.py", before, "--x", "48", "--y", "36", "--width", "240",
+               "--height", "96", "--mode", "delogo", "--preset", "veryfast", "-o", after)
+    return before, after
+
+
 def demo_sphere_flat(ctx):
     before = FIX / "equirect.mp4"
     after = ctx.path("after.mp4")
@@ -1554,6 +1567,9 @@ _ROWS = [
     ("redact_blur", PICTURE, "Redact a rectangle",
      "One region blurred for the whole clip and the rest of the frame untouched. The rectangle has to be given: this tool finds no faces and no plates.",
      demo_redact_blur, "video", None),
+    ("delogo", PICTURE, "Remove a fixed logo",
+     "The white block is a stand-in for a burned-in logo. redact.py --mode delogo fills that rectangle from the picture around it. A logo that moves, or text that needs inpainting, is out of scope: the box is the caller's, and it has to sit 1 px inside the frame.",
+     demo_delogo, "video", None),
     ("sphere_flat", PICTURE, "360 panorama to a flat view",
      "v360 maps the 2:1 equirectangular source onto a rectilinear camera pointed 40 degrees right and 10 degrees down -- the same viewport a headset would show, baked into a file.",
      demo_sphere_flat, "video", "filter:v360"),

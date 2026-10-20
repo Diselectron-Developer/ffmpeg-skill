@@ -417,6 +417,16 @@ python3 scripts/redact.py demos/out/fixtures/motion.mp4 --x 420 --y 180 --width 
 
 **Look for:** One region blurred for the whole clip and the rest of the frame untouched. The rectangle has to be given: this tool finds no faces and no plates.
 
+### Remove a fixed logo
+
+![Remove a fixed logo](demos/delogo.gif)
+
+```bash
+python3 scripts/redact.py demos/out/delogo_before.mp4 --x 48 --y 36 --width 240 --height 96 --mode delogo --preset veryfast -o demos/out/delogo_after.mp4
+```
+
+**Look for:** The white block is a stand-in for a burned-in logo. redact.py --mode delogo fills that rectangle from the picture around it. A logo that moves, or text that needs inpainting, is out of scope: the box is the caller's, and it has to sit 1 px inside the frame.
+
 ### 360 panorama to a flat view
 
 ![360 panorama to a flat view](demos/sphere_flat.gif)

@@ -119,10 +119,13 @@ WINDOWS_FONTS = {
     "ja": [("meiryo.ttc", "Meiryo"), ("YuGothM.ttc", "Yu Gothic Medium"), ("YuGothR.ttc", "Yu Gothic"), ("msgothic.ttc", "MS Gothic")],
     "ar": [("tahoma.ttf", "Tahoma"), ("arial.ttf", "Arial")],
     "he": [("tahoma.ttf", "Tahoma"), ("arial.ttf", "Arial")],
-    "hi": [("mangal.ttf", "Mangal"), ("Nirmala.ttf", "Nirmala UI"), ("NirmalaB.ttf", "Nirmala UI")],
+    # Windows 11 ships Nirmala UI as the collection Nirmala.ttc; there is no Nirmala.ttf (#339).
+    # The .ttf names stay first so a machine that still has them (older Windows, a copied font)
+    # keeps that file. Mangal, when present, stays the Devanagari face it always was.
+    "hi": [("mangal.ttf", "Mangal"), ("Nirmala.ttf", "Nirmala UI"), ("Nirmala.ttc", "Nirmala UI"), ("NirmalaB.ttf", "Nirmala UI")],
     "th": [("leelawui.ttf", "Leelawadee UI"), ("leelawad.ttf", "Leelawadee"), ("tahoma.ttf", "Tahoma")],
-    "bn": [("Nirmala.ttf", "Nirmala UI"), ("vrinda.ttf", "Vrinda")],
-    "ta": [("Nirmala.ttf", "Nirmala UI"), ("latha.ttf", "Latha")],
+    "bn": [("Nirmala.ttf", "Nirmala UI"), ("Nirmala.ttc", "Nirmala UI"), ("vrinda.ttf", "Vrinda")],
+    "ta": [("Nirmala.ttf", "Nirmala UI"), ("Nirmala.ttc", "Nirmala UI"), ("latha.ttf", "Latha")],
     "lo": [("leelawui.ttf", "Leelawadee UI"), ("DokChamp.ttf", "DokChampa")],
     "ru": [("arial.ttf", "Arial"), ("segoeui.ttf", "Segoe UI")],
     "el": [("arial.ttf", "Arial"), ("segoeui.ttf", "Segoe UI")],
