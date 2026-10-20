@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 2.10.6
+
+_Automated release: version and notes generated from pull requests merged since 2.10.5._
+
+- fix: release-check catalogue, overlay scale, sync wording, MCP timeout (#343)
+
 ## 2.10.5
 
 _Automated release: version and notes generated from pull requests merged since 2.10.4._
