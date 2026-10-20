@@ -1976,6 +1976,95 @@ class PictureTests(MediaFixtures):
     def test_overlay_chromakey_without_video_refused(self):
         script("overlay.py", self.src, "--chromakey", "green", expect_fail=True)
 
+    def test_overlay_scale_percent_uses_the_displayed_width(self):
+        """--scale-percent 50 on a 1280x720 file tagged 90 degrees used to scale the layer to
+        640 px, half the stored width, on a frame that is 720 px wide."""
+        v = probe(str(self.rot))["video"]
+        self.assertIn(v["rotation"], (90, -90, 270, -270))
+        shown = v["height"]
+        doc = json.loads(script("overlay.py", self.rot, "--image", self.logo, "--scale-percent", "50",
+                                "--dry-run", "--json", "-o", OUT / "ov_rot_scale.mp4").stdout)
+        cmd = " ".join(doc["commands"])
+        self.assertIn(f"scale={int(shown * 50 / 100)}:-1", cmd)
+        self.assertNotIn(f"scale={int(v['width'] * 50 / 100)}:-1", cmd)
+        plain_v = probe(str(self.src))["video"]
+        plain = json.loads(script("overlay.py", self.src, "--image", self.logo, "--scale-percent", "50",
+                                  "--dry-run", "--json", "-o", OUT / "ov_plain_scale.mp4").stdout)
+        self.assertIn(f"scale={int(plain_v['width'] * 50 / 100)}:-1", " ".join(plain["commands"]))
+
+    def test_overlay_platform_margins_use_the_displayed_frame(self):
+        """TikTok's right margin is 14% of the width the viewer sees. On this rotated file that
+        is 14% of 720, not 14% of the stored 1280."""
+        from _platforms import safe_margins_px
+        v = probe(str(self.rot))["video"]
+        self.assertIn(v["rotation"], (90, -90, 270, -270))
+        edges = safe_margins_px("tiktok", v["height"], v["width"])
+        stored = safe_margins_px("tiktok", v["width"], v["height"])
+        doc = json.loads(script("overlay.py", self.rot, "--text", "hi", "--platform", "tiktok",
+                                "--dry-run", "--json", "-o", OUT / "ov_rot_safe.mp4").stdout)
+        cmd = " ".join(doc["commands"])
+        self.assertIn(f"main_w-text_w-{edges['right']}", cmd)
+        self.assertNotIn(f"main_w-text_w-{stored['right']}", cmd)
+
+    def test_emoji_font_listing_keeps_a_colon_in_the_path(self):
+        """fc-list separates the file from the family with colon-space. Splitting on the first
+        colon turned `C:\\Windows\\Fonts\\seguiemj.ttf: Segoe UI Emoji` into `C`."""
+        from _common import emoji as emoji_mod
+        colon = OUT / "C:Fonts"
+        colon.mkdir(exist_ok=True)
+        real = colon / "emoji.ttf"
+        real.write_bytes(b"not a font")
+        self.assertEqual(emoji_mod._fc_list_path(r"C:\Windows\Fonts\seguiemj.ttf: Segoe UI Emoji:style=Regular"),
+                         r"C:\Windows\Fonts\seguiemj.ttf")
+        line = f"{real}: Noto Color Emoji\n"
+
+        def fake_run(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, 0, line, "")
+
+        with unittest.mock.patch("shutil.which", return_value="fc-list"), \
+                unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            family, path, answered = emoji_mod._emoji_color_font()
+        self.assertEqual((family, path, answered), ("Noto Color Emoji", str(real), True))
+
+    def test_libass_colour_probe_escapes_a_colon_in_the_srt_path(self):
+        """A Windows temp path is `C:/...`. `subtitles=C:/...` is split at the colon and the
+        probe reports colour emoji unknown. The escaped form opens the file."""
+        from _common import emoji as emoji_mod
+        colon = OUT / "C:probe"
+        colon.mkdir(exist_ok=True)
+        srt = colon / "e.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nHi\n", encoding="utf-8")
+        bare = "subtitles=" + str(srt).replace("\\", "/")
+        escaped = "subtitles=" + escape_filter_path(str(srt), bind=False)
+        self.assertNotEqual(bare, escaped)
+        bad = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                              "-i", "color=c=black:s=64x64:d=0.04", "-vf", bare, "-frames:v", "1",
+                              "-f", "null", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertNotEqual(bad.returncode, 0, "an unescaped colon must not parse as a subtitle path")
+        good = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                               "-i", "color=c=black:s=64x64:d=0.04", "-vf", escaped, "-frames:v", "1",
+                               "-f", "null", "-"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(good.returncode, 0, good.stderr.decode(errors="replace")[-400:])
+
+        class _Dir:
+            def __enter__(self):
+                return str(colon)
+            def __exit__(self, *exc):
+                return False
+
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 1, b"", b"")
+
+        with unittest.mock.patch("tempfile.TemporaryDirectory", return_value=_Dir()), \
+                unittest.mock.patch.object(emoji_mod, "ffmpeg_exe", return_value=("ffmpeg",)), \
+                unittest.mock.patch("subprocess.run", side_effect=fake_run):
+            emoji_mod._libass_color_probe()
+        vf = captured["cmd"][captured["cmd"].index("-vf") + 1]
+        self.assertEqual(vf, "subtitles=" + escape_filter_path(str(colon / "e.srt"), bind=False))
+
     def test_help_survives_a_legacy_console_encoding(self):
         """--help contains non-ASCII (Japanese example, arrows); a cp1252 console must not raise UnicodeEncodeError."""
         env = dict(os.environ, PYTHONIOENCODING="cp1252")

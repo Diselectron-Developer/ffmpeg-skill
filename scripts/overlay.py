@@ -117,7 +117,9 @@ def main() -> int:
     ap.add_argument("--opacity", type=float, default=1.0, help="0..1 (default 1)")
     img = ap.add_argument_group("image options")
     img.add_argument("--scale", type=int, help="width in px for an image, logo or video layer (keeps aspect); text size is --font-size")
-    img.add_argument("--scale-percent", type=float, help="width as a %% of the video for an image, logo or video layer (keeps aspect); text size is --font-size")
+    img.add_argument("--scale-percent", type=float,
+                     help="width as a %% of the displayed frame for an image, logo or video layer (keeps aspect); "
+                          "a 90 or 270 degree rotation uses the stored height; text size is --font-size")
     txt = ap.add_argument_group("text options")
     txt.add_argument("--font", default="DejaVu Sans", help="fontconfig font name")
     txt.add_argument("--font-file", help="explicit .ttf/.otf/.ttc path (use this for CJK fonts)")
@@ -209,7 +211,12 @@ def main() -> int:
         die(f"--audio-stream {args.audio_stream}: input has {len(audio_streams)} audio stream(s), 0..{len(audio_streams) - 1}")
     if args.audio_stream and not audio_streams:
         die("--audio-stream needs an input with audio streams")
-    vw = meta["video"]["width"]
+    vw = meta["video"]["width"] or 0
+    vh = meta["video"].get("height") or 0
+    # ffmpeg applies display rotation before the filter graph, so the frame this overlay is
+    # composited on is the displayed one. A 320x180 phone file tagged 90 degrees is 180 wide here.
+    if meta["video"].get("rotation") in (90, -90, 270, -270):
+        vw, vh = vh, vw
     # --platform: the edges this destination's own UI covers, in pixels of this frame. An
     # explicit --margin (or a brand safe_margin, applied above) is the more specific statement
     # and wins; without either, the historical 24 px default is unchanged.
@@ -220,7 +227,7 @@ def main() -> int:
         # fall back to the destination's own delivery frame -- which is what the fitted
         # intermediate this stage runs on will be anyway
         frame = PLATFORMS[args.platform]["frame"]
-        pw, ph = vw or frame["w"], meta["video"].get("height") or frame["h"]
+        pw, ph = vw or frame["w"], vh or frame["h"]
         safe_margins = safe_margins_px(args.platform, pw, ph)
         info(f"--platform {args.platform}: safe margins top {safe_margins['top']} / bottom {safe_margins['bottom']} / "
              f"left {safe_margins['left']} / right {safe_margins['right']} px (clear of the app's own UI)")

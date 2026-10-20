@@ -275,6 +275,19 @@ class EditingTests(MediaFixtures):
         script("broll.py", self.src, "--insert", b, "--at", "4", "--dry-run", "-o", dry)
         self.assertFalse(dry.exists())
 
+    def test_broll_sizes_the_cutaway_to_the_displayed_frame(self):
+        """A 1280x720 file tagged 90 degrees is shown 720x1280. The cutaway used to be scaled
+        and padded to the stored 1280x180 landscape box and then clipped onto the portrait frame."""
+        v = probe(str(self.rot))["video"]
+        self.assertIn(v["rotation"], (90, -90, 270, -270))
+        dw, dh = v["height"], v["width"]
+        doc = json.loads(script("broll.py", self.rot, "--insert", self.src, "--at", "1", "--duration", "1",
+                                "--dry-run", "--json", "-o", OUT / "broll_rot.mp4").stdout)
+        cmd = " ".join(doc["commands"])
+        self.assertIn(f"scale={dw}:{dh}:", cmd)
+        self.assertIn(f"pad={dw}:{dh}:", cmd)
+        self.assertNotIn(f"scale={v['width']}:{v['height']}:", cmd)
+
     def test_metadata_writes_chapters_and_tags_with_streams_copied(self):
         """#140: metadata.py writes container chapter markers from a `TIME TITLE` file and the
         common tags, with every stream copied bit for bit; probe reports both back. Chapters on a

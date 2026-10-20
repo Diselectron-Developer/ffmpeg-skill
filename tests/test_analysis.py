@@ -56,6 +56,20 @@ class AnalysisTests(MediaFixtures):
         self.assertLess(result["crop"]["height"], 480)
         self.assertGreater(result["crop"]["y"], 0)
 
+    def test_cropdetect_reports_the_displayed_frame_of_a_rotated_source(self):
+        """cropdetect runs after ffmpeg applies rotation. The stored 1280x720 phone file is
+        720x1280 on screen, and a rectangle reported against the stored size is taller than
+        the source it claims to sit in."""
+        v = probe(str(self.rot))["video"]
+        self.assertIn(v["rotation"], (90, -90, 270, -270))
+        dw, dh = v["height"], v["width"]
+        data = json.loads(script("cropdetect.py", self.rot, "--seconds", "1", "--samples", "1", "--json").stdout)
+        self.assertEqual((data["source_width"], data["source_height"]), (dw, dh))
+        crop = data["crop"]
+        self.assertIsNotNone(crop)
+        self.assertLessEqual(crop["x"] + crop["width"], data["source_width"])
+        self.assertLessEqual(crop["y"] + crop["height"], data["source_height"])
+
     def test_cropdetect_writes_no_file(self):
         before = set(OUT.iterdir())
         script("cropdetect.py", self.src, "--seconds", "1", "--samples", "1")
@@ -704,6 +718,19 @@ class AnalysisTests(MediaFixtures):
         self.assertTrue(cmd, doc["commands"])
         self.assertIn("y=ih*(1-0.22)", cmd[0])
         self.assertIn("x=iw*(1-0.14)", cmd[0])
+
+    def test_look_safe_compares_the_displayed_aspect_of_a_rotated_source(self):
+        """A 1280x720 file tagged 90 degrees is already 9:16. --safe tiktok used to warn that
+        the stored 16:9 frame was the wrong shape for a destination the picture already matches."""
+        v = probe(str(self.rot))["video"]
+        self.assertIn(v["rotation"], (90, -90, 270, -270))
+        proc = script("look.py", self.rot, "--at", "1", "--no-timecode", "--safe", "tiktok",
+                      "-o", OUT / "safe_rot.png", "--json")
+        self.assertNotIn("not tiktok", proc.stderr)
+        self.assertNotIn(f"{v['width']}x{v['height']}", proc.stderr)
+        wide = script("look.py", self.src, "--at", "1", "--no-timecode", "--safe", "tiktok",
+                      "-o", OUT / "safe_wide.png", "--json")
+        self.assertIn(f"{v['width']}x{v['height']}", wide.stderr)
 
     def test_report_html(self):
         reels = OUT / "export_reels.mp4"

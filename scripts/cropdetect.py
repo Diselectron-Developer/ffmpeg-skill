@@ -138,6 +138,11 @@ def main() -> int:
     if not meta.get("video"):
         die("input has no video stream")
     sw, sh = meta["video"]["width"], meta["video"]["height"]
+    # cropdetect and the grey decode both see the frame after ffmpeg applies rotation, so the
+    # rectangle and the motion points are in that frame. Reporting the stored size made a
+    # 176x320 crop look taller than a 320x180 source.
+    if meta["video"].get("rotation") in (90, -90, 270, -270):
+        sw, sh = sh, sw
     duration = meta.get("duration") or 0.0
 
     rects = detect(args.input, args.seconds, args.samples, args.limit, args.round_to, duration)

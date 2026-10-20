@@ -1576,6 +1576,23 @@ not a new file format this tool would have to maintain.
   `start_snapped`'s meaning (the presented start moved) and `precision` takes
   `least_exact_precision`'s (the least exact segment).
 
+## Unreleased — geometry uses the displayed frame
+
+- **A 90° or 270° rotation is applied before a tool measures or places a rectangle.** ffmpeg
+  autorotates on decode, so the filter graph sees the picture the player shows, not the stored
+  width and height. `probe.py` still reports the stored size plus `rotation` (that pair is what
+  a stream copy keeps). `cropdetect.py`'s `source_width`/`source_height`, its crop rectangle and
+  its motion points are the displayed frame, which is the frame `crop.py` checks. `broll.py`
+  scales the cutaway to that frame. `overlay.py --scale-percent` and `--platform` margins, and
+  `look.py --safe`'s aspect note, use it too. Tools that already swapped (`fit`, `crop`,
+  `redact`, `caption`, `graphics`, `join`, `multicam`, `proxy`) are unchanged. Code:
+  `cropdetect.main()`, `broll.main()`, `overlay.main()`, `look.main()`. Tests:
+  `test_cropdetect_reports_the_displayed_frame_of_a_rotated_source`,
+  `test_broll_sizes_the_cutaway_to_the_displayed_frame`,
+  `test_overlay_scale_percent_uses_the_displayed_width`,
+  `test_overlay_platform_margins_use_the_displayed_frame`,
+  `test_look_safe_compares_the_displayed_aspect_of_a_rotated_source`.
+
 ## Unreleased — an accurate cut starts its picture at 0
 
 - **`cut.py --accurate` on a video does not pass `-avoid_negative_ts make_zero`.** The

@@ -170,8 +170,11 @@ def main() -> int:
         z = PLATFORMS[args.safe]["safe"]
         frame = PLATFORMS[args.safe]["frame"]
         src = meta["video"]
-        if src.get("width") and src.get("height") and abs(src["width"] / src["height"] - frame["w"] / frame["h"]) > 0.02:
-            info(f"--safe {args.safe}: this source is {src['width']}x{src['height']}, not {args.safe}'s "
+        dw, dh = src.get("width") or 0, src.get("height") or 0
+        if src.get("rotation") in (90, -90, 270, -270):
+            dw, dh = dh, dw
+        if dw and dh and abs(dw / dh - frame["w"] / frame["h"]) > 0.02:
+            info(f"--safe {args.safe}: this source is {dw}x{dh}, not {args.safe}'s "
                  f"{frame['w']}x{frame['h']} -- the zones are drawn as fractions of the frame you gave, "
                  f"so reframe first (fit.py --aspect) to see what the app really covers")
         boxes = []

@@ -281,8 +281,12 @@ see what the app covers. An explicit `--margin` always wins.
 
 ### Dimensions and rotation
 `yuv420p` needs even width/height; `fit.py` and `export.py` round to even values
-automatically. Phone footage often carries a `rotation` tag; `probe.py` reports
-it and `fit.py` accounts for it when computing the output frame.
+automatically. Phone footage often carries a `rotation` tag. `probe.py` reports
+the stored width and height plus that rotation. A tool that places or measures
+a rectangle (`fit.py`, `crop.py`, `cropdetect.py`, `broll.py`, `overlay.py
+--scale-percent` / `--platform`, `look.py --safe`) uses the displayed size,
+the two swapped for 90° and 270°, because ffmpeg applies the tag before the
+filter graph.
 
 ## Planning
 
