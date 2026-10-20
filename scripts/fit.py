@@ -198,7 +198,7 @@ def main() -> int:
             darken = 0.0 if meta["video"].get("bt2020_or_hdr") else BLUR_DARKEN
             if not darken:
                 info("--fit blur: HDR source, so the blurred background is not dimmed "
-                     "(an eq on PQ/HLG code values is not the -15%% dim it is on SDR); "
+                     "(an eq on PQ/HLG code values is not the -15% dim it is on SDR); "
                      "run color.py --to-sdr first for the SDR look")
             vf.append(pad_filters(out_w, out_h, "blur", args.pad_color, args.pad_blur, darken))
         else:

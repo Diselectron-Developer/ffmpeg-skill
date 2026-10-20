@@ -41,21 +41,39 @@ if (has('--help') || has('-h')) {
   process.exit(0);
 }
 
+// Windows Python installers commonly expose `python`/`py`, not `python3`. The Microsoft Store
+// app-execution alias is a real python3.exe that spawns (no ENOENT) and exits non-zero, so a
+// missing `error` is not proof an interpreter ran. Probe with a version check, then fall through.
+const PYTHON_PROBE = ['-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)'];
+
+function pythonCandidates(platform) {
+  return platform === 'win32' ? ['python3', 'python', 'py'] : ['python3'];
+}
+
+function runWithPython(scriptArgs, platform, spawn) {
+  const candidates = pythonCandidates(platform);
+  const run = spawn || spawnSync;
+  let last = null;
+  for (const cmd of candidates) {
+    const probe = run(cmd, PYTHON_PROBE, { stdio: 'ignore', timeout: 15000 });
+    if (probe.error || probe.status !== 0) {
+      last = probe;
+      continue;
+    }
+    return run(cmd, scriptArgs, { stdio: 'inherit' });
+  }
+  return { missing: true, error: last && last.error, status: last && last.status, candidates };
+}
+
+function main() {
 // `contract` / `doctor` are answered by scripts/_contract.py; everything else installs.
 if (args[0] === 'contract' || args[0] === 'doctor') {
-  // Windows Python installers commonly expose `python`/`py`, not `python3` (only the
-  // Microsoft Store package does); try python3 first (macOS/Linux convention), then fall
-  // back so `npx ffmpeg-skill doctor` doesn't silently fail with ENOENT on Windows.
-  const candidates = process.platform === 'win32' ? ['python3', 'python', 'py'] : ['python3'];
-  let py;
-  for (const cmd of candidates) {
-    py = spawnSync(cmd, [path.join(ROOT, 'scripts', '_contract.py'), ...args], { stdio: 'inherit' });
-    if (!py.error) break;
+  const py = runWithPython([path.join(ROOT, 'scripts', '_contract.py'), ...args], process.platform, spawnSync);
+  if (py.missing) {
+    console.error(`error: could not find a Python 3.9+ interpreter (tried: ${py.candidates.join(', ')}). Install Python 3.9+ and ensure it is on PATH.`);
+    process.exit(127);
   }
-  if (py.error) {
-    console.error(`error: could not find a Python interpreter (tried: ${candidates.join(', ')}). Install Python 3.9+ and ensure it is on PATH.`);
-  }
-  process.exit(py.error ? 127 : py.status);
+  process.exit(py.error ? 127 : (py.status == null ? 1 : py.status));
 }
 
 const home = os.homedir();
@@ -159,3 +177,10 @@ if (!has('--uninstall')) {
   console.log('\nDone. Ask your agent things like "make this video 60 seconds and add captions".');
 }
 process.exit(failed ? 1 : 0);
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { pythonCandidates, runWithPython };

@@ -84,9 +84,14 @@ def main() -> int:
     output = args.output or default_output(args.input, "ramp")
 
     vparts, aparts, labels = [], [], []
+    # The coverage check above allows the last end to sit up to 0.5 s off the probed duration.
+    # That slack is for a caller who rounded the duration, not a reason to redraw the tail at
+    # the last factor. The end bound is omitted only when the stated end is the file's end
+    # (within 50 ms): a trim a few milliseconds short of the last packet drops that packet.
+    last_runs_to_eof = abs(segments[-1][1] - dur) <= 0.05
     for i, (start, end, factor) in enumerate(segments):
         vlabel, alabel = f"v{i}", f"a{i}"
-        end_expr = f"{end:.3f}" if i < len(segments) - 1 else None
+        end_expr = f"{end:.3f}" if not (i == len(segments) - 1 and last_runs_to_eof) else None
         trim = f"trim=start={start:.3f}" + (f":end={end_expr}" if end_expr else "")
         vparts.append(f"[0:v]{trim},setpts=(PTS-STARTPTS)/{factor:.6f}[{vlabel}]")
         labels.append(f"[{vlabel}]")

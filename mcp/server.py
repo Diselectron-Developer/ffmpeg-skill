@@ -21,7 +21,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
 SCRIPTS = HERE.parent / "scripts"
@@ -90,18 +90,66 @@ def build_argv(name: str, args: Dict[str, Any]) -> List[str]:
     return argv
 
 
+def _timeout_in_argv(argv: List[str]) -> Optional[float]:
+    """The last `--timeout` / `--timeout=N` value in a raw argv list.
+
+    None when the flag is absent or its value is not a number (the child argparse then fails,
+    and the outer ceiling stays the environment default)."""
+    found: Optional[float] = None
+    seen = False
+    i = 0
+    n = len(argv)
+    while i < n:
+        token = argv[i]
+        if token == "--":
+            break
+        if token == "--timeout":
+            if i + 1 >= n:
+                return None
+            raw = argv[i + 1]
+            i += 2
+        elif token.startswith("--timeout="):
+            raw = token.split("=", 1)[1]
+            i += 1
+        else:
+            i += 1
+            continue
+        seen = True
+        try:
+            found = float(raw)
+        except ValueError:
+            return None
+    return found if seen else None
+
+
+def timeout_from_call(args: Dict[str, Any]) -> float:
+    """Per-call seconds for the MCP outer ceiling.
+
+    Structured `timeout` is the canonical key. A raw `argv` list ignores every other key, so
+    `--timeout` has to be read from that list: `--timeout 0` otherwise left the ceiling at 4x
+    the 1800 s default while the child itself ran with no limit. A negative value is 0, matching
+    apply_common (0 means no limit)."""
+    if isinstance(args.get("argv"), list):
+        parsed = _timeout_in_argv([str(a) for a in args["argv"]])
+        if parsed is None:
+            return _common._env_timeout()
+        return max(0.0, parsed)
+    try:
+        return max(0.0, float(args.get("timeout", _common._env_timeout())))
+    except (TypeError, ValueError):
+        return _common._env_timeout()
+
+
 def call_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     script = SCRIPTS / f"{name}.py"
     if name not in specs() or not script.exists():
         return {"isError": True, "content": [{"type": "text", "text": f"unknown tool {name}"}]}
     argv = build_argv(name, args or {})
     # The child enforces --timeout on each ffmpeg call; this outer ceiling (4x that plus 60 s)
-    # is the only thing that ends a child hung for any other reason. The caller's own `timeout`
-    # argument sets both; otherwise FFMPEG_SKILL_TIMEOUT / the 1800 s default.
-    try:
-        per_call = float((args or {}).get("timeout", _common._env_timeout()))
-    except (TypeError, ValueError):
-        per_call = _common._env_timeout()
+    # is the only thing that ends a child hung for any other reason. Structured `timeout` or
+    # `--timeout` inside a raw argv list sets both (0 = no limit); otherwise
+    # FFMPEG_SKILL_TIMEOUT / the 1800 s default.
+    per_call = timeout_from_call(args or {})
     proc = _common.run_tool([str(script)] + argv, per_call=per_call)
     stdout = proc.stdout.strip()
     text = stdout

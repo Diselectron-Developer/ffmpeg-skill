@@ -753,6 +753,7 @@ class OrchestrationTests(MediaFixtures):
             "key_without_video": ({"image": "logo.png", "chromakey": "green"}, 'chromakey keys a colour out of a video layer and needs "video"'),
             "tune_without_key": ({"video": pip.name, "chromakey_blend": 0.1}, 'chromakey_blend tunes "chromakey"'),
             "missing_layer": ({"video": "pip326_gone.mp4"}, "overlays[0].video: file not found"),
+            "text_scale": ({"text": "Hello", "scale": 200}, "scale sizes an image, logo or video layer"),
         }
         for name, (overlay, message) in cases.items():
             proc = script("render.py", self._proj(f"render_pip326_{name}.json", {"clips": clips, "overlays": [overlay]}),

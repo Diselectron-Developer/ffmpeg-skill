@@ -137,11 +137,21 @@ class AnalysisTests(MediaFixtures):
         proc = script("sync.py", self.src, self.mic, "--json")
         data = json.loads(proc.stdout)
         self.assertClose(data["offset_seconds"], 2.5, 0.05, "lav mic started 2.5 s later")
+        self.assertIn("later than reference", data["meaning"])
         self.assertGreater(data["confidence"], 0.5)
         out = OUT / "synced.mp4"
         script("sync.py", self.src, self.mic, "--replace-audio", "-o", out)
         again = json.loads(script("sync.py", self.src, out, "--json").stdout)
         self.assertClose(again["offset_seconds"], 0.0, 0.05, "aligned output has no residual offset")
+
+    def test_sync_zero_offset_says_the_files_start_together(self):
+        """A measured offset of 0 used to take the else of `later if offset > 0` and say the
+        second file starts earlier. Identical inputs start together."""
+        same = OUT / "sync_identical.mp4"
+        shutil.copy(self.src, same)
+        data = json.loads(script("sync.py", self.src, same, "--json").stdout)
+        self.assertAlmostEqual(data["offset_seconds"], 0.0, delta=5e-4)
+        self.assertEqual(data["meaning"], "second starts together with the reference")
 
     def test_sync_replace_audio_stream_copy_writes_faststart_mp4(self):
         """Same shape as #275/#277: --replace-audio stream-copies the reference's video with
