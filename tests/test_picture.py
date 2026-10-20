@@ -73,6 +73,37 @@ class PictureTests(MediaFixtures):
     def test_redact_odd_dimensions_refused(self):
         script("redact.py", self.src, "--x", "0", "--y", "0", "--width", "101", "--height", "100", expect_fail=True)
 
+    def test_delogo_interpolates_a_fixed_rectangle_and_refuses_the_frame_edge(self):
+        """ffmpeg's delogo fills a known box from the pixels around it. A white block on grey
+        comes back grey; the same box with x=0 is refused, because the filter's 1 px band
+        (no longer an option) would leave the frame."""
+        src = OUT / "delogo_src.mp4"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+           "-i", "color=c=gray:s=320x180:rate=10:d=0.4",
+           "-vf", "drawbox=x=40:y=30:w=80:h=40:color=white:t=fill",
+           "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(src))
+        self.assertGreater(min(_pixel_at(src, 0.1, 80, 50)), 240, "the fixture's logo is white")
+        out = OUT / "delogo_out.mp4"
+        proc = script("redact.py", src, "--x", "40", "--y", "30", "--width", "80", "--height", "40",
+                      "--mode", "delogo", "--fast", "--json", "-o", out)
+        doc = json.loads(proc.stdout)
+        self.assertIn("delogo=x=40:y=30:w=80:h=40", doc["commands"][0])
+        self.assertNotIn("boxblur", doc["commands"][0])
+        self.assertLess(max(_pixel_at(out, 0.1, 80, 50)), 180, "the white block was interpolated away")
+        self.assertGreater(min(_pixel_at(out, 0.1, 8, 8)), 90, "a corner outside the box stays grey")
+        edge = script("redact.py", src, "--x", "0", "--y", "30", "--width", "80", "--height", "40",
+                      "--mode", "delogo", "--json", expect_fail=True)
+        err = json.loads(edge.stdout)
+        self.assertEqual(err["error"]["kind"], "input")
+        self.assertIn("1 px", err["error"]["message"])
+
+    def test_delogo_refuses_a_10_bit_source(self):
+        proc = script("redact.py", self.hdr, "--x", "40", "--y", "30", "--width", "80", "--height", "40",
+                      "--mode", "delogo", "--json", expect_fail=True)
+        err = json.loads(proc.stdout)
+        self.assertEqual(err["error"]["kind"], "input")
+        self.assertIn("8-bit", err["error"]["message"])
+
     # ---------------------------------------------------------------- grid
     def test_grid_composites_cols_rows_with_labels(self):
         out = OUT / "grid1.mp4"
@@ -2845,6 +2876,48 @@ class ScriptFontTests(unittest.TestCase):
     @unittest.skipIf(_no_fontconfig(), "no fc-list on this machine")
     def test_font_for_script_is_cached_and_stable(self):
         self.assertEqual(font_for_script("ja"), font_for_script("ja"))
+
+
+class WindowsNirmalaTests(unittest.TestCase):
+    """#339: Windows 11 ships Nirmala UI as Nirmala.ttc. The lookup is by file name, so a
+    directory that contains only the collection must count as a font for hi, bn and ta."""
+
+    def tearDown(self):
+        import _common.fonts as fonts
+        fonts._SCRIPT_FONT_CACHE.clear()
+
+    def test_windows_11_nirmala_ttc_covers_hindi_bengali_and_tamil(self):
+        import _common.fonts as fonts
+        fonts._SCRIPT_FONT_CACHE.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            fonts_dir = Path(tmp) / "Fonts"
+            fonts_dir.mkdir()
+            (fonts_dir / "Nirmala.ttc").write_bytes(b"not a real font; existence is the check")
+            with unittest.mock.patch("platform.system", return_value="Windows"), \
+                    unittest.mock.patch.dict(os.environ, {"WINDIR": tmp}):
+                for script_name in ("hi", "bn", "ta"):
+                    path, family = fonts._script_font_uncached(script_name)
+                    self.assertTrue(str(path).endswith("Nirmala.ttc"), path)
+                    self.assertEqual(family, "Nirmala UI")
+                    self.assertEqual(fonts.script_font_status(script_name), "available")
+                # A dedicated file still wins when both are installed: Mangal for Devanagari,
+                # Nirmala.ttf ahead of the collection for Bengali and Tamil.
+                (fonts_dir / "Nirmala.ttf").write_bytes(b"ttf")
+                (fonts_dir / "mangal.ttf").write_bytes(b"ttf")
+                fonts._SCRIPT_FONT_CACHE.clear()
+                hi, hi_family = fonts._script_font_uncached("hi")
+                bn, _bn_family = fonts._script_font_uncached("bn")
+                self.assertTrue(str(hi).endswith("mangal.ttf"), hi)
+                self.assertEqual(hi_family, "Mangal")
+                self.assertTrue(str(bn).endswith("Nirmala.ttf"), bn)
+            # No Nirmala and no Mangal: the script is missing, which is what doctor reported.
+            with tempfile.TemporaryDirectory() as empty:
+                (Path(empty) / "Fonts").mkdir()
+                fonts._SCRIPT_FONT_CACHE.clear()
+                with unittest.mock.patch("platform.system", return_value="Windows"), \
+                        unittest.mock.patch.dict(os.environ, {"WINDIR": empty}):
+                    self.assertIsNone(fonts._script_font_uncached("hi"))
+                    self.assertEqual(fonts.script_font_status("hi"), "missing")
 
 
 class EmojiTests(unittest.TestCase):

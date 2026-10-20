@@ -272,18 +272,25 @@ Heavier denoising trades fine detail for a cleaner but softer image -- for
 audio noise reduction use `audio.py --denoise` instead, this tool only
 touches the picture.
 
-### redact.py — blur or pixelate an exact rectangle
+### redact.py — blur, pixelate, or interpolate away an exact rectangle
 ```
-redact.py INPUT --x X --y Y --width W --height H [--mode blur|pixelate]
+redact.py INPUT --x X --y Y --width W --height H [--mode blur|pixelate|delogo]
                  [--blur-strength N] [--block-size N] [-o OUT]
 ```
 Same rectangle convention as `crop.py` -- the rectangle must already be
 known (a saved detection box, a hand-picked region); this tool does not
-locate faces or plates itself. `--mode blur` (default) box-blurs the
-rectangle; `--mode pixelate` mosaics it into `--block-size`-px blocks, the
-more unmistakably-redacted look often wanted for compliance footage. The
-rest of the frame, and the whole clip's timeline, are untouched -- to
-redact only part of the timeline, `cut.py` the clip into segments first.
+locate faces, plates, logos or burned-in text itself. `--mode blur`
+(default) box-blurs the rectangle; `--mode pixelate` mosaics it into
+`--block-size`-px blocks, the more unmistakably-redacted look often wanted
+for compliance footage. `--mode delogo` runs ffmpeg's `delogo` filter,
+which fills the rectangle from the picture around it: a fixed logo or a
+burned-in line that does not move. That is a border blend, not inpainting,
+and a logo that travels or subtitles that change position are out of
+scope. The filter reads a 1 px ring outside the box, so the box cannot
+touch the frame edge, and it only interpolates 8-bit YUV (an HDR or 10-bit
+source is refused; `color.py --to-sdr` first). The rest of the frame, and
+the whole clip's timeline, are untouched -- to cover only part of the
+timeline, `cut.py` the clip into segments first.
 
 ### sphere.py — flat viewport extraction from 360/spherical video
 ```

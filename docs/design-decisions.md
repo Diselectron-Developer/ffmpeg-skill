@@ -1570,6 +1570,24 @@ not a new file format this tool would have to maintain.
   `start_snapped`'s meaning (the presented start moved) and `precision` takes
   `least_exact_precision`'s (the least exact segment).
 
+## Unreleased — a fixed logo comes off with redact.py --mode delogo
+
+- **`--mode delogo` is a mode of `redact.py`, not a 43rd script.** The operation is the one
+  redact already has: a caller-supplied rectangle, applied to the whole clip, with no search
+  for the region. A new tool would restate that and move the count the 1.16 and 1.17 entries
+  above keep at 42. Blur and pixelate obscure the box; delogo fills it from the surrounding
+  pixels (ffmpeg's `delogo`). It is a border blend. Inpainting, a logo that moves, and
+  burned-in text whose position changes are out of scope, same as a face the caller did not
+  box. Code: `redact.main()`. Tests: `test_delogo_interpolates_a_fixed_rectangle_and_refuses_the_frame_edge`,
+  `test_delogo_refuses_a_10_bit_source`.
+- **The box must leave a 1 px ring, because `delogo` expands it by a band that is no longer a
+  flag.** On 5.1 through current the filter sets `band = 1`, grows the rectangle by that ring
+  and refuses the frame when the ring leaves it (`x < 1`, `y < 1`, or `x + width` / `y + height`
+  flush with the far edge). Passing `band` is an error on 6.1 ("Option not found"), so the tool
+  does not expose it. An HDR or 10-bit source is refused up front: the filter's pixel formats
+  are 8-bit YUV, and letting ffmpeg insert a scale would flatten the picture without saying so.
+  Code: `redact.main()`. Tests: the two named above.
+
 ## Unreleased — a video layer in a project
 
 - **`overlays[]` refuses `video` beside another layer kind, and only that combination.** A video

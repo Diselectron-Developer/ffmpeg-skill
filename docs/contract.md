@@ -384,6 +384,12 @@ environment variables (`doctor`'s `hw.default_on` is a boolean derived from `FFM
 never its value). The two binary paths can sit under a home directory, so read a pasted `doctor`
 before posting it.
 
+`filter:delogo` is optional on `redact` (`--mode delogo`). The filter fills a fixed
+rectangle from a 1 px ring of the surrounding picture. It is a border blend,
+not inpainting, and its pixel formats are 8-bit YUV, so an HDR or 10-bit
+source is refused (`color.py --to-sdr` first). `filter:boxblur` stays required
+on `redact`, because `--mode blur` is the default.
+
 `external:whisper` is **optional** for two tools since 1.17: `caption.py`
 (`--transcribe`) and `silence.py` (`--filler --transcribe`). Neither requires
 it — both take a transcript the caller already has (`--srt`/`--words`), and
