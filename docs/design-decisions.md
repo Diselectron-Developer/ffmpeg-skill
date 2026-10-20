@@ -1570,6 +1570,22 @@ not a new file format this tool would have to maintain.
   `start_snapped`'s meaning (the presented start moved) and `precision` takes
   `least_exact_precision`'s (the least exact segment).
 
+## Unreleased — an accurate cut starts its picture at 0
+
+- **`cut.py --accurate` on a video does not pass `-avoid_negative_ts make_zero`.** The
+  flag shifts every stream so the earliest timestamp is 0. On a re-encode that timestamp
+  is the AAC encoder's priming (1024 samples, 21.3 ms at 48 kHz) or, with B-frames, a
+  negative video decode time further back, so the picture started after 0 and the sound
+  at 0 (#336). `fit.py --fps` then snapped the gap and changed the frame count. Dropping
+  the flag leaves the first frame at 0, which is the time `--accurate` was asked for. An
+  MP4/MOV edit list still hides the priming, so the sound presents with the picture; a
+  Matroska file keeps the priming packet at a negative time and the picture at 0. A
+  source whose audio starts late keeps that offset. Audio-only `--accurate` still uses
+  `make_zero`: `asetpts` already starts the samples at 0, and the flag is what folds the
+  priming into the length `precision: codec_frame` reports. A stream copy is unchanged
+  (`make_zero` by default, `--edit-list` to hide the keyframe's pre-roll). Code:
+  `cut.cut_one()`. Test: `test_an_accurate_reencode_starts_the_picture_at_zero`.
+
 ## Unreleased — a video layer in a project
 
 - **`overlays[]` refuses `video` beside another layer kind, and only that combination.** A video

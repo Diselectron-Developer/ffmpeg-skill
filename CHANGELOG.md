@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **`cut.py --accurate` starts the picture at 0 (#336).** The re-encode passed `-avoid_negative_ts make_zero`, which shifts every stream so the earliest timestamp is 0. That timestamp is the AAC encoder's priming (21.3 ms at 48 kHz) or a negative B-frame decode time, so the picture started after 0 and the sound at 0. `fit.py --fps` then changed the frame count. The video re-encode no longer passes the flag: the first frame is at 0, an MP4/MOV edit list hides the priming, and a source whose audio starts late keeps that offset. A stream copy still uses `make_zero` (or `--edit-list`). An audio-only `--accurate` cut still uses it, which is the priming `precision: codec_frame` counts in the length.
 
 ## 2.10.4
 
