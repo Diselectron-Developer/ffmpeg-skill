@@ -22,6 +22,12 @@ caller never has to trust "it probably cut where I asked" on faith.
 A single-segment .mp4/.mov copy shifts its timestamps to zero (-avoid_negative_ts
 make_zero), so the picture starts at the keyframe; --edit-list keeps the MP4 edit
 list instead, which hides the keyframe's pre-roll so the picture starts at --start.
+An --accurate re-encode of a video does not: make_zero moved the picture by the
+AAC priming (about 21 ms, and further when a B-frame's decode time is negative)
+while the sound stayed at 0. A start that lands on a frame keeps that frame at 0.
+A start between frames begins on the next frame and may keep up to one frame of
+timestamp. The MP4 edit list hides the encoder priming, and a source whose audio
+starts late keeps that offset.
 
 A re-encode uses x264 for an SDR source and x265 Main10 for an HDR or BT.2020 one, as every
 editing tool does; --keep-hevc re-encodes an SDR HEVC source as HEVC (x265 8-bit BT.709, or
@@ -823,7 +829,19 @@ def cut_one(src: str, start: float, end: float, dst: str, reencode: bool, crf: i
         cmd += ["-sn", "-dn"]
         if meta.get("subtitle_streams") or meta.get("data_streams"):
             DROPPED_STREAMS.append(dst)
-        cmd += encode_args(meta, dst, crf, preset) + ["-avoid_negative_ts", "make_zero", dst]
+        cmd += encode_args(meta, dst, crf, preset)
+        if audio_only:
+            # asetpts already starts the samples at 0. make_zero is what folds the encoder's
+            # priming into the container length, which is the delay precision codec_frame reports.
+            # A video re-encode must not take it (#336): the earliest timestamp is that priming,
+            # or a negative B-frame decode time, so make_zero starts the picture after 0 and
+            # leaves the sound at 0. fit --fps then drops or repeats a frame. Without the shift
+            # a start on a frame has that frame at 0. A start between frames begins on the next
+            # frame and may keep up to one frame of timestamp; moving the picture alone would
+            # leave the sound that far ahead. An MP4/MOV edit list hides the priming, and a
+            # source whose audio starts late keeps that offset.
+            cmd += ["-avoid_negative_ts", "make_zero"]
+        cmd += [dst]
     elif audio_only:
         # output-side seek: an input seek on a video file lands on the previous video keyframe and on
         # FLAC/MP3 on a coarse index; reading from the start and dropping packets is exact to the packet

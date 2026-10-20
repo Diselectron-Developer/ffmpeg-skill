@@ -91,7 +91,16 @@ max(2 frames, 0.1 s) away from the source's own offset where the picture starts
 (the keyframe the copy began from; `--start` under `--edit-list`). It is
 reported, not repaired. `-ss`/`-t` are passed to the microsecond; `--accurate`
 seeks a second early and trims on the output side, so frames just before a
-keyframe are kept. `keyframe_snapped` is true for every stream copy (`precision`
+keyframe are kept. An `--accurate` re-encode of a video does not pass
+`-avoid_negative_ts make_zero`, which shifted the picture by the AAC priming
+(about 21 ms, more when a B-frame decode time is negative) while the sound
+stayed at 0, and `fit.py --fps` then changed the frame count. A start that
+lands on a frame leaves that frame at time 0. A start between frames begins on
+the next source frame and may keep up to one frame of timestamp. A `.mp4`/`.mov`
+edit list hides the priming. A source whose audio starts after its picture keeps
+that offset. An audio-only `--accurate` cut
+still uses `make_zero`; that priming is what `precision: codec_frame` counts
+in the length. `keyframe_snapped` is true for every stream copy (`precision`
 `packet`); `start_snapped` is measured: true when a copied picture starts more
 than a frame from `--start`, or when its start could not be measured (an unknown start is
 never claimed exact); `null` under `--dry-run`.
