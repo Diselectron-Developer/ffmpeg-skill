@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Added
+
+- **README FAQ.** How ffmpeg-skill compares with Remotion: it edits existing footage locally with FFmpeg tools and a machine-readable contract; Remotion renders from React; a file Remotion or HyperFrames writes is an ordinary input here. Whether the filter graph is validated before a run: no. `--dry-run` prints a writing tool's ffmpeg command and does not start ffmpeg. `--plan` records that dry run and fingerprints inputs; `render.py` re-runs the tool later, it does not ask ffmpeg to parse the graph. `doctor` checks capability names against `ffmpeg -filters`, `-encoders` and `-bsfs`.
 
 ## 2.10.6
 

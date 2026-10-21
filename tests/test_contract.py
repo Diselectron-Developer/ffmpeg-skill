@@ -645,7 +645,8 @@ class ContractTests(unittest.TestCase):
         see _contract.py's DRY_RUN_ANALYSIS) and for verify (accepts the flag but ignores it).
         Pin the doc text naming those exact tools against the real exception set so a future
         tool gaining/losing an analysis-only dry-run mode is caught here instead of the docs
-        silently drifting out of sync with _contract.py again (issue #82)."""
+        silently drifting out of sync with _contract.py again (issue #82). README's FAQ states
+        the same list."""
         analysis_tools = set(_contract.DRY_RUN_ANALYSIS.keys())
         self.assertEqual(analysis_tools, {"sync", "multicam", "scenes", "report", "cropdetect", "silence", "loudness", "check", "stabilize"},
                           "the analysis-only dry-run tool set changed -- update SKILL.md/references/scripts.md's exception list to match")
@@ -653,7 +654,7 @@ class ContractTests(unittest.TestCase):
         # request table anyway, so the list drifted twice (#176 -> #179) with this test green.
         # Pin the sentence that states the exception: the one naming `verify` and `--dry-run`.
         docs = {"SKILL.md": ROOT / "SKILL.md", "references/scripts.md": ROOT / "references" / "scripts.md",
-                "docs/contract.md": ROOT / "docs" / "contract.md"}
+                "docs/contract.md": ROOT / "docs" / "contract.md", "README.md": ROOT / "README.md"}
         for label, path in docs.items():
             text = path.read_text(encoding="utf-8")
             paragraphs = [p for p in text.split("\n\n") if "verify" in p and "dry-run" in p and "multicam" in p]
