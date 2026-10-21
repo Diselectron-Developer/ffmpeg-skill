@@ -56,6 +56,9 @@ def main() -> int:
         die("A-roll has no video stream")
     dur_a = meta_a.get("duration") or 0.0
     w, h = meta_a["video"]["width"], meta_a["video"]["height"]
+    # the cutaway is scaled onto the frame ffmpeg has already rotated, not the stored one
+    if meta_a["video"].get("rotation") in (90, -90, 270, -270):
+        w, h = h, w
     fps = meta_a["video"].get("fps") or 30.0
     has_audio_a = bool(meta_a.get("audio"))
 

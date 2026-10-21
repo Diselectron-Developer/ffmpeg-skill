@@ -244,7 +244,7 @@ def fmt_smpte_time(seconds: float, fps: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}:{frame:02d}"
 
 
-def escape_filter_path(path: str) -> str:
+def escape_filter_path(path: str, *, bind: bool = True) -> str:
     """Escape a file path for use as a filter option value (subtitles=, ass=, lut3d=file=, fontfile=, fontsdir=).
 
     A filter option value is parsed twice: the graph parser splits filters on `,` / `;` and options
@@ -258,8 +258,11 @@ def escape_filter_path(path: str) -> str:
     token, so a single `\\'` is consumed by the first pass and "Ryo's Mac/cues.srt" reaches the
     filter as "Ryos Mac/cues.srt" (Unable to open ...). Three backslashes survive both passes
     (measured on 6.1 and 7.1 with subtitles=, ass= and lut3d=file=).
+
+    `bind=False` escapes without recording the path as a plan input. The colour-emoji probe
+    uses that: its SRT lives in a temp directory that is gone before any plan is written.
     """
-    if os.path.isfile(path) and path not in STATE.plan_inputs:
+    if bind and os.path.isfile(path) and path not in STATE.plan_inputs:
         STATE.plan_inputs.append(path)  # a plan binds subtitle/LUT/font files too (review 6)
     p = str(Path(path))
     p = p.replace("\\", "/")

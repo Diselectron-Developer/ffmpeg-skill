@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 from typing import Any, Dict, List, Tuple, Optional
+from _common.decision import escape_filter_path
 from _common.emit import die
 from _common.runner import ffmpeg_exe
 
@@ -165,6 +166,18 @@ EMOJI_ASSET_HINT = (
 _EMOJI_COLOR_FAMILIES = ("Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji")
 
 
+def _fc_list_path(line: str) -> str:
+    """The file from one `fc-list ... file` line.
+
+    fontconfig prints `<file>: <families>`. The separator is a colon followed by a space.
+    A Windows drive letter is `C:` followed by a backslash, so splitting on the first colon
+    yields `C` and the font is reported missing.
+    """
+    if ": " in line:
+        return line.partition(": ")[0].strip()
+    return line.strip().rstrip(":")
+
+
 _EMOJI_SUPPORT_CACHE: "Dict[Tuple[Optional[str], bool], Dict[str, Any]]" = {}
 
 
@@ -182,7 +195,7 @@ def _emoji_color_font() -> "Tuple[Optional[str], Optional[str], bool]":
         if proc.returncode != 0:
             return None, None, False
         for line in proc.stdout.splitlines():
-            path = line.split(":", 1)[0].strip()
+            path = _fc_list_path(line)
             if path and os.path.exists(path):
                 return family, path, True
     return None, None, True
@@ -205,7 +218,7 @@ def _libass_color_probe() -> "Optional[bool]":
             proc = subprocess.run(
                 [exe, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
                  "-i", "color=c=black:s=64x64:d=0.04",
-                 "-vf", "subtitles=" + srt.replace("\\", "/"), "-frames:v", "1",
+                 "-vf", "subtitles=" + escape_filter_path(srt, bind=False), "-frames:v", "1",
                  "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
         except (subprocess.TimeoutExpired, OSError):

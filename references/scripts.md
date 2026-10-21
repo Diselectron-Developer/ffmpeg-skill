@@ -242,7 +242,10 @@ cropdetect.py INPUT [--seconds N] [--samples N] [--limit F] [--round N] [--motio
 Measurement only -- writes no file. Samples `--samples` windows spread
 across the file (default 5, totalling `--seconds` 10s of footage) and
 reports the crop rectangle FFmpeg's `cropdetect` filter found most often, as
-`{x, y, width, height}` ready to hand to `crop.py`. Distinct from
+`{x, y, width, height}` ready to hand to `crop.py`. `source_width` /
+`source_height` are that same displayed frame: a 90° or 270° rotation swaps
+the stored size, because the filter measures the picture after ffmpeg applies
+the tag. Distinct from
 `fit.py --fit crop`, which crops to a target aspect ratio it computes
 itself with no black-bar measurement involved. A rectangle that matches the
 full source frame means no bars were found. Does not decide whether
@@ -501,7 +504,8 @@ broll.py A.mp4 --insert B.mp4 --at T [--duration D | --end T2] [--from T3]
                [--insert ... --at ...] [--audio a|b|mix] [--pad-color black] [-o OUT]
 ```
 A plays as it is; during each window B's picture is shown instead (scaled and
-padded to A's frame, A's fps), and A resumes at its own time when the window
+padded to A's displayed frame, A's fps; a 90° or 270° rotation swaps the
+stored size), and A resumes at its own time when the window
 ends -- a cutaway, not a splice, so the output is exactly as long as A. One
 `--insert`/`--at` pair per cutaway (`--duration`, `--end`, `--from` are per
 cutaway too, or given once for all; defaults 4 s and 0); windows may not
@@ -1220,7 +1224,8 @@ Outputs PNG. View it with the Read tool (or any image viewer) and judge the
 frame like an editor would. Use `--compare` to show before/after to the user. `--safe NAME` (1.14) shades the zones that
 destination's own UI covers -- TikTok's description block and like column, the Reels/Shorts
 chrome -- on the sheet or the frame, so "is the caption readable" can be answered about the app
-rather than about the file.
+rather than about the file. The "wrong aspect" note compares the displayed frame, so a phone
+file stored sideways is not flagged when the picture already matches the destination.
 
 ### caption.py — subtitles (static, animated, karaoke)
 ```
@@ -1466,6 +1471,9 @@ overlay.py INPUT --image PNG [--scale W | --scale-percent P] | --text "..." [--f
 `--platform NAME` (1.14) takes each edge's margin from that destination's safe zone
 (`scripts/_platforms.py`), so a template's top-left logo clears TikTok's status bar instead of
 sitting 24 px into it; an explicit `--margin` (or a brand `safe_margin`) wins.
+`--scale-percent` and those margins use the displayed frame width and height:
+a 90° or 270° rotation swaps the stored size, which is the frame the overlay
+is composited on.
 Alpha in PNGs is respected. Fades apply to the overlay only; the video keeps
 playing. `--scale` / `--scale-percent` set the width of an image, logo or
 `--video` layer. They are refused with `--text`: text size is `--font-size`.
