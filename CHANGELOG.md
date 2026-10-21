@@ -4,10 +4,17 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.10.7
+
+_Automated release: version and notes generated from pull requests merged since 2.10.6._
+
 ### Fixed
 
 - **A rotated file is measured and composited at the size it is shown.** ffmpeg applies a 90° or 270° display rotation before the filter graph, and `probe.py` still reports the stored width and height. `overlay.py --scale-percent` took half of that stored width (a 50% logo on a 320×180 phone file shown as 180×320 was 160 px, almost the whole frame). `--platform` margins used the same stored size, so TikTok's 14% right margin was 14% of the landscape width. `broll.py` scaled the cutaway to the stored frame and clipped it onto the portrait one. `cropdetect.py` reported `source_width`/`source_height` as the stored size while the rectangle was in the displayed frame (a 176×320 crop against a 320×180 source). `look.py --safe` warned that a 9:16 phone file stored as 16:9 was the wrong shape for TikTok. The displayed size is what those tools use now.
 - **The colour-emoji probe survives a path that contains a colon, and a Windows font path is not split on the drive letter.** `subtitles=C:/...` is read as the option `C` plus a following option, so the probe that decides whether libass can draw colour emoji failed on every Windows temp directory and reported the capability unknown. The same `fc-list` line `C:\Windows\Fonts\seguiemj.ttf: Segoe UI Emoji` was split on the first colon, so the font file was `C` and a monochrome fallback was never found. The probe now uses the filter-path escape, and the listing is split on colon-space, which is the separator fontconfig prints.
+- fix: measure rotated frames at the size they are shown (#344)
 
 ## 2.10.6
 
