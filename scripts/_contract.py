@@ -1465,7 +1465,20 @@ def mcp_tool(spec: Dict[str, Any]) -> Dict[str, Any]:
     descriptions verbatim (the same ~250 characters repeated 42 times in every tools/list dump);
     it now goes once into the server's `initialize` response (`instructions`) instead, so a tool's
     own description stays its own one-line sentence."""
-    return {"name": spec["name"], "description": spec["description"], "inputSchema": mcp_input_schema(spec)}
+    return {"name": spec["name"], "description": spec["description"], "inputSchema": mcp_input_schema(spec),
+            "annotations": mcp_annotations(spec)}
+
+
+def mcp_annotations(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """MCP ToolAnnotations (spec 2025-06-18) derived from the ToolSpec flags. Hints only: clients
+    must not treat them as a security boundary. Every tool runs locally (no open world); none edits
+    its input in place; a tool that writes nothing is read-only."""
+    writes = bool(spec.get("produces_artifact")) or bool(spec.get("mutates_input"))
+    return {"title": spec["name"],
+            "readOnlyHint": not writes,
+            "destructiveHint": bool(spec.get("mutates_input")),
+            "idempotentHint": spec.get("idempotency_hint") in ("bit_exact", "content_equivalent", "cached"),
+            "openWorldHint": False}
 
 
 def mcp_tools(detect: bool = False) -> List[Dict[str, Any]]:
