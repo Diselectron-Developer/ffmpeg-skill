@@ -2743,14 +2743,20 @@ class ContractTests(unittest.TestCase):
         doc, err = gfx(bad, "--title", "CEO\nand founder", "--text-render", "drawtext")
         self.assertEqual(doc["text_renderer"], "drawtext")
         self.assertIn("warning: this ffmpeg's drawtext draws a box", err)
-        doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
-                              "-o", self.out("nl_ov.mp4"), env=bad).stdout)
-        self.assertNotIn("notes", doc)
-        measure, draw = doc["commands"][0], doc["commands"][-1]
-        self.assertIn("print(text_w", measure, "the lines are measured, even under --dry-run")
-        self.assertEqual(draw.count("drawtext="), 4, "two lines, outlines then text")
-        self.assertEqual(draw.count("y_align=baseline"), 4)
-        self.assertNotIn("text_w", draw, "x/y carry the measured block size")
+        # The per-line route measures with drawtext's top_a/bottom_d and draws at y_align=baseline,
+        # which FFmpeg has from 6.1; the shim only fakes the release, so the measuring ffmpeg is the
+        # real one, and on the 5.1.1 job it cannot run what an 8.0.x build would.
+        drawtext_help = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=drawtext"],
+                                       capture_output=True, text=True).stdout
+        if "y_align" in drawtext_help:
+            doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
+                                  "-o", self.out("nl_ov.mp4"), env=bad).stdout)
+            self.assertNotIn("notes", doc)
+            measure, draw = doc["commands"][0], doc["commands"][-1]
+            self.assertIn("print(text_w", measure, "the lines are measured, even under --dry-run")
+            self.assertEqual(draw.count("drawtext="), 4, "two lines, outlines then text")
+            self.assertEqual(draw.count("y_align=baseline"), 4)
+            self.assertNotIn("text_w", draw, "x/y carry the measured block size")
         doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
                               "-o", self.out("nl_ov.mp4"), env=good).stdout)
         self.assertNotIn("notes", doc)
