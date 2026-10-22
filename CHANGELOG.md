@@ -4,6 +4,14 @@
 
 ## Unreleased
 
+### Added
+
+- **`doctor` warns when the FFmpeg it runs is older than the upstream fix for a known high-severity CVE.** ffmpeg-skill does not ship FFmpeg, so a decoder bug in the installed build stays until the user upgrades it. `doctor --json` has a new `ffmpeg_security` field (`source`, `checked`, per-binary `version`/`status`/`advisories`, `warnings`), and each older version gets one `warning:` line on stderr. The table is small, dated and hand-maintained from https://ffmpeg.org/security.html (checked 2026-10-22). It holds CVE-2026-8461 ("PixelSmash", MagicYUV decoder heap out-of-bounds write, CVSS 8.8), fixed in 8.0.3, 8.1.2 and 9.0. A version on an older branch with no fixed release (7.1, 6.1, ...) is compared with 8.0.3. The line never says the build is vulnerable: an Ubuntu (`8.0.1-3ubuntu2`) or Debian (`+deb13u1`) package may carry the fix as a backport under the old number, and the line says so and names the update command. An unparseable version (a git snapshot) gets no warning. It is advice only: `ok`, every tool's `usable` and the exit code are unchanged, and nothing is fetched. AISLE's CVE-2026-64830..64835 are not on security.html yet and have no row.
+
+### Deprecated
+
+- **Python 3.9** (since 2.11.0, removed in 3.0.0). CPython 3.9 reached end of life in October 2025 and gets no security fixes. It still works throughout 2.x: the floor stays `>=3.9` and CI keeps testing it. On 3.9, `doctor` and the `npx` installer print one stderr line naming the replacement, Python 3.10+. `contract --json`'s `deprecated` list has the entry, and `requirements.python` says 3.10+ is recommended.
+
 ### Fixed
 
 Three failures on Ubuntu 26.04 (`ubuntu-latest` since 2026-10-21), whose apt FFmpeg is 8.0.1. Each is an FFmpeg bug in specific releases; the tools now behave the same on 5.1.1, 6.1.1, 7.0.2, 8.0.1 and 8.1.3, the builds they were run on.

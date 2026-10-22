@@ -1674,3 +1674,30 @@ not a new file format this tool would have to maintain.
   libass route and warns in `notes` instead of drawing each line with its own `drawtext`, which
   would change how a block is aligned. Code: `drawtext_draws_newline_glyph()`. Test:
   `test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break`.
+
+## Unreleased — doctor's FFmpeg advisory and the Python 3.9 deprecation
+
+- **The FFmpeg CVE advisory is a warning, never a failure, and never says "vulnerable".** `doctor`
+  sees only the upstream number in `ffmpeg -version`, and distributions backport fixes under it
+  (Ubuntu `8.0.1-3ubuntu2`, Debian `+deb13u1`), so the line says the build is older than the first
+  upstream release with the fix and that a distro may have backported it. It names an update command.
+  `ok`, each tool's `usable` and the exit code stay what the capabilities say: an advisory that
+  failed doctor would fail every patched distro build. Code: `_contract.ffmpeg_security()`.
+  Tests: `test_ffmpeg_security_compares_with_the_fix_on_the_version_s_branch`,
+  `test_doctor_advisory_is_a_warning_never_a_failure`.
+- **A version on a branch with no fixed release is compared with the oldest release that has the
+  fix.** security.html lists CVE-2026-8461's fix under 9.0, 8.1.2 and 8.0.3 and under no 7.x or 6.x
+  release. Read literally, "older than the fix on its branch" would leave 6.1 and 7.1 (Ubuntu 24.04,
+  Debian 13) silent. The line for them says no release on their branch is listed with the fix,
+  which is what the page shows; it does not claim the old branch has the bug. A version that is not
+  a release number (`N-12345-g…`, a dated git build) is `unknown` and gets no line.
+- **The table is hand-maintained and offline.** It is the list on ffmpeg.org/security.html on the
+  date in `FFMPEG_ADVISORIES_CHECKED`, and only CVEs that page lists go in. Fetching it at run
+  time would break `execution.network: false`, and a stale table only means a missed warning, not
+  a false one. Test: `test_ffmpeg_advisory_table_is_dated_sourced_and_documented`.
+- **The Python 3.9 deprecation is on stderr only; the FFmpeg advisory is in the document too.**
+  Every deprecation warning has been a stderr line (`--crf` in 1.10), and the machine-readable
+  form is `contract --json`'s `deprecated`. The FFmpeg advisory is about the machine, which is what
+  `doctor --json` describes, so it has a key (`ffmpeg_security.warnings`). The 3.9 floor and CI's
+  3.9 job stay until 3.0. Tests: `test_python_3_9_is_deprecated_on_every_surface`,
+  `test_doctor_prints_the_python_3_9_warning_on_stderr_only`, `test_installer_warns_once_on_python_3_9`.

@@ -44,25 +44,52 @@ if (has('--help') || has('-h')) {
 // Windows Python installers commonly expose `python`/`py`, not `python3`. The Microsoft Store
 // app-execution alias is a real python3.exe that spawns (no ENOENT) and exits non-zero, so a
 // missing `error` is not proof an interpreter ran. Probe with a version check, then fall through.
-const PYTHON_PROBE = ['-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)'];
+// The probe also prints major.minor, so the installer can warn about a deprecated interpreter.
+const PYTHON_PROBE = ['-c', "import sys; sys.stdout.write('%d.%d' % sys.version_info[:2]); raise SystemExit(0 if sys.version_info >= (3, 9) else 1)"];
+
+// 2.11.0 deprecates Python 3.9 (docs/contract.md "Deprecation policy"; `contract --json`'s
+// `deprecated`). The same line as scripts/_contract.py's PY39_DEPRECATION (a test keeps them equal).
+const PY39_DEPRECATION = 'warning: Python 3.9 is deprecated since ffmpeg-skill 2.11.0 (CPython 3.9 reached end of life in October 2025 and gets no security fixes); it still works in 2.x and support ends in 3.0.0: use Python 3.10+.';
+
+function pythonDeprecation(version) {
+  return version === '3.9' ? PY39_DEPRECATION : null;
+}
 
 function pythonCandidates(platform) {
   return platform === 'win32' ? ['python3', 'python', 'py'] : ['python3'];
 }
 
-function runWithPython(scriptArgs, platform, spawn) {
+// The first candidate that runs and is 3.9+: { cmd, version } (version "3.9", or null when the
+// probe printed nothing), or { missing: true, ... } when none is.
+function findPython(platform, spawn) {
   const candidates = pythonCandidates(platform);
   const run = spawn || spawnSync;
   let last = null;
   for (const cmd of candidates) {
-    const probe = run(cmd, PYTHON_PROBE, { stdio: 'ignore', timeout: 15000 });
+    const probe = run(cmd, PYTHON_PROBE, { stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 15000 });
     if (probe.error || probe.status !== 0) {
       last = probe;
       continue;
     }
-    return run(cmd, scriptArgs, { stdio: 'inherit' });
+    const out = typeof probe.stdout === 'string' ? probe.stdout.trim() : '';
+    return { cmd, version: /^\d+\.\d+$/.test(out) ? out : null };
   }
   return { missing: true, error: last && last.error, status: last && last.status, candidates };
+}
+
+function runWithPython(scriptArgs, platform, spawn) {
+  const py = findPython(platform, spawn);
+  if (py.missing) return py;
+  return (spawn || spawnSync)(py.cmd, scriptArgs, { stdio: 'inherit' });
+}
+
+// After an install: the one-line deprecation warning when the Python the skill will run on is 3.9.
+// `doctor` prints the same line itself (from Python), so it is not repeated for that subcommand.
+function warnDeprecatedPython(platform, spawn, warn) {
+  const py = findPython(platform, spawn);
+  const line = py.missing ? null : pythonDeprecation(py.version);
+  if (line) (warn || console.warn)(`\n  ${line}`);
+  return line;
 }
 
 function main() {
@@ -174,6 +201,7 @@ for (const t of targets) {
 
 if (!has('--uninstall')) {
   checkFfmpeg();
+  warnDeprecatedPython(process.platform, spawnSync);
   console.log('\nDone. Ask your agent things like "make this video 60 seconds and add captions".');
 }
 process.exit(failed ? 1 : 0);
@@ -183,4 +211,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { pythonCandidates, runWithPython };
+module.exports = { pythonCandidates, runWithPython, findPython, pythonDeprecation, warnDeprecatedPython, PY39_DEPRECATION };
