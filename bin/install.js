@@ -47,9 +47,9 @@ if (has('--help') || has('-h')) {
 // The probe also prints major.minor, so the installer can warn about a deprecated interpreter.
 const PYTHON_PROBE = ['-c', "import sys; sys.stdout.write('%d.%d' % sys.version_info[:2]); raise SystemExit(0 if sys.version_info >= (3, 9) else 1)"];
 
-// 2.11.0 deprecates Python 3.9 (docs/contract.md "Deprecation policy"; `contract --json`'s
+// 2.10.9 deprecates Python 3.9 (docs/contract.md "Deprecation policy"; `contract --json`'s
 // `deprecated`). The same line as scripts/_contract.py's PY39_DEPRECATION (a test keeps them equal).
-const PY39_DEPRECATION = 'warning: Python 3.9 is deprecated since ffmpeg-skill 2.11.0 (CPython 3.9 reached end of life in October 2025 and gets no security fixes); it still works in 2.x and support ends in 3.0.0: use Python 3.10+.';
+const PY39_DEPRECATION = 'warning: Python 3.9 is deprecated since ffmpeg-skill 2.10.9 (CPython 3.9 reached end of life in October 2025 and gets no security fixes); it still works in 2.x and support ends in 3.0.0: use Python 3.10+.';
 
 function pythonDeprecation(version) {
   return version === '3.9' ? PY39_DEPRECATION : null;

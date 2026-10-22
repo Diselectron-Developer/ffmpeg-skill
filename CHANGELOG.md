@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **The Python 3.9 deprecation is dated 2.10.9, the release that shipped it.** The warning, `contract --json`'s `deprecated` entry and the docs said 2.11.0, the version the change was written for before the automated release numbered it 2.10.9.
 
 ## 2.10.9
 
@@ -16,7 +18,7 @@ _Automated release: version and notes generated from pull requests merged since 
 
 ### Deprecated
 
-- **Python 3.9** (since 2.11.0, removed in 3.0.0). CPython 3.9 reached end of life in October 2025 and gets no security fixes. It still works throughout 2.x: the floor stays `>=3.9` and CI keeps testing it. On 3.9, `doctor` and the `npx` installer print one stderr line naming the replacement, Python 3.10+. `contract --json`'s `deprecated` list has the entry, and `requirements.python` says 3.10+ is recommended.
+- **Python 3.9** (since 2.10.9, removed in 3.0.0). CPython 3.9 reached end of life in October 2025 and gets no security fixes. It still works throughout 2.x: the floor stays `>=3.9` and CI keeps testing it. On 3.9, `doctor` and the `npx` installer print one stderr line naming the replacement, Python 3.10+. `contract --json`'s `deprecated` list has the entry, and `requirements.python` says 3.10+ is recommended.
 
 ### Fixed
 
