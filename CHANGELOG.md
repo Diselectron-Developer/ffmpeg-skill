@@ -4,11 +4,18 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.10.11
+
+_Automated release: version and notes generated from pull requests merged since 2.10.10._
+
 ### Fixed
 
 - **`color.py --retag` changes the tags a player reads, and checks that it did.** A stream copy set only the container's colour tags (`-colorspace`/`-color_primaries`/`-color_trc`). H.264, HEVC, MPEG-2, AV1 and VP9 carry their own colour description in the stream, which decoders and ffprobe read first. So a source already tagged there came out with its old tags while the result said `completed` (FFmpeg 6.1 and 8.0.1 alike). The copy now also rewrites the stream's own description with the codec's bitstream filter (`h264_metadata`, `hevc_metadata`, `mpeg2_metadata`, `av1_metadata`, `vp9_metadata`), so it is still a lossless copy. Every run then probes its output, both the stream's tags and the first decoded frame's, since FFmpeg 8.1's ffprobe shows the container's tag at stream level while the decoder still outputs the VUI's (`verification`: `color_tags`). If either still reads other tags (a codec with no such filter, or a build without it), the video is re-encoded with the tags and `reencoded: true` plus a `notes` line say why. If the re-encode is wrong too, the run fails with `kind: verification`. `contract --json` lists the five filters as optional capabilities of `color`.
 - **`color.py --retag`'s re-encode keeps the pixels and writes the tags on FFmpeg 7.1 and later.** It set the tags with output options. From 7.1 those drive the filter graph's colourspace negotiation, so a bt709 source retagged bt601 had its matrix converted and kept bt709 primaries and transfer (measured on 8.0.1 and 8.1.3). The frames are now labelled with `setparams`, which gives identical pixels and the requested tags on 6.1.1, 7.0.2, 8.0.1 and 8.1.3.
 - **`overlay.py --text` draws multi-line text without a box at the line breaks on FFmpeg 8.0, 8.0.1 and 8.1.0.** 2.10.9 only warned. On those releases each line now gets its own `drawtext`, placed where one multi-line drawtext puts it on a fixed release. The positions come from one small drawtext run that measures each line alone (width, first line's ascent, last line's descent, line height); it runs under `--dry-run` too, so the plan is the run. Outlines go first, and the `--box` is drawn once at the block's size. The frame is bit-identical to a single multi-line drawtext on 8.1.3 (and on 6.1.1 with the route forced), and 8.0.1's output matches 8.1.3's. A font whose glyph boxes are not whole pixels can sit one row lower. The warning and the `notes` line are gone, and `overlay` is listed among the tools that may measure under `--dry-run`. Other releases plan the same command as before, byte for byte.
+- fix: --retag rewrites the stream's own colour tags; overlay draws multi-line text per line on 8.0-8.1.0 (#348)
 
 ## 2.10.10
 
