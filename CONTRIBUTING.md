@@ -47,7 +47,8 @@ npm run release-check       # packaging + installer + MCP + doctor + full suite
 python3 scripts/_contract.py doctor   # what this machine can actually run
 ```
 
-Python 3.9+ standard library only — no new runtime dependencies. Every script
+Python 3.9+ standard library only — no new runtime dependencies. 3.9 is deprecated since 2.11.0 and
+still runs in CI until 3.0 drops it, so code must keep working on it until then. Every script
 must keep working with nothing beyond `ffmpeg`/`ffprobe` on `PATH`.
 
 ## Tests

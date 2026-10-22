@@ -1650,3 +1650,54 @@ not a new file format this tool would have to maintain.
   pending intermediate and a plan for it is no plan. A missing `image` is unchanged: a dry run
   still plans it and a real run fails in the overlays stage. Code: `render.main()`. Test:
   `test_render_video_overlay_refusals_and_dry_run_plan`.
+
+## Unreleased — FFmpeg 8.0.1 (Ubuntu 26.04)
+
+- **`pad.py` builds one `-filter_complex` for a clip with sound, not a `-vf` and an `-af`.** On
+  8.0.1 and conda-forge's 7.1.1 (not Debian's 7.1.5 or 8.1.3), one demuxer feeding two simple
+  graphs deadlocks when the audio one both delays and pads (`adelay` + `apad`); one graph reading
+  both streams runs on 5.1.1, 6.1.1, 7.0.2, 8.0.1 and 8.1.3. A command
+  compared with 2.10.8's differs by design. Code: `pad.main()`. Test:
+  `test_pad_with_sound_is_one_filter_graph`.
+- **`silence.py` selects the sound with two `ametadata` filters, not `aselect`.** 8.0 and 8.0.1's
+  `aselect` passes every frame. The first `ametadata` tags a frame when the same `between()`
+  expression (as a timeline `enable`, so the same per-frame `t`) is true and the second keeps the
+  tagged frames, which is what `aselect` keeps. `asplit` + an `atrim` per range + `concat` was
+  tried and works, but costs about 81 command bytes per range against 56: at `--max-cuts 400` on
+  an hour-long file that is past Windows' 32767-character command line. `asegment`'s timestamp
+  mode compares pts with a sample count and is right only for a stream that starts at 0. Code:
+  `silence.main()`. Test: `test_silence_removal_cuts_the_sound_with_the_picture`.
+- **On 8.0, 8.0.1 and 8.1.0, a multi-line `graphics.py` label goes through libass under
+  `--text-render auto`**, decided after the template has wrapped its labels (so `main()` runs
+  once more with the route forced). The releases are named, not probed: `--dry-run` may not start
+  ffmpeg, and a git build without a release number is taken to be fixed. `overlay.py` has no
+  libass route and warns in `notes` instead of drawing each line with its own `drawtext`, which
+  would change how a block is aligned. Code: `drawtext_draws_newline_glyph()`. Test:
+  `test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break`.
+
+## Unreleased — doctor's FFmpeg advisory and the Python 3.9 deprecation
+
+- **The FFmpeg CVE advisory is a warning, never a failure, and never says "vulnerable".** `doctor`
+  sees only the upstream number in `ffmpeg -version`, and distributions backport fixes under it
+  (Ubuntu `8.0.1-3ubuntu2`, Debian `+deb13u1`), so the line says the build is older than the first
+  upstream release with the fix and that a distro may have backported it. It names an update command.
+  `ok`, each tool's `usable` and the exit code stay what the capabilities say: an advisory that
+  failed doctor would fail every patched distro build. Code: `_contract.ffmpeg_security()`.
+  Tests: `test_ffmpeg_security_compares_with_the_fix_on_the_version_s_branch`,
+  `test_doctor_advisory_is_a_warning_never_a_failure`.
+- **A version on a branch with no fixed release is compared with the oldest release that has the
+  fix.** security.html lists CVE-2026-8461's fix under 9.0, 8.1.2 and 8.0.3 and under no 7.x or 6.x
+  release. Read literally, "older than the fix on its branch" would leave 6.1 and 7.1 (Ubuntu 24.04,
+  Debian 13) silent. The line for them says no release on their branch is listed with the fix,
+  which is what the page shows; it does not claim the old branch has the bug. A version that is not
+  a release number (`N-12345-g…`, a dated git build) is `unknown` and gets no line.
+- **The table is hand-maintained and offline.** It is the list on ffmpeg.org/security.html on the
+  date in `FFMPEG_ADVISORIES_CHECKED`, and only CVEs that page lists go in. Fetching it at run
+  time would break `execution.network: false`, and a stale table only means a missed warning, not
+  a false one. Test: `test_ffmpeg_advisory_table_is_dated_sourced_and_documented`.
+- **The Python 3.9 deprecation is on stderr only; the FFmpeg advisory is in the document too.**
+  Every deprecation warning has been a stderr line (`--crf` in 1.10), and the machine-readable
+  form is `contract --json`'s `deprecated`. The FFmpeg advisory is about the machine, which is what
+  `doctor --json` describes, so it has a key (`ffmpeg_security.warnings`). The 3.9 floor and CI's
+  3.9 job stay until 3.0. Tests: `test_python_3_9_is_deprecated_on_every_surface`,
+  `test_doctor_prints_the_python_3_9_warning_on_stderr_only`, `test_installer_warns_once_on_python_3_9`.

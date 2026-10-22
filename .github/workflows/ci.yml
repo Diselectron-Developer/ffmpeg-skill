@@ -32,7 +32,8 @@ jobs:
         include:
           - os: ubuntu-latest
             python: "3.13"
-    runs-on: ${{ matrix.os }}
+    # ubuntu-latest is Ubuntu 26.04, which has no Python 3.9 build; keep 3.9 on the newest image that does
+    runs-on: ${{ matrix.python == '3.9' && startsWith(matrix.os, 'ubuntu') && 'ubuntu-24.04' || matrix.os }}
     name: test (${{ matrix.os }}, py${{ matrix.python }})
     steps:
       - uses: actions/checkout@v7
@@ -120,7 +121,7 @@ jobs:
   # contract and end-to-end suites pass. The tarball is pinned by version, not "release".
   test-ffmpeg-5:
     name: test (ubuntu-latest, py3.9, ffmpeg 5.1.1 static)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # no Python 3.9 build for Ubuntu 26.04 (ubuntu-latest)
     steps:
       - uses: actions/checkout@v7
         with:

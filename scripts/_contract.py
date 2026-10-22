@@ -444,6 +444,8 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
                  "sources": {"type": "array", "description": "1.18: [{path, offset_s, confidence, drift_ppm}], one per SOURCE; the only per-source shape once more than one SOURCE is given"}}
     elif name == "look":
         extra = {"outputs": {"type": "array", "items": {"type": "string"}}}
+    elif name == "overlay":
+        extra = {"notes": {"type": "array", "items": {"type": "string"}, "description": "a multi-line --text on FFmpeg 8.0, 8.0.1 or 8.1.0, whose drawtext draws a box at each line break (fixed in 8.0.2 and 8.1.1)"}}
     elif name == "render":
         extra = {"stages": {"type": "array", "items": {"type": "string"}}, "check": {"type": ["object", "null"]},
                  "plan": {"type": "string", "description": "when the argument was a plan.json (written by <tool> --plan): its path"},
@@ -722,6 +724,126 @@ def _version_line(binary: str) -> Optional[str]:
     return m.group(1) if m else (first[0] if first else "unknown")
 
 
+# ----------------------------------------------------------------------------- FFmpeg security advisories
+# doctor's `ffmpeg_security`: a small, dated, hand-maintained table of high-severity FFmpeg CVEs and
+# the first upstream point release on each branch that carries the fix. ffmpeg-skill does not ship
+# FFmpeg, so a user stays exposed to a decoder bug until they upgrade; doctor says so. It reads the
+# table and the local `-version` line only -- no network call, ever (execution.network: false).
+#
+# Source: https://ffmpeg.org/security.html (each release section lists the CVEs it fixes), checked
+# on FFMPEG_ADVISORIES_CHECKED. A branch absent from `fixed_in` had no release listed with the fix
+# on that date. Only CVEs that page lists go in: AISLE's batch (CVE-2026-64830..64835) was not on it
+# on 2026-10-22, so it has no row yet -- add one, with its releases, when the page lists them.
+# When editing: update FFMPEG_ADVISORIES_CHECKED, docs/contract.md and the CHANGELOG together.
+FFMPEG_ADVISORY_SOURCE = "https://ffmpeg.org/security.html"
+FFMPEG_ADVISORIES_CHECKED = "2026-10-22"
+FFMPEG_ADVISORIES: List[Dict[str, Any]] = [
+    {"cve": "CVE-2026-8461", "name": "PixelSmash", "component": "MagicYUV decoder",
+     "kind": "heap out-of-bounds write", "cvss": 8.8,
+     # security.html lists the fix under 9.0, 8.1.2 and 8.0.3; no 7.1.x/7.0.x/6.1.x release carries it
+     "fixed_in": {"8.0": "8.0.3", "8.1": "8.1.2", "9.0": "9.0"}},
+]
+
+
+def _parse_ffmpeg_version(text: Optional[str]) -> Optional[tuple]:
+    """(major, minor, patch) from an `ffmpeg -version` token: `6.1.1`, `8.0`, `n7.1.2`, and distro
+    builds that append to the upstream number (`8.0.1-3ubuntu2`, `7.1.2-0+deb13u1`,
+    `8.1.2-full_build-www.gyan.dev`). None for anything else -- a git snapshot (`N-12345-g...`,
+    `2026-10-01-git-...`) has no release number to compare, and a guess would be a false alarm."""
+    if not text:
+        return None
+    m = re.match(r"n?(\d+)\.(\d+)(?:\.(\d+))?(?![\d.])", text.strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+
+
+def _vstr(v: tuple) -> str:
+    return ".".join(str(x) for x in (v if v[2] else v[:2]))
+
+
+def _advisory_hits(version: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    """The table's rows this version is older than (None: the version could not be parsed). A
+    version on a branch the table lists is compared with that branch's fixing release; one on an
+    older branch with no fixing release is compared with the oldest release that has the fix."""
+    v = _parse_ffmpeg_version(version)
+    if v is None:
+        return None
+    hits = []
+    branch = f"{v[0]}.{v[1]}"
+    for adv in FFMPEG_ADVISORIES:
+        fixes = {k: _parse_ffmpeg_version(f) for k, f in adv["fixed_in"].items()}
+        if branch in fixes:
+            first, on_branch = fixes[branch], True
+        else:
+            first, on_branch = min(fixes.values()), False
+        if v < first:
+            hits.append({"cve": adv["cve"], "name": adv["name"], "component": adv["component"], "kind": adv["kind"],
+                         "cvss": adv["cvss"], "first_fix": _vstr(first), "fix_on_branch": on_branch, "branch": branch})
+    return hits
+
+
+def _update_hint(version: str, source: Optional[str]) -> str:
+    """How to update the FFmpeg this version string came from, as one short phrase."""
+    low = version.lower()
+    if "ubuntu" in low or "+deb" in low or "debian" in low:
+        return "sudo apt update && sudo apt install --only-upgrade ffmpeg"
+    system = platform.system()
+    if system == "Darwin":
+        return "brew upgrade ffmpeg-full" if source == "homebrew-ffmpeg-full" else "brew upgrade ffmpeg, or the package manager it came from"
+    if system == "Windows":
+        return "winget upgrade Gyan.FFmpeg, or a newer build from https://ffmpeg.org/download.html"
+    if system == "Linux":
+        return "your distribution's package update, e.g. sudo apt install --only-upgrade ffmpeg or sudo dnf upgrade ffmpeg"
+    return "a newer build from https://ffmpeg.org/download.html"
+
+
+def _advisory_warning(binary: str, version: str, hits: List[Dict[str, Any]], source: Optional[str]) -> str:
+    """One stderr/`warnings` line. It never says the build IS vulnerable: a distro package
+    (Ubuntu `8.0.1-3ubuntu2`, Debian `+deb13u1`) backports fixes without changing the upstream
+    number, and only the upstream number is visible here."""
+    parts = []
+    for h in hits:
+        where = (f"first fixed on the {h['branch']} branch in {h['first_fix']}" if h["fix_on_branch"]
+                 else f"no {h['branch']} release is listed with the fix; the oldest that has it is {h['first_fix']}")
+        parts.append(f"{h['cve']} ({h['component']} {h['kind']}, CVSS {h['cvss']:g}; {where})")
+    return (f"warning: {binary} {version} is older than the first upstream FFmpeg release that fixes "
+            f"{'; '.join(parts)}. A distribution package may have backported the fix without changing the "
+            f"upstream version, so this is not proof the build is vulnerable: update it "
+            f"({_update_hint(version, source)}). Source: {FFMPEG_ADVISORY_SOURCE}, checked {FFMPEG_ADVISORIES_CHECKED}.")
+
+
+def ffmpeg_security(versions: Dict[str, Optional[str]], sources: Optional[Dict[str, Optional[str]]] = None) -> Dict[str, Any]:
+    """doctor's `ffmpeg_security`: per binary {version, status, advisories}, and `warnings`, one line
+    per distinct version that is older than a fix. `status`: `older_than_fix`, `not_older`, or
+    `unknown` (no binary, or a version this table cannot compare -- which produces no warning).
+    Informational like `fonts`/`gpu_encoders`: it never moves `ok`, a tool's `usable` or the exit code."""
+    sources = sources or {}
+    out: Dict[str, Any] = {"source": FFMPEG_ADVISORY_SOURCE, "checked": FFMPEG_ADVISORIES_CHECKED, "warnings": []}
+    warned = set()
+    for binary in ("ffmpeg", "ffprobe"):
+        version = versions.get(binary)
+        hits = _advisory_hits(version)
+        status = "unknown" if hits is None else ("older_than_fix" if hits else "not_older")
+        out[binary] = {"version": version, "status": status, "advisories": hits or []}
+        if hits and version not in warned:
+            warned.add(version)
+            out["warnings"].append(_advisory_warning(binary, str(version), hits, sources.get(binary)))
+    return out
+
+
+# 2.11.0 deprecates Python 3.9 (docs/contract.md "Deprecation policy"; DEPRECATED below). The same
+# line is printed by bin/install.js (PY39_DEPRECATION there; a test keeps the two equal).
+PY39_DEPRECATION = ("warning: Python 3.9 is deprecated since ffmpeg-skill 2.11.0 (CPython 3.9 reached end of life "
+                    "in October 2025 and gets no security fixes); it still works in 2.x and support ends in 3.0.0: use Python 3.10+.")
+
+
+def python_deprecation(version_info: Optional[tuple] = None) -> Optional[str]:
+    """The deprecation line for this interpreter, or None when it is not a deprecated one."""
+    vi = tuple(version_info if version_info is not None else sys.version_info)[:2]
+    return PY39_DEPRECATION if vi == (3, 9) else None
+
+
 def _exe_report() -> Dict[str, Any]:
     """`ffmpeg_path` / `ffmpeg_source` / `ffprobe_path` / `ffprobe_source`: which binary the tools run
     and why ("path": what PATH resolves; "homebrew-ffmpeg-full": macOS, a lean Homebrew ffmpeg on
@@ -973,12 +1095,16 @@ def doctor() -> Dict[str, Any]:
     notes = [f"filter:drawtext: {drawtext_probe['note']}"] if drawtext_probe and drawtext_probe.get("note") else []
     notes += [f"{cap}: not in this ffmpeg build; the tools that need it encode with {alt[8:]} (VideoToolbox) instead, so their output is "
               "not CRF-equivalent (the result's `encoder`/`hw` say so)" for cap, alt in sorted(covered.items())]
+    versions = {"ffmpeg": _version_line("ffmpeg"), "ffprobe": _version_line("ffprobe")}
+    exes = _exe_report()
     return {
         "version": skill_version(),
         "python": ".".join(str(x) for x in sys.version_info[:3]),
-        "ffmpeg": _version_line("ffmpeg"),
-        "ffprobe": _version_line("ffprobe"),
-        **_exe_report(),
+        "ffmpeg": versions["ffmpeg"],
+        "ffprobe": versions["ffprobe"],
+        **exes,
+        # non-fatal: never part of `ok`, `usable` or the exit code
+        "ffmpeg_security": ffmpeg_security(versions, {b: exes.get(f"{b}_source") for b in versions}),
         "available": available,
         "missing": missing_required,
         "missing_optional": missing_optional,
@@ -1274,7 +1400,13 @@ def tool_spec(name: str, version: str) -> Dict[str, Any]:
 # step 1 (this list, --help text and the CHANGELOG) in a minor, step 2 keeps it working, step 3
 # removes it in the major. `where` says which surface a caller sees it on. Empty at 2.0.0: all
 # five 1.10.0 deprecations were settled by it (REMOVED below).
-DEPRECATED: List[Dict[str, str]] = []
+DEPRECATED: List[Dict[str, str]] = [
+    # CPython 3.9 reached end of life in October 2025. Raising the floor is a break, so 2.x keeps
+    # running on it (CI still tests 3.9) and doctor / bin/install.js print PY39_DEPRECATION.
+    {"what": "running on Python 3.9 (the requirements.python floor)",
+     "since": "2.11.0", "removed_in": "3.0.0", "where": "behaviour",
+     "replacement": "Python 3.10 or later; on 3.9, doctor and the npx installer print a one-line warning"},
+]
 
 # What 2.0.0 removed or changed, with the version that deprecated each: the "Removed" half of the
 # policy's step 3, kept in the contract so a caller migrating from 1.x can diff it instead of reading
@@ -1512,7 +1644,7 @@ def build(detect: bool = True) -> Dict[str, Any]:
             },
             "not_provided": ["AI reasoning", "decisions", "production plans", "project IR", "approvals", "network access", "transcription engine"],
         },
-        "requirements": {"python": ">=3.9 (standard library only)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0", "node": ">=16 (npx installer only)"},
+        "requirements": {"python": ">=3.9 (standard library only; 3.9 deprecated since 2.11.0, removed in 3.0.0; 3.10+ recommended)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0", "node": ">=16 (npx installer only)"},
         "execution": {
             "shell": False,
             "arbitrary_executables": False,
@@ -1576,6 +1708,13 @@ def main() -> int:
     args = ap.parse_args()
     if args.command == "doctor":
         d = doctor()
+        # Advisories, never failures: on stderr in both modes, so `doctor --json`'s stdout stays one
+        # JSON document. The FFmpeg ones are also in the document (`ffmpeg_security.warnings`); the
+        # Python 3.9 deprecation is stderr-only, as every deprecation warning is (docs/contract.md
+        # "Deprecation policy" step 1), and machine-readable in `contract --json`'s `deprecated`.
+        for line in [python_deprecation()] + d["ffmpeg_security"]["warnings"]:
+            if line:
+                print(line, file=sys.stderr)
         if args.json:
             print(json.dumps(d, indent=2, sort_keys=True))
         else:

@@ -39,7 +39,7 @@ from _common import (aac_args, add_common, brand_caption_style, script_font_for_
                      LANGUAGE_NAMES, needs_shaping, detect_script, BIDI_SCRIPTS, font_family_of_file, font_family_for_script, has_emoji,
                      emoji_clusters, emoji_codepoint_name, char_script, emoji_filter_chain, emoji_asset_for, emoji_support, resolve_emoji_assets,
                      EMOJI_ASSET_HINT, text_width_em, drawtext_shaping, wrap_text, WRAP_MODES,
-                     SAFE_WIDTH_FRACTION)
+                     SAFE_WIDTH_FRACTION, drawtext_draws_newline_glyph, is_multiline, _DRAWTEXT_PENDING)
 from _ass_overlay import text_overlay_ass, EMOJI_SENTINEL
 
 # where the template's text chain goes in a filter_complex it builds (graphics.main fills it in)
@@ -63,7 +63,9 @@ def font_opts(brand: dict, font: Optional[str], font_file: Optional[str], script
     return f"font='{escape_drawtext(font or brand.get('font', 'DejaVu Sans'))}'"
 
 
-def main() -> int:
+def main(force_route: Optional[str] = None) -> int:
+    """`force_route` is the second pass of an auto run whose drawtext labels came out multi-line on a
+    build that draws a box at every line break (see the check after the templates)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
     ap.add_argument("-o", "--output", help="output file (default: <name>_gfx.<ext>)")
@@ -104,7 +106,8 @@ def main() -> int:
     ap.add_argument("--text-render", choices=["auto", "ass", "drawtext"], default="auto",
                     help="which renderer draws the template's text: 'auto' (default) uses libass for "
                          "scripts drawtext cannot shape (Devanagari, Bengali, Tamil, Thai, Lao ...) and for "
-                         "emoji overlays, and drawtext for everything else -- Latin/CJK/Arabic frames are "
+                         "emoji overlays, and for multi-line text on FFmpeg 8.0, 8.0.1 and 8.1.0 (their drawtext draws "
+                         "a box at each line break), and drawtext for everything else -- Latin/CJK/Arabic frames are "
                          "pixel-identical to 1.14 (the drawtext command itself changed: the label is "
                          "passed as textfile=, not text=); 'ass' always uses libass; 'drawtext' forces the old renderer and is "
                          "refused for a script it cannot shape")
@@ -244,6 +247,8 @@ def main() -> int:
             kind="input")
     route = "ass" if (args.text_render == "ass" or
                       (args.text_render == "auto" and (shaping or emoji_mode == "png"))) else "drawtext"
+    if force_route:
+        route = force_route
     # drawtext loads exactly ONE font file and has no fallback chain, so "whatever glyph the text
     # font has" for an emoji is an empty box on DejaVu Sans and on every script font: reporting
     # mode "mono" from the drawtext route is a claim the frame does not keep. libass DOES have a
@@ -549,6 +554,20 @@ def main() -> int:
                      size=fs, color=primary, font=ass_font_family(), align=5, x=W / 2, y=H / 2,
                      outline=float(max(2, fs // 40)), outline_color=bg, start=ks, end=ke,
                      scale_t=(0, seg * 500, 115))
+
+    # FFmpeg 8.0, 8.0.1 and 8.1 draw the font's missing-glyph box at the end of every line but the
+    # last of a multi-line drawtext (and widen text_w by it). Every template lays out the same
+    # elements for libass, so an auto run whose labels came out multi-line -- given that way or
+    # wrapped to the frame above -- is laid out again on that route; a pinned drawtext run says so.
+    if route == "drawtext" and drawtext_draws_newline_glyph() and any(is_multiline(t) for t in _DRAWTEXT_PENDING.values()):
+        if args.text_render == "auto" and not force_route:
+            info("multi-line text: this ffmpeg's drawtext draws a box at each line break "
+                 "(FFmpeg 8.0-8.0.1 and 8.1.0; fixed in 8.0.2/8.1.1), so it is rendered through libass")
+            _DRAWTEXT_PENDING.clear()
+            return main(force_route="ass")
+        info("warning: this ffmpeg's drawtext draws a box at each line break of a multi-line label "
+             "(FFmpeg 8.0-8.0.1 and 8.1.0; fixed in 8.0.2/8.1.1): drop --text-render drawtext to render it "
+             "through libass, or upgrade FFmpeg")
 
     output = args.output or default_output(args.input, "gfx")
     ass_path = None

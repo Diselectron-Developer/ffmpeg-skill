@@ -81,8 +81,14 @@ on, the line says so.
 
 `contract --json` carries a top-level `deprecated` list, next to `contract_version`: one entry per
 thing the next major removes, `{"what", "since", "replacement", "removed_in", "where"}` with `where`
-naming the surface (`cli`, `json`, `mcp`, `behaviour`). It is empty in 2.0.0. `tests/test_contract.py`
-refuses a package.json major bump that still lists an entry that major should remove, or that
+naming the surface (`cli`, `json`, `mcp`, `behaviour`). It was empty in 2.0.0. Since 2.11.0 it lists one
+entry: **running on Python 3.9** (`where: behaviour`, `removed_in: 3.0.0`). CPython 3.9 reached end of life
+in October 2025 and gets no security fixes, but raising the floor is a break, so 2.x keeps running on 3.9
+(`requirements.python` stays `>=3.9`, and CI keeps testing it). It is deprecated, and Python 3.10+ is
+recommended: on 3.9, `doctor` and the `npx` installer print one stderr line,
+`warning: Python 3.9 is deprecated since ffmpeg-skill 2.11.0 (...); it still works in 2.x and support ends in 3.0.0: use Python 3.10+.`
+Like every deprecation warning it is stderr only: `doctor --json`'s document has no key for it.
+`tests/test_contract.py` refuses a package.json major bump that still lists an entry that major should remove, or that
 comes before step 2's window has passed -- unless the waiver is written here, as 2.0.0's is.
 
 **2.0.0 waived the 90-day half of step 2.** Its deprecations date from 1.10.0 (2026-09-13), so
@@ -117,12 +123,12 @@ JSON would have been rewritten for that. The flat keys, typed per tool in `outpu
 ```json
 {
   "contract_version": "1.0",
-  "deprecated": [],
+  "deprecated": [{"what": "running on Python 3.9 (the requirements.python floor)", "since": "2.11.0", "replacement": "Python 3.10 or later; ...", "removed_in": "3.0.0", "where": "behaviour"}],
   "removed": [{"what": "...", "since": "1.10.0", "replacement": "...", "removed_in": "2.0.0", "where": "cli | json | mcp | behaviour"}],
   "skill": {"id": "ffmpeg-skill", "version": "2.10.8", "execution_mode": "local", "kind": "execution",
             "entrypoints": {"cli": "...", "mcp": "...", "contract": "...", "doctor": "..."},
             "not_provided": ["AI reasoning", "decisions", "production plans", "project IR", "approvals", "network access", "transcription engine"]},
-  "requirements": {"python": ">=3.9 (standard library only)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0"},
+  "requirements": {"python": ">=3.9 (standard library only; 3.9 deprecated since 2.11.0, removed in 3.0.0; 3.10+ recommended)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0"},
   "execution": {"shell": false, "arbitrary_executables": false, "network": false,
                 "model_downloads": {"when": "...", "in_process": {"faster-whisper": "..."},
                                     "child_process": {"parakeet-mlx": "...", "openai-whisper": "..."},
@@ -470,6 +476,30 @@ keg-only `opt/ffmpeg-full/bin/<name>`, the tools run that one (#317), because `b
 ffmpeg-full` does not put it on PATH and the lean build has no drawtext/subtitles/zscale. Nothing
 else is substituted. `ffmpeg` and `ffprobe` (version strings) keep their meaning; the four keys are
 additive.
+
+`doctor`'s `ffmpeg_security` field compares the `ffmpeg` and `ffprobe` versions with a small table of
+high-severity FFmpeg CVEs and the first upstream release on each branch that carries the fix. The table is
+hand-maintained in `scripts/_contract.py` (`FFMPEG_ADVISORIES`), copied from
+<https://ffmpeg.org/security.html> and last checked on 2026-10-22; the document repeats both as `source`
+and `checked`. Nothing is fetched: the check is offline, like the rest of the skill. On that date it holds one row:
+
+| CVE | What | CVSS | First fixed upstream |
+|---|---|---|---|
+| CVE-2026-8461 ("PixelSmash") | MagicYUV decoder heap out-of-bounds write | 8.8 | 8.0.3 (8.0 branch), 8.1.2 (8.1), 9.0 (9.0); no 7.1.x, 7.0.x or 6.1.x release is listed with the fix |
+
+AISLE's CVE-2026-64830..64835 were not on security.html on that date, so they have no row yet.
+
+`{"source": "https://ffmpeg.org/security.html", "checked": "2026-10-22", "ffmpeg": {"version": "...", "status":
+"older_than_fix"|"not_older"|"unknown", "advisories": [{"cve", "name", "component", "kind", "cvss",
+"first_fix", "fix_on_branch", "branch"}]}, "ffprobe": {...}, "warnings": ["..."]}`. The leading upstream
+number is read from the version (`8.0.1-3ubuntu2` is 8.0.1). A version on a branch the table lists is
+compared with that branch's fixing release; a version on an older branch, which has no fixing release, with
+the oldest release that has it (`fix_on_branch: false`). A version with no release number (a git snapshot,
+`N-12345-g…`), or no binary, is `unknown` and never warned about. Each distinct version that is older gets one
+line in `warnings`, also printed to stderr (in plain and `--json` mode). The line says the build is older than
+the upstream fix and that a distribution package may have backported it without changing the version; it does
+not say the build is vulnerable, and it names an update command (apt for an Ubuntu/Debian version, else by
+platform). Like `gpu_encoders` and `fonts`, it never affects `ok`, any tool's `usable` or the exit code.
 
 `doctor`'s `gpu_encoders` field reports GPU-backed encoders (`nvenc`, `videotoolbox`, `qsv`,
 `vaapi`, `amf`) present in this ffmpeg *build*, read from `-encoders` alone — `{"status":

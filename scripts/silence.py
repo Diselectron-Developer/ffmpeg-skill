@@ -3,7 +3,7 @@
 
 Detects quiet stretches with ffmpeg's silencedetect, keeps a margin on each
 side so words are not clipped, drops gaps shorter than --min-silence, and
-writes a frame-accurate re-encode in one pass (select/aselect filters).
+writes a frame-accurate re-encode in one pass (select, and ametadata for the sound).
 
 Examples:
   python3 silence.py talk.mp4                                 # -35 dB, gaps >= 0.6 s, 0.15 s margin
@@ -312,7 +312,7 @@ def main() -> int:
         silences = detect(args.input, args.threshold, args.min_silence)
     filler_info, filler_ranges = resolve_filler(args, meta) if args.filler else (None, [])
     # One sorted, merged removal list through the graph the tool already has: filler removal IS
-    # time-range removal, so it reuses keep_ranges() and the same aselect/concat chain.
+    # time-range removal, so it reuses keep_ranges() and the same select chain.
     removals = merge_spans(list(silences) + list(filler_ranges))
     keeps = keep_ranges(removals, duration, args.margin, args.min_keep)
     kept = sum(e - s for s, e in keeps)
@@ -403,7 +403,13 @@ def main() -> int:
     output = args.output or default_output(args.input, "tight")
     expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e in keeps)
     vf = f"select='{expr}',setpts=N/FRAME_RATE/TB"
-    af = f"aselect='{expr}',asetpts=N/SR/TB"
+    # Not `aselect='{expr}'`: FFmpeg 8.0 and 8.0.1 (Ubuntu 26.04's apt build) ship an aselect that
+    # passes every frame through (its activate callback was lost when the filter was converted;
+    # fixed in 8.0.2/8.1), which cut the picture and left the sound whole. Tagging the frames the
+    # expression keeps (timeline `enable`, the same per-frame t) and selecting the tagged ones keeps
+    # exactly the frames aselect keeps, on every release, in a command no longer than before.
+    af = (f"ametadata=mode=add:key=ffskill_keep:value=1:enable='{expr}',"
+          "ametadata=mode=select:key=ffskill_keep,asetpts=N/SR/TB")
     cmd = ffmpeg_base() + ["-i", args.input]
     audio_only = is_audio_output(output) or not meta.get("video")
     if audio_only:

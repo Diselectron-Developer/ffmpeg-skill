@@ -1340,7 +1340,9 @@ class ContractTests(unittest.TestCase):
     # Release date of each version a deprecation dates from (git tag date). CI checks out without
     # tags, so the dates live here, and they stay after the major that removes the entries: they
     # are what that major's own PR is checked against.
-    DEPRECATION_RELEASE_DATES = {"1.10.0": "2026-09-13"}
+    # None: not released yet. Set it to the tag date when that version ships; a major bump fails
+    # while it is None, because the 90-day window cannot be counted from an unknown date.
+    DEPRECATION_RELEASE_DATES = {"1.10.0": "2026-09-13", "2.11.0": None}
     # A major released before step 2's 90 days had passed, by the maintainer's decision. Each one
     # must be stated in docs/contract.md (the needle below), so it is a written waiver, not a slip.
     WINDOW_WAIVERS = {2: "**2.0.0 waived the 90-day half of step 2.**"}
@@ -1374,6 +1376,7 @@ class ContractTests(unittest.TestCase):
             if s_major >= major:
                 continue  # its removal is a later major's; nothing to check until then
             with self.subTest(since=since):
+                self.assertIsNotNone(day, f"{since}: set its release date in DEPRECATION_RELEASE_DATES before a major removes it")
                 later_minors = {(a, b) for a, b, _ in released if a == s_major and b > s_minor}
                 self.assertGreaterEqual(len(later_minors), 2, f"{since}: fewer than two further minor releases")
                 if s_major + 1 in self.WINDOW_WAIVERS:
@@ -1689,6 +1692,77 @@ class ContractTests(unittest.TestCase):
         proc = subprocess.run(["node", str(probe), str(ROOT / "bin" / "install.js")],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+
+    def test_python_3_9_is_deprecated_on_every_surface(self):
+        """2.11.0 deprecates Python 3.9 per docs/contract.md's policy: an entry in `deprecated`
+        (removed in 3.0.0), the floor unchanged (3.9 still runs), and one identical warning line from
+        doctor (Python) and the npx installer (Node)."""
+        entry = [e for e in self.contract["deprecated"] if "Python 3.9" in e["what"]]
+        self.assertEqual(len(entry), 1)
+        self.assertEqual((entry[0]["since"], entry[0]["removed_in"], entry[0]["where"]), ("2.11.0", "3.0.0", "behaviour"))
+        self.assertIn("3.10", entry[0]["replacement"])
+        self.assertTrue(self.contract["requirements"]["python"].startswith(">=3.9 "), "the hard floor stays 3.9 until 3.0")
+        self.assertIn("deprecated", self.contract["requirements"]["python"])
+        self.assertEqual(_contract.python_deprecation((3, 9, 18)), _contract.PY39_DEPRECATION)
+        for vi in ((3, 10, 0), (3, 13, 1), (3, 8, 10)):
+            self.assertIsNone(_contract.python_deprecation(vi), vi)
+        line = _contract.PY39_DEPRECATION
+        self.assertTrue(line.startswith("warning: ") and "\n" not in line)
+        for needle in ("3.0", "3.10+"):
+            self.assertIn(needle, line)
+        js = (ROOT / "bin" / "install.js").read_text(encoding="utf-8")
+        self.assertIn(f"const PY39_DEPRECATION = '{line}';", js, "install.js must print the same line as doctor")
+        ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn('python: ["3.9"]', ci, "deprecating 3.9 does not drop it from CI before 3.0")
+        for doc in ("README.md", "docs/contract.md", "CONTRIBUTING.md", "SKILL.md"):
+            text = (ROOT / doc).read_text(encoding="utf-8")
+            self.assertRegex(text, r"3\.9[^\n]*deprecated|deprecated[^\n]*3\.9", doc)
+
+    def test_doctor_prints_the_python_3_9_warning_on_stderr_only(self):
+        """Deprecation warnings go to stderr (policy step 1), never into stdout: `doctor --json`
+        stays one JSON document, with no key that exists only on 3.9."""
+        import contextlib
+        import io
+        from unittest import mock
+        fake = {"ffmpeg_security": {"warnings": []}, "ok": True, "missing": []}
+        for vi, expect in (((3, 9, 18, "final", 0), True), ((3, 12, 1, "final", 0), False)):
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(_contract, "doctor", return_value=fake), \
+                    mock.patch.object(sys, "argv", ["_contract.py", "doctor", "--json"]), \
+                    mock.patch.object(sys, "version_info", vi), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = _contract.main()
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out.getvalue()), fake)
+            self.assertEqual(_contract.PY39_DEPRECATION in err.getvalue(), expect, vi)
+
+    def test_installer_warns_once_on_python_3_9(self):
+        """bin/install.js reads major.minor from its interpreter probe and prints the deprecation
+        line after an install on 3.9; nothing on 3.10+, nor when the probe printed no version."""
+        probe = self.out("python_dep_probe.js")
+        probe.write_text(
+            "const inst = require(process.argv[2]);\n"
+            "function stubFor(ver) { return (cmd, args) => (args[0] === '-c' ? { status: 0, error: null, stdout: ver } : { status: 0 }); }\n"
+            "const seen = [];\n"
+            "const warn = (l) => seen.push(l);\n"
+            "if (inst.findPython('linux', stubFor('3.9')).version !== '3.9') process.exit(2);\n"
+            "if (inst.warnDeprecatedPython('linux', stubFor('3.9'), warn) !== inst.PY39_DEPRECATION) process.exit(3);\n"
+            "if (seen.length !== 1 || !seen[0].includes(inst.PY39_DEPRECATION)) process.exit(4);\n"
+            "if (inst.warnDeprecatedPython('linux', stubFor('3.10'), warn) !== null) process.exit(5);\n"
+            "if (inst.warnDeprecatedPython('linux', stubFor(undefined), warn) !== null) process.exit(6);\n"
+            "if (inst.warnDeprecatedPython('linux', () => ({ error: new Error('ENOENT'), status: null }), warn) !== null) process.exit(7);\n"
+            "if (seen.length !== 1) process.exit(8);\n"
+            "const ran = inst.runWithPython(['doctor'], 'linux', stubFor('3.9'));\n"
+            "if (ran.missing || ran.status !== 0) process.exit(9);\n",
+            encoding="utf-8")
+        proc = subprocess.run(["node", str(probe), str(ROOT / "bin" / "install.js")],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
+        # the real probe prints this interpreter's major.minor
+        found = subprocess.run(["node", "-e", "console.log(JSON.stringify(require(process.argv[1]).findPython(process.platform)))",
+                                str(ROOT / "bin" / "install.js")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if found.returncode == 0 and found.stdout.strip() and "missing" not in found.stdout:
+            self.assertRegex(json.loads(found.stdout)["version"], r"^3\.\d+$")
 
     def test_npm_package_omits_the_maintainer_diary(self):
         """docs/design-decisions.md: references/process-pitfalls.md stays out of the npm package.
@@ -2607,6 +2681,67 @@ class ContractTests(unittest.TestCase):
         out = subprocess.run([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, text=True, check=True).stdout
         self.assertEqual(out.strip(), "(7, 0)")
 
+    def _release_shim(self, name, banner):
+        """A PATH holding an ffprobe that answers `-version` with `banner` and hands every other
+        call to the real ffprobe, so a tool plans for that release on any machine."""
+        shim = self.out(name); shim.mkdir(exist_ok=True)
+        (shim / "ffprobe").write_text("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n'; exit 0; fi\n"
+                                      "exec %s \"$@\"\n" % (banner, shutil.which("ffprobe")))
+        (shim / "ffprobe").chmod(0o755)
+        return dict(os.environ, PATH=f"{shim}{os.pathsep}{os.environ['PATH']}")
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffprobe is a #!/bin/sh shim on a POSIX-only PATH")
+    def test_ffmpeg_release_reads_the_point_release(self):
+        """A drawtext bug that 8.0 introduced and 8.0.2 / 8.1.1 fixed cannot be told apart by
+        ffmpeg_version()'s major.minor; ffmpeg_release() reads the patch level too (a distro suffix
+        is ignored, a bare major.minor is .0) and has none for a git build."""
+        code = ("import sys; sys.path.insert(0, %r); import _common; "
+                "print(_common.ffmpeg_release(), _common.drawtext_draws_newline_glyph())" % str(SCRIPTS))
+        for banner, expected in (("ffprobe version 8.0.1-3ubuntu2 Copyright (c) 2007-2025", "(8, 0, 1) True"),
+                                 ("ffprobe version n8.1 Copyright (c) 2007-2026", "(8, 1, 0) True"),
+                                 ("ffprobe version 8.0.2 Copyright (c) 2007-2026", "(8, 0, 2) False"),
+                                 ("ffprobe version 8.1.1 Copyright (c) 2007-2026", "(8, 1, 1) False"),
+                                 ("ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023", "(6, 1, 1) False"),
+                                 ("ffprobe version N-121000-g1234abcd Copyright (c) 2007-2026", "None False")):
+            env = self._release_shim("release_shim", banner)
+            out = subprocess.run([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, text=True, check=True).stdout
+            self.assertEqual(out.strip(), expected, banner)
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffprobe is a #!/bin/sh shim on a POSIX-only PATH")
+    def test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break(self):
+        """FFmpeg 8.0, 8.0.1 (Ubuntu 26.04's apt build) and 8.1.0 shape each line of a multi-line
+        drawtext WITH its newline, so the font's missing-glyph box is drawn at the end of every line
+        but the last (CI on ubuntu-latest: the lower-third's title measured as three yellow bands).
+        graphics.py's auto route sends such a label -- given with a newline or wrapped there --
+        through libass on those releases, keeps drawtext for one line and on fixed releases, and a
+        pinned --text-render drawtext warns; overlay.py, which has no libass route, says so in notes."""
+        bad = self._release_shim("nl_shim_801", "ffprobe version 8.0.1-3ubuntu2 Copyright (c) 2007-2025")
+        good = self._release_shim("nl_shim_802", "ffprobe version 8.0.2 Copyright (c) 2007-2026")
+
+        def gfx(env, *extra):
+            proc = tool("graphics", self.src, "--template", "lower-third", "--name", "Jane", *extra,
+                        "--dry-run", "--json", "-o", self.out("nl_gfx.mp4"), env=env)
+            return json.loads(proc.stdout), proc.stderr
+
+        doc, err = gfx(bad, "--title", "CEO\nand founder")
+        self.assertEqual(doc["text_renderer"], "ass", err[-400:])
+        self.assertIn("box at each line break", err)
+        wrapped = json.loads(tool("graphics", self.src, "--template", "meme", "--top", "a caption far too long to fit "
+                                  "across the frame on a single line", "--dry-run", "--json", "-o", self.out("nl_meme.mp4"),
+                                  env=bad).stdout)
+        self.assertEqual(wrapped["text_renderer"], "ass", "a label graphics.py wrapped to two lines")
+        self.assertEqual(gfx(bad, "--title", "CEO")[0]["text_renderer"], "drawtext", "one line keeps drawtext")
+        self.assertEqual(gfx(good, "--title", "CEO\nand founder")[0]["text_renderer"], "drawtext", "8.0.2 is fixed")
+        doc, err = gfx(bad, "--title", "CEO\nand founder", "--text-render", "drawtext")
+        self.assertEqual(doc["text_renderer"], "drawtext")
+        self.assertIn("warning: this ffmpeg's drawtext draws a box", err)
+        doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
+                              "-o", self.out("nl_ov.mp4"), env=bad).stdout)
+        self.assertTrue(any("missing-glyph box" in n for n in doc.get("notes", [])), doc.get("notes"))
+        doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
+                              "-o", self.out("nl_ov.mp4"), env=good).stdout)
+        self.assertNotIn("notes", doc)
+
     def test_fourth_review_p3_regressions(self):
         """Fourth review P3 items: render re-encoded a clip at speed 1.0 (#47); a brand's default
         caption.animate made --mode mux fail (#32); shell_quote left a newline bare (#54);
@@ -3312,6 +3447,86 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(before, after, f"{p.name} modified")
 
 
+class FfmpegSecurityTableTests(unittest.TestCase):
+    """doctor's `ffmpeg_security` table and comparison, without running ffmpeg (every OS)."""
+
+    def test_ffmpeg_security_compares_with_the_fix_on_the_version_s_branch(self):
+        """doctor's FFmpeg advisory: a version older than the first upstream release on its branch
+        that fixes a listed CVE gets a warning; a fixed or newer one, an unparseable one and no
+        binary get none. The wording never claims the build is vulnerable (distros backport)."""
+        cases = {
+            "8.0.1-3ubuntu2": ("older_than_fix", "8.0.3", True),
+            "8.0.2": ("older_than_fix", "8.0.3", True),
+            "8.0.3": ("not_older", None, None),
+            "8.1": ("older_than_fix", "8.1.2", True),
+            "n8.1.1": ("older_than_fix", "8.1.2", True),
+            "8.1.2-full_build-www.gyan.dev": ("not_older", None, None),
+            "9.0": ("not_older", None, None),
+            "9.0.1-essentials_build-www.gyan.dev": ("not_older", None, None),
+            "10.0": ("not_older", None, None),
+            "7.1.2-0+deb13u1": ("older_than_fix", "8.0.3", False),
+            "6.1.1-3ubuntu5": ("older_than_fix", "8.0.3", False),
+            "N-121234-g0123abcd": ("unknown", None, None),
+            "2026-10-01-git-0123abcd-full_build-www.gyan.dev": ("unknown", None, None),
+            "unknown": ("unknown", None, None),
+            None: ("unknown", None, None),
+        }
+        for version, (status, first_fix, on_branch) in cases.items():
+            with self.subTest(version=version):
+                sec = _contract.ffmpeg_security({"ffmpeg": version, "ffprobe": None})
+                self.assertEqual(sec["ffmpeg"]["status"], status)
+                self.assertEqual(sec["ffprobe"]["status"], "unknown")
+                if first_fix is None:
+                    self.assertEqual(sec["ffmpeg"]["advisories"], [])
+                    self.assertEqual(sec["warnings"], [])
+                    continue
+                adv = sec["ffmpeg"]["advisories"][0]
+                self.assertEqual((adv["cve"], adv["first_fix"], adv["fix_on_branch"]), ("CVE-2026-8461", first_fix, on_branch))
+                self.assertEqual(len(sec["warnings"]), 1)
+                line = sec["warnings"][0]
+                self.assertTrue(line.startswith(f"warning: ffmpeg {version} is older than"), line)
+                self.assertNotIn("\n", line)
+                self.assertIn("CVE-2026-8461", line)
+                self.assertIn(first_fix, line)
+                self.assertIn("backported", line)
+                self.assertIn("not proof the build is vulnerable", line)
+                self.assertIn(_contract.FFMPEG_ADVISORIES_CHECKED, line)
+                if "ubuntu" in version or "+deb" in version:
+                    self.assertIn("sudo apt", line)
+        # the same version on both binaries warns once; a different ffprobe gets its own line
+        same = _contract.ffmpeg_security({"ffmpeg": "8.0.1", "ffprobe": "8.0.1"})
+        self.assertEqual(len(same["warnings"]), 1)
+        self.assertEqual(same["ffprobe"]["status"], "older_than_fix")
+        mixed = _contract.ffmpeg_security({"ffmpeg": "9.0", "ffprobe": "8.1.1"})
+        self.assertEqual(len(mixed["warnings"]), 1)
+        self.assertTrue(mixed["warnings"][0].startswith("warning: ffprobe 8.1.1"))
+
+    def test_ffmpeg_advisory_table_is_dated_sourced_and_documented(self):
+        """The table is hand-maintained: it names its source and the day it was checked, every
+        fixing release parses, and docs/contract.md states the same date and field."""
+        import datetime
+        datetime.date.fromisoformat(_contract.FFMPEG_ADVISORIES_CHECKED)
+        self.assertEqual(_contract.FFMPEG_ADVISORY_SOURCE, "https://ffmpeg.org/security.html")
+        self.assertTrue(_contract.FFMPEG_ADVISORIES)
+        for adv in _contract.FFMPEG_ADVISORIES:
+            self.assertRegex(adv["cve"], r"^CVE-\d{4}-\d+$")
+            self.assertGreaterEqual(adv["cvss"], 7.0, "the table lists high-severity CVEs only")
+            for branch, fix in adv["fixed_in"].items():
+                v = _contract._parse_ffmpeg_version(fix)
+                self.assertIsNotNone(v, fix)
+                self.assertEqual(f"{v[0]}.{v[1]}", branch)
+        contract_md = (ROOT / "docs" / "contract.md").read_text(encoding="utf-8")
+        self.assertIn("`ffmpeg_security`", contract_md)
+        self.assertIn(_contract.FFMPEG_ADVISORIES_CHECKED, contract_md)
+        for adv in _contract.FFMPEG_ADVISORIES:
+            self.assertIn(adv["cve"], contract_md)
+        self.assertIn("ffmpeg_security", (ROOT / "README.md").read_text(encoding="utf-8"))
+        # offline: the advisory is a table lookup, the module opens no connection
+        src = (SCRIPTS / "_contract.py").read_text(encoding="utf-8")
+        for mod in ("urllib", "http.client", "socket", "requests"):
+            self.assertNotRegex(src, rf"(?m)^\s*(import|from) {re.escape(mod)}\b", mod)
+
+
 @unittest.skipIf(platform.system() == "Windows", "every test here drives a fake ffmpeg via a #!/bin/sh POSIX shell shim on PATH to force specific fixture layouts; not portable to Windows. doctor's own detection logic still runs against the REAL ffmpeg on Windows CI through ContractTests' setUpClass and test_doctor_reports_this_installed_copys_own_version -- what's untested on Windows specifically is the fixture-driven FFmpeg 6/7/8/9 layout-parsing behaviour this class exists to pin. See README, 'Development'.")
 class DoctorDetectionTests(unittest.TestCase):
     """Capability detection reads every `ffmpeg -filters` layout and never confuses "unreadable" with "absent".
@@ -3526,6 +3741,37 @@ class DoctorDetectionTests(unittest.TestCase):
         self.assertNotIn("missing", d2["tools"]["caption"])
         # a tool needing only ffprobe/ffmpeg binaries (not a specific filter) is unaffected by the filter listing
         self.assertEqual(d2["tools"]["probe"]["usable"], "yes")
+
+    def test_doctor_advisory_is_a_warning_never_a_failure(self):
+        """End to end with a fake `ffmpeg -version`: the advisory is in the JSON and on stderr, and
+        `ok`, the tools' `usable` and the exit code are what the same build reports without it."""
+        results = {}
+        for version in ("8.0.1-3ubuntu2", "8.1.2"):
+            shim = self.work / f"shim_{version}"
+            shim.mkdir()
+            script = "#!/bin/sh\ncase \"$2\" in\n"
+            for flag, name in (("-filters", "ffmpeg_filters_6.1.txt"), ("-encoders", "ffmpeg_encoders_6.1.txt"), ("-bsfs", "ffmpeg_bsfs_6.1.txt")):
+                script += f"  {flag}) cat '{self.FIX / name}'; exit 0;;\n"
+            script += f"esac\ncase \"$1\" in -version) echo 'ffmpeg version {version} Copyright (c) 2000-2026'; exit 0;; esac\nexit 1\n"
+            (shim / "ffmpeg").write_text(script)
+            (shim / "ffmpeg").chmod(0o755)
+            env = dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}")
+            proc = sh(sys.executable, SCRIPTS / "_contract.py", "doctor", "--json", env=env, check=False)
+            plain = sh(sys.executable, SCRIPTS / "_contract.py", "doctor", env=env, check=False)
+            results[version] = (json.loads(proc.stdout), proc.returncode, proc.stderr, plain)
+        old, old_code, old_err, old_plain = results["8.0.1-3ubuntu2"]
+        new, new_code, new_err, new_plain = results["8.1.2"]
+        self.assertEqual(old["ffmpeg"], "8.0.1-3ubuntu2")
+        self.assertEqual(old["ffmpeg_security"]["ffmpeg"]["status"], "older_than_fix")
+        self.assertEqual(new["ffmpeg_security"]["ffmpeg"]["status"], "not_older")
+        line = next(w for w in old["ffmpeg_security"]["warnings"] if w.startswith("warning: ffmpeg 8.0.1-3ubuntu2"))
+        self.assertIn(line, old_err)
+        self.assertIn(line, old_plain.stderr)
+        self.assertNotIn(line, old_plain.stdout)
+        self.assertFalse(any(w.startswith("warning: ffmpeg ") for w in new["ffmpeg_security"]["warnings"]))
+        self.assertNotIn("warning: ffmpeg 8.1.2", new_err)
+        self.assertEqual((old["ok"], old_code, old_plain.returncode), (new["ok"], new_code, new_plain.returncode))
+        self.assertEqual(old["tools"], new["tools"])
 
     def test_doctor_json_keeps_its_keys(self):
         """Consumers of 0.9.0 read available / missing / missing_optional / ok; those keys and types stay."""

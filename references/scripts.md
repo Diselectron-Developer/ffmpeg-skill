@@ -581,14 +581,15 @@ silence.py INPUT --filler --words transcript.json [--filler-lang auto|en|ja|es|d
            [--model MODEL] [--filler-list] [--max-cuts 400]
 ```
 Runs `silencedetect`, keeps `--margin` seconds of air around speech, drops
-gaps shorter than `--min-silence`, and re-encodes once with `select`/`aselect`
-(frame accurate). `--list` prints silences, kept ranges and seconds removed
+gaps shorter than `--min-silence`, and re-encodes once: `select` for the picture
+(frame accurate), the same ranges through `ametadata` for the sound (not `aselect`, which passes every frame
+through on FFmpeg 8.0 and 8.0.1). `--list` prints silences, kept ranges and seconds removed
 without rendering; `--edl` saves the kept ranges in `cut.py --segments` format
 so the user can edit the list by hand. Quiet rooms need `--threshold -40`
 to `-45`; noisy ones `-30`. Always tell the user how many seconds were removed.
 
 **`--filler` (1.17)** removes filler words as well, through the same
-`keep_ranges()`/`aselect` graph with more, shorter ranges. It is **never**
+`keep_ranges()` graph with more, shorter ranges. It is **never**
 applied without measured word timings: pass `--words` (a whisper JSON carrying
 per-word `start`/`end`) or `--transcribe` (the same local engine `caption.py`
 uses, never required). There is no heuristic fallback — finding an "um" by
@@ -1128,6 +1129,10 @@ and that this machine can draw none of is `kind: input`, because that frame woul
 be blank. `--emoji none` strips the clusters from the drawn text, and a job whose
 emoji would fall to `mode: mono` is routed through libass (which has a font
 fallback chain) instead of drawtext (which does not, and would draw an empty box).
+A label that is drawn on more than one line (given with newlines, or wrapped to the
+frame) goes through libass the same way on FFmpeg 8.0, 8.0.1 and 8.1.0, whose drawtext
+draws the font's missing-glyph box at the end of every line but the last (fixed in
+8.0.2 and 8.1.1); `--text-render drawtext` keeps drawtext there and warns.
 
 Every drawn label goes to drawtext as `textfile=<path>:expansion=none`. The file
 is UTF-8, mode 0600, in a private per-run temp directory created with
