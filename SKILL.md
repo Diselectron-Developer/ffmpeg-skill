@@ -9,7 +9,7 @@ Scripts live in `scripts/` next to this file; run them with `python3 <skill-dir>
 
 Shared flags (every script): `--dry-run`; `--json` (output path, its probe, the commands run); `--json-brief` (status/output/verified + a `summary`; prefer on writing steps); `--fast` (preview quality); `--progress` (percent/ETA); `--timeout SECONDS` (`kind: timeout`, default 1800); `--overwrite` (step 7); `--plan FILE` (a dry run `render.py FILE` runs later; refuses if an input changed). Re-encoding tools also take `--hw` (Apple Silicon GPU, big files; `FFMPEG_SKILL_HW=1` = default, not export), `--codec h264|hevc|av1|prores` and `--quality N`: unset, SDR is x264 (`cut.py --keep-hevc`: HEVC source stays HEVC), HDR is x265 Main10; `prores` needs `-o NAME.mov`, `h264` refuses HDR (`color.py --to-sdr` first).
 
-Writing tools run nothing under `--dry-run`; the measuring tools (`probe`, `check`, `sync`, `multicam`, `scenes`, `cropdetect`, `report`, `silence`, `loudness`, `stabilize`) may still run ffmpeg/ffprobe, skipping artifacts/side files (`--edl`, `--sheet`, a generated `.ass`); `verify` ignores the flag. Per tool: `contract --json` `dry_run`.
+Writing tools run nothing under `--dry-run`; the measuring tools (`probe`, `check`, `sync`, `multicam`, `scenes`, `cropdetect`, `report`, `silence`, `loudness`, `stabilize`; `overlay` for a multi-line `--text` on FFmpeg 8.0-8.1.0) may still run ffmpeg/ffprobe, skipping artifacts/side files (`--edl`, `--sheet`, a generated `.ass`); `verify` ignores the flag. Per tool: `contract --json` `dry_run`.
 
 ## Workflow (in this order)
 

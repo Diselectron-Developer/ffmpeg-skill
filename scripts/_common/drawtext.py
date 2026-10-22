@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from _common.decision import escape_filter_path
 from _common.runner import STATE, _DRAWTEXT_PENDING, _drawtext_tmpdir, ffmpeg_exe, ffmpeg_release, ffmpeg_version
 
@@ -124,6 +124,17 @@ def drawtext_center_align() -> str:
     return ":text_align=C" if ffmpeg_version() >= (6, 1) else ""
 
 
+def drawtext_clean(text: "Optional[str]") -> str:
+    """The text drawtext_text_opts() writes to its file: `\r\n` and `\r` become `\n`, a tab,
+    vertical tab or form feed becomes a space, other control characters are stripped, and trailing
+    newlines are dropped (drawtext ignores one trailing newline and draws a second as a blank
+    line, which would centre the block half a line too high; a label that is only newlines stays
+    as it is)."""
+    cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[\x00-\x08\x0e-\x1f\x7f]", "", re.sub(r"[\t\x0b\x0c]", " ", cleaned))
+    return cleaned.rstrip("\n") or cleaned
+
+
 def drawtext_text_opts(text: str, tmpdir: "Optional[str]" = None) -> str:
     r"""`textfile=<path>:expansion=none` for drawtext -- the one route that is provably safe for
     every character on every build shape this repo uses.
@@ -145,11 +156,7 @@ def drawtext_text_opts(text: str, tmpdir: "Optional[str]" = None) -> str:
     printed plan therefore names a path that no longer exists once the run is over, which is the
     same promise every other temp file in this skill makes.
     """
-    cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = re.sub(r"[\x00-\x08\x0e-\x1f\x7f]", "", re.sub(r"[\t\x0b\x0c]", " ", cleaned))
-    # drawtext ignores one trailing newline and draws a second as a blank line, which would
-    # centre the block half a line too high; a label that is only newlines stays as it is
-    cleaned = cleaned.rstrip("\n") or cleaned
+    cleaned = drawtext_clean(text)
     import hashlib
     name = "t_" + hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:16] + ".txt"
     if tmpdir is None:
@@ -157,3 +164,55 @@ def drawtext_text_opts(text: str, tmpdir: "Optional[str]" = None) -> str:
     path = os.path.join(tmpdir, name)
     _DRAWTEXT_PENDING[path] = cleaned
     return f"textfile={escape_filter_path(path)}:expansion=none"
+
+
+def drawtext_line_metrics(lines: "List[str]", font_opt: str, fontsize: int) -> "List[Optional[Dict[str, float]]]":
+    """Each line's drawtext metrics as this ffmpeg measures it ALONE, on one line, where the
+    8.0/8.0.1/8.1.0 newline bug cannot reach it: {w: text_w, top: top_a, bottom: bottom_d, lh},
+    None for an empty line (drawtext measures it as no glyphs).
+
+    The numbers come out of drawtext itself: its y expression print()s them (libavutil's eval
+    function, logged at error level), one drawtext per line on a generated one-frame picture --
+    no input is read and nothing is written but the line files, in a temporary directory that is
+    removed afterwards. It runs under --dry-run too (run_analysis), so a plan places the lines
+    where a run does. The y expression is evaluated at configuration and again per frame; the
+    last value of each line wins."""
+    import tempfile
+    from _common.emit import die
+    from _common.runner import flush_drawtext_textfiles, run_analysis
+    out: "List[Optional[Dict[str, float]]]" = [None] * len(lines)
+    with tempfile.TemporaryDirectory(prefix="ffmpeg-skill-measure-") as td:
+        chain = []
+        for i, line in enumerate(lines):
+            if line:
+                chain.append(f"drawtext={drawtext_text_opts(line, tmpdir=td)}:{font_opt}:fontsize={fontsize}:x=0:"
+                             f"y='print({-(1000 + i)},16)+print(text_w,16)+print(top_a,16)+print(bottom_d,16)+print(lh,16)'")
+        if not chain:
+            return out
+        cmd = [ffmpeg_exe("ffmpeg")[0] or "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-f", "lavfi",
+               "-i", "color=c=black:s=16x16:r=1", "-frames:v", "1", "-vf", ",".join(chain), "-f", "null", "-"]
+        try:
+            flush_drawtext_textfiles(cmd)
+            proc = run_analysis(cmd, record=True)
+        finally:
+            for path in [p for p in _DRAWTEXT_PENDING if p.startswith(td)]:
+                del _DRAWTEXT_PENDING[path]
+    current, values = None, {}  # type: Optional[int], Dict[int, List[float]]
+    # 8.x prefixes each value with "[Eval @ 0x...] ", 6.1 prints it bare
+    for m in re.finditer(r"^(?:\[Eval @ [^\]]*\] )?(-?[0-9]+(?:\.[0-9]+)?|-?nan|-?inf)\s*$", proc.stderr, re.M):
+        try:
+            v = float(m.group(1))
+        except ValueError:
+            continue
+        if v <= -1000 and v == int(v):
+            current = int(-v) - 1000
+            values[current] = []
+        elif current is not None:
+            values[current].append(v)
+    for i, line in enumerate(lines):
+        got = values.get(i) if line else None
+        if line and (not got or len(got) != 4):
+            die("could not measure a line of --text with drawtext (no print() output from ffmpeg)", kind="ffmpeg")
+        if got:
+            out[i] = {"w": got[0], "top": got[1], "bottom": got[2], "lh": got[3]}
+    return out

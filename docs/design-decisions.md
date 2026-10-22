@@ -27,8 +27,10 @@ exists. When a decision changes, edit the entry in the same PR.
 
 - **Measurement passes run under `--dry-run`; only writes are skipped.** `probe`, `check`, `sync`,
   `multicam`, `scenes`, `cropdetect`, `report`, `silence`, `loudness` and `stabilize` run
-  ffmpeg/ffprobe to measure, because a plan built on a fake measurement is not a plan. The
-  contract lists them as `analysis_only`; every other tool runs nothing. Code:
+  ffmpeg/ffprobe to measure, because a plan built on a fake measurement is not a plan. So does
+  `overlay` for a multi-line `--text` on FFmpeg 8.0, 8.0.1 and 8.1.0 (one drawtext on a generated
+  frame; see "a multi-line `overlay.py --text`" below). The contract lists them as
+  `analysis_only`; every other tool runs nothing. Code:
   `_contract.DRY_RUN_ANALYSIS`. Tests: `test_dry_run_never_runs_ffmpeg_and_writes_nothing`,
   `test_dry_run_plans_rest_on_real_measurements`.
 - **When a measured input is an intermediate an earlier dry-run stage would have written**
@@ -234,6 +236,36 @@ exists. When a decision changes, edit the entry in the same PR.
   `pad_filters`), and each drawing tool. Tests: `test_a_pad_fill_or_background_lands_in_the_bt709_its_output_is_tagged_with`,
   `test_drawn_text_and_boxes_land_in_the_bt709_their_output_is_tagged_with`,
   `test_a_picture_that_only_passes_through_keeps_its_pixels`, `test_drawn_colours_are_drawn_in_bt709`.
+- **`color.py --retag` rewrites the colour description the stream itself carries, and checks it.**
+  H.264, HEVC, MPEG-2, AV1 and VP9 keep it in the bitstream (VUI, sequence header, frame header).
+  Decoders, ffprobe included, read that before the container's `colr`/Colour. Through 2.10.10 the
+  stream copy set only the container's tags (`-colorspace`/`-color_primaries`/`-color_trc`), so a
+  source that carried tags in the stream kept them and the run said `completed` (6.1 and 8.0.1
+  alike). The copy now also runs the codec's `*_metadata` bitstream filter (`-bsf:v:0`, in every
+  FFmpeg from 5.0 and in each captured `tests/fixtures/ffmpeg_bsfs_*`). That filter rewrites
+  headers only, so the copy stays lossless. The range flag is written as the probed range, because
+  `h264_metadata` sets limited when the VUI had no signal type. A missing filter is a re-encode,
+  not a refusal. Every run probes its output twice: ffprobe's stream tags and the first decoded
+  frame's. From 8.1, ffprobe's stream tags follow the container's `colr` while the H.264 decoder
+  still outputs the VUI's, so the stream tags alone passed a container-only copy there. A frame
+  tag may be unspecified (8.1's ProRes decoder leaves frames untagged), but not different. Other
+  tags after the copy mean a re-encode, said in
+  `reencoded` and `notes`; other tags after the re-encode mean `kind: verification`. ProRes has no
+  filter that writes every target (its transfer field has no BT.601), and ffprobe reads its
+  container tag, so ProRes is a container retag. Code: `color.retag()`, `color.retag_bsf()`.
+  Tests: `test_color_retag_rewrites_the_tags_the_stream_itself_carries`,
+  `test_color_retag_fallback_keeps_extra_audio_and_subtitles_when_it_can`.
+- **`--retag`'s re-encode puts the tags on the frames (`setparams`), not in output options.** From
+  FFmpeg 7.1 `-colorspace` feeds the graph's colourspace negotiation and the encoder takes the
+  frames' tags. A bt709 source retagged bt601 came out with a converted matrix and bt709
+  primaries/transfer on 8.0.1 and 8.1.3, its pixels changed. setparams labels the frames, which
+  every version's encoder writes: identical pixels and the requested tags on 6.1.1, 7.0.2, 8.0.1
+  and 8.1.3. The same rule as `bt709_tag_args()`: on 7.1+ a tag is never an output option on a
+  frame that does not already carry it. The other users of those options (`_cpu_encoder_args`,
+  `_x265_hdr_default`, `_vt_args`) pass an HDR source's own probed tags, which its frames carry,
+  so they convert nothing; one whose probe lacks a tag gets a default there, and that path is
+  unchanged here. Code: `color.retag()`. Test:
+  `test_color_retag_reencode_fallback_labels_the_frames`.
 - **`--correct` converts through bt601 on both legs** (not bt709), because on every tested
   FFmpeg the 709 round trip through 8-bit 4:2:0 loses ~5 dB more than 601. Code:
   `color.py _rgb_stage()`. Test: `test_color_correct_identity_holds_on_a_bt709_tagged_source`.
@@ -1670,9 +1702,32 @@ not a new file format this tool would have to maintain.
 - **On 8.0, 8.0.1 and 8.1.0, a multi-line `graphics.py` label goes through libass under
   `--text-render auto`**, decided after the template has wrapped its labels (so `main()` runs
   once more with the route forced). The releases are named, not probed: `--dry-run` may not start
-  ffmpeg, and a git build without a release number is taken to be fixed. `overlay.py` has no
-  libass route and warns in `notes` instead of drawing each line with its own `drawtext`, which
-  would change how a block is aligned. Code: `drawtext_draws_newline_glyph()`. Test:
+  ffmpeg, and a git build without a release number is taken to be fixed. Code:
+  `drawtext_draws_newline_glyph()`. Test:
+  `test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break`.
+- **On those releases a multi-line `overlay.py --text` is drawn one line per drawtext, at positions
+  measured by a drawtext run, including under `--dry-run`.** overlay has no libass route, and
+  libass would set the block differently (its lines are justified by the alignment, drawtext's are
+  left-aligned in the block; its line spacing is its own). Through PR #346 overlay only warned in
+  `notes`. Splitting the lines needs the block's numbers, and no multi-line drawtext on those
+  releases has clean ones: every line but the last carries the box in its width. No filter can
+  hand one drawtext's metrics to another either. So `drawtext_line_metrics()` measures each line
+  alone: drawtext's own `print()` expression logs `text_w`, `top_a`, `bottom_d` and `lh` on a
+  generated one-frame picture. The block is then rebuilt the way drawtext lays one out:
+  `text_w` = the widest line, `text_h` = lh*(n-1) + the first line's top_a + the last line's
+  bottom_d, lines left-aligned at x, baseline i at y + top_a + i*lh. Each line is drawn at its
+  baseline (`y_align=baseline`) with the caller's x/y expressions, `text_w`/`text_h` replaced by
+  those numbers. The outlines of all lines go first and the text second, as one drawtext draws
+  them; otherwise a descender's outline covers the next line. `--box` is drawn once, by the first
+  line, at the block's size (`boxw`/`boxh`). The result is bit-identical to one multi-line drawtext
+  on 8.1.3 and 6.1.1 at every position tested, with and without `--box`. The 8.0.1 output is
+  bit-identical to 8.1.3's single drawtext with DejaVu Sans. The cost of measuring is one small
+  ffmpeg run, also under `--dry-run`, because a plan with guessed positions would not be the
+  run's plan. Not exact: a font whose glyph boxes are not whole pixels (unhinted, e.g. FreeSerif
+  Bold Italic) sits one row lower, because drawtext reports `top_a` rounded up. A fixed release
+  plans the single drawtext it always did, byte for byte. Code: `overlay.per_line_drawtext()`,
+  `_common.drawtext_line_metrics()`. Tests: `test_overlay_per_line_route_draws_what_one_multi_line_drawtext_draws`,
+  `test_overlay_multi_line_text_draws_no_box_at_the_line_break`,
   `test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break`.
 
 ## Unreleased — doctor's FFmpeg advisory and the Python 3.9 deprecation

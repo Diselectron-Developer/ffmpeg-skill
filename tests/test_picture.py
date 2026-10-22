@@ -1078,6 +1078,65 @@ class PictureTests(MediaFixtures):
         script("overlay.py", self.src, "--text", "Episode 12", "--position", "bottom", "--box", "--start", "1", "--end", "5", "--fade", "0.3", "-o", out2)
         self.assertClose(probe(str(out2))["duration"], 12.0, 0.15)
 
+    def _gray_clip(self, name):
+        clip = OUT / name
+        if not clip.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=0x404040:s=640x360:r=10",
+               "-t", "1", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "0", "-pix_fmt", "yuv420p", clip)
+        return clip
+
+    @staticmethod
+    def _gray_frame(path):
+        return subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                              stdout=subprocess.PIPE, check=True).stdout
+
+    def test_overlay_multi_line_text_draws_no_box_at_the_line_break(self):
+        """FFmpeg 8.0, 8.0.1 and 8.1.0 shape every line of a multi-line drawtext but the last WITH
+        its newline, so the font's missing-glyph box was drawn after the line (PR #346 only
+        warned). On those releases overlay.py draws each line with its own drawtext; on every
+        build, nothing may be drawn to the right of a short first line inside the block."""
+        clip, font = self._gray_clip("ov_nl_gray.mp4"), default_font_file("DejaVu Sans")
+        common = ("--position", "top-left", "--font-color", "white", "--border", "0", "--quality", "0", "--preset", "ultrafast")
+        if font:
+            common += ("--font-file", font)
+        one, two = OUT / "ov_nl_one.mp4", OUT / "ov_nl_two.mp4"
+        script("overlay.py", clip, "--text", "Hi", *common, "-o", one)
+        script("overlay.py", clip, "--text", "Hi\nmuch longer second line", *common, "-o", two)
+        a, b, w = self._gray_frame(one), self._gray_frame(two), 640
+        ink = lambda f, x, y: f[y * w + x] > 0x40 + 60  # noqa: E731
+        rows = [y for y in range(360) if any(ink(a, x, y) for x in range(w))]
+        right = max(x for x in range(w) for y in rows if ink(a, x, y))
+        stray = [(x, y) for y in rows for x in range(right + 3, w) if ink(b, x, y)]
+        self.assertEqual(stray, [], "ink after the first line: the line break was drawn")
+
+    @unittest.skipIf(platform.system() == "Windows", "the release shim is a #!/bin/sh ffprobe on a POSIX-only PATH")
+    def test_overlay_per_line_route_draws_what_one_multi_line_drawtext_draws(self):
+        """The per-line route (taken on 8.0/8.0.1/8.1.0, forced here by an ffprobe that reports
+        8.0.1) must put every line where one multi-line drawtext puts it on a fixed release:
+        widest line, first line's ascent, last line's descent, the font's line height, block box
+        and outlines included. Runs where drawtext is right (6.1+, not an affected release), so
+        the single drawtext is the reference."""
+        import _common
+        if _common.ffmpeg_version() < (6, 1) or _common.drawtext_draws_newline_glyph():
+            self.skipTest("needs y_align (6.1+) and a drawtext that draws multi-line text right")
+        shim = OUT / "ov_nl_shim"
+        shim.mkdir(exist_ok=True)
+        (shim / "ffprobe").write_text("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf 'ffprobe version 8.0.1\\n'; exit 0; fi\n"
+                                      "exec %s \"$@\"\n" % shutil.which("ffprobe"))
+        (shim / "ffprobe").chmod(0o755)
+        bad = dict(os.environ, PATH=f"{shim}{os.pathsep}{os.environ['PATH']}")
+        clip, font = self._gray_clip("ov_nl_gray.mp4"), default_font_file("DejaVu Sans")
+        for pos, extra in (("center", ("--box",)), ("bottom-right", ()), ("top", ("--box", "--border", "0"))):
+            args = ["--text", "Hello there\ngjy World wide\nÉg", "--position", pos, "--quality", "0", "--preset", "ultrafast", *extra]
+            if font:
+                args += ["--font-file", font]
+            ref, per = OUT / f"ov_nl_ref_{pos}.mp4", OUT / f"ov_nl_per_{pos}.mp4"
+            script("overlay.py", clip, *args, "-o", ref)
+            doc = json.loads(script("overlay.py", clip, *args, "-o", per, "--json", env=bad).stdout)
+            self.assertEqual(doc["commands"][-1].count("drawtext="), 6 if "0" not in extra else 3, pos)
+            self.assertNotIn("notes", doc)
+            self.assertEqual(self._gray_frame(ref), self._gray_frame(per), pos)
+
     def test_overlay_text_scale_is_refused(self):
         """--scale is a layer width. On --text it used to be accepted and ignored, so the draw
         stayed at fontsize 42 while the result said completed."""
@@ -1136,6 +1195,76 @@ class PictureTests(MediaFixtures):
         proc = script("color.py", self.src, "--retag", "bt601", "-o", out)
         self.assertIn("-c copy", proc.stderr)
         self.assertEqual(probe(str(out))["video"]["color_transfer"], "smpte170m")
+
+    def _tagged(self, name, codec, params):
+        src = OUT / name
+        if not src.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10",
+               "-t", "1", "-c:v", codec, "-preset", "ultrafast", "-pix_fmt", "yuv420p", *params, src)
+        return src
+
+    @staticmethod
+    def _tags(path):
+        v = probe(str(path))["video"]
+        return v["color_space"], v["color_primaries"], v["color_transfer"]
+
+    @staticmethod
+    def _frame_tags(path):
+        """What the decoder hands a player: from 8.1 ffprobe's stream tags follow the container's
+        colr even while an H.264 VUI still says otherwise."""
+        keys = ("color_space", "color_primaries", "color_transfer")
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames", "-read_intervals", "%+#1",
+                              "-show_entries", "frame=" + ",".join(keys), "-of", "json", str(path)],
+                             stdout=subprocess.PIPE, text=True, check=True).stdout
+        frame = json.loads(out)["frames"][0]
+        return tuple(frame.get(k) for k in keys)
+
+    @staticmethod
+    def _pixels(path):
+        out = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0", "-f", "framemd5", "-"],
+                              stdout=subprocess.PIPE, text=True, check=True).stdout
+        return [line for line in out.splitlines() if not line.startswith("#")]
+
+    def test_color_retag_rewrites_the_tags_the_stream_itself_carries(self):
+        """H.264/HEVC carry their colour description in the SPS VUI, which every decoder reads
+        before the container: --retag used to stream-copy with -colorspace/-color_primaries/
+        -color_trc (container only), report completed, and ffprobe still read the old tags. The
+        copy now rewrites the VUI with h264_metadata/hevc_metadata, stays a copy (same decoded
+        frames) and checks the tags it claims."""
+        sources = [self._tagged("rt_h264_709.mp4", "libx264", ["-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709"])]
+        if "libx265" in __import__("_common").ffmpeg_encoders():
+            sources.append(self._tagged("rt_hevc_709.mp4", "libx265",
+                                        ["-x265-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709:log-level=error"]))
+        for src in sources:
+            self.assertEqual(self._tags(src), ("bt709", "bt709", "bt709"))
+            for target, want in (("bt601", ("smpte170m", "smpte170m", "smpte170m")),
+                                 ("bt2020-hlg", ("bt2020nc", "bt2020", "arib-std-b67"))):
+                out = OUT / f"rt_{src.stem}_{target}.mp4"
+                doc = json.loads(script("color.py", src, "--retag", target, "-o", out, "--json").stdout)
+                self.assertEqual(self._tags(out), want, f"{src.name} -> {target}")
+                self.assertEqual(self._frame_tags(out), want, f"{src.name} -> {target}: decoded frames")
+                self.assertFalse(doc["reencoded"], src.name)
+                self.assertIn("_metadata=", doc["commands"][0])
+                self.assertEqual(self._pixels(out), self._pixels(src), "a retag must not touch a picture")
+
+    def test_color_retag_reencode_fallback_labels_the_frames(self):
+        """When a copy cannot carry the tags (forced here by taking the bitstream filter away), the
+        re-encode puts them on the frames with setparams. Its output options used to do it: from
+        FFmpeg 7.1 those feed the graph's colourspace negotiation, which converted the matrix of a
+        tagged source and kept its primaries and transfer (8.0.1, 8.1.3: bt709 in, smpte170m/
+        bt709/bt709 out). The result says it re-encoded and why."""
+        src = self._tagged("rt_h264_709.mp4", "libx264", ["-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709"])
+        out = OUT / "rt_fallback_bt601.mp4"
+        code = ("import sys; sys.path.insert(0, %r); import color; color.retag_bsf = lambda meta, target: []; "
+                "sys.argv = ['color.py', %r, '--retag', 'bt601', '-o', %r, '--json', '--overwrite', '--quality', '0', "
+                "'--preset', 'ultrafast']; sys.exit(color.main())" % (str(SCRIPTS), str(src), str(out)))
+        doc = json.loads(sh(sys.executable, "-c", code).stdout)
+        self.assertTrue(doc["reencoded"])
+        self.assertTrue(any("re-encoded with the tags on its frames" in n for n in doc["notes"]), doc.get("notes"))
+        self.assertIn("setparams=color_primaries=smpte170m:color_trc=smpte170m:colorspace=smpte170m", doc["commands"][-1])
+        self.assertNotIn("-colorspace", doc["commands"][-1])
+        self.assertEqual(self._tags(out), ("smpte170m", "smpte170m", "smpte170m"))
+        self.assertEqual(self._frame_tags(out), ("smpte170m", "smpte170m", "smpte170m"))
 
     def test_color_audio_stream_selects_the_requested_track_not_always_the_first(self):
         two = OUT / "color_two_streams.mkv"

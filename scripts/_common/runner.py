@@ -205,6 +205,7 @@ CODECS = ("h264", "hevc", "av1", "prores")
 
 
 _ENCODERS: Optional[set] = None
+_BSFS: Optional[set] = None
 
 
 class Context:
@@ -1370,6 +1371,24 @@ def ffmpeg_encoders() -> set:
         except (OSError, subprocess.SubprocessError):
             pass
     return _ENCODERS
+
+
+def ffmpeg_bsfs() -> set:
+    """Names from `ffmpeg -bsfs`, read once, empty when it cannot be read; from ffprobe under
+    --dry-run, for the reason ffmpeg_encoders() gives. color.py --retag rewrites an H.264/HEVC
+    stream's colour description with h264_metadata/hevc_metadata only when the build has it."""
+    global _BSFS
+    if _BSFS is None:
+        _BSFS = set()
+        tool = "ffprobe" if STATE.dry_run else "ffmpeg"
+        limit = min(PROBE_TIMEOUT, STATE.timeout) if STATE.timeout else PROBE_TIMEOUT
+        try:
+            out = subprocess.run([ffmpeg_exe(tool)[0] or tool, "-hide_banner", "-bsfs"], stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=limit).stdout
+            _BSFS = set(re.findall(r"^\s*([a-z0-9_]+)\s*$", out, re.M))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _BSFS
 
 
 def read_text_or_die(path: str, flag: str) -> str:

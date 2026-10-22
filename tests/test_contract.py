@@ -648,7 +648,7 @@ class ContractTests(unittest.TestCase):
         silently drifting out of sync with _contract.py again (issue #82). README's FAQ states
         the same list."""
         analysis_tools = set(_contract.DRY_RUN_ANALYSIS.keys())
-        self.assertEqual(analysis_tools, {"sync", "multicam", "scenes", "report", "cropdetect", "silence", "loudness", "check", "stabilize"},
+        self.assertEqual(analysis_tools, {"sync", "multicam", "scenes", "report", "cropdetect", "silence", "loudness", "check", "stabilize", "overlay"},
                           "the analysis-only dry-run tool set changed -- update SKILL.md/references/scripts.md's exception list to match")
         # "the name appears somewhere in the file" was too weak: every tool name is in SKILL.md's
         # request table anyway, so the list drifted twice (#176 -> #179) with this test green.
@@ -774,6 +774,12 @@ class ContractTests(unittest.TestCase):
         self.assertIn("dropped_non_av_streams", doc)
         self.assertEqual(len(r["audio_streams"]) < 2 or r["subtitle_streams"] == 0, doc["dropped_non_av_streams"],
                           "dropped_non_av_streams must accurately reflect what actually made it into the output")
+        # and the re-encode carries the tags it was asked for (setparams on the frames: 7.1+'s
+        # negotiation ignored the old output options), checked by the tool itself
+        v = r["video"]
+        self.assertEqual((v["color_space"], v["color_primaries"], v["color_transfer"]), ("bt709", "bt709", "bt709"))
+        self.assertIn({"step": "color_tags", "ok": True, "color_space": "bt709", "color_primaries": "bt709",
+                       "color_transfer": "bt709"}, doc["verification"])
 
     def test_doctor_reports_this_installed_copys_own_version(self):
         """`doctor`'s `version` is this installed copy's own version (never fetched from the
@@ -1973,7 +1979,7 @@ class ContractTests(unittest.TestCase):
             if strict:
                 self.assertFalse(marker.exists(), f"{name} --dry-run invoked ffmpeg")
         self.assertEqual({n for n, s in self.tools.items() if s["dry_run"]["ffmpeg_execution"] == "analysis_only"},
-                         {"sync", "multicam", "scenes", "report", "cropdetect", "silence", "loudness", "check", "stabilize"})
+                         {"sync", "multicam", "scenes", "report", "cropdetect", "silence", "loudness", "check", "stabilize", "overlay"})
         # the read-only tools keep working under --dry-run (ffprobe still runs)
         self.assertEqual(tool("probe", self.src, "--dry-run", env=env).returncode, 0)
         self.assertEqual(tool("check", self.src, "--platform", "x", "--no-loudness", "--dry-run", env=env).returncode, 0)
@@ -2714,7 +2720,9 @@ class ContractTests(unittest.TestCase):
         but the last (CI on ubuntu-latest: the lower-third's title measured as three yellow bands).
         graphics.py's auto route sends such a label -- given with a newline or wrapped there --
         through libass on those releases, keeps drawtext for one line and on fixed releases, and a
-        pinned --text-render drawtext warns; overlay.py, which has no libass route, says so in notes."""
+        pinned --text-render drawtext warns. overlay.py has no libass route: it now draws each line
+        with its own drawtext there, at the block's measured positions (PR #346 only warned in
+        notes), and plans the single drawtext it always did on a fixed release."""
         bad = self._release_shim("nl_shim_801", "ffprobe version 8.0.1-3ubuntu2 Copyright (c) 2007-2025")
         good = self._release_shim("nl_shim_802", "ffprobe version 8.0.2 Copyright (c) 2007-2026")
 
@@ -2737,10 +2745,17 @@ class ContractTests(unittest.TestCase):
         self.assertIn("warning: this ffmpeg's drawtext draws a box", err)
         doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
                               "-o", self.out("nl_ov.mp4"), env=bad).stdout)
-        self.assertTrue(any("missing-glyph box" in n for n in doc.get("notes", [])), doc.get("notes"))
+        self.assertNotIn("notes", doc)
+        measure, draw = doc["commands"][0], doc["commands"][-1]
+        self.assertIn("print(text_w", measure, "the lines are measured, even under --dry-run")
+        self.assertEqual(draw.count("drawtext="), 4, "two lines, outlines then text")
+        self.assertEqual(draw.count("y_align=baseline"), 4)
+        self.assertNotIn("text_w", draw, "x/y carry the measured block size")
         doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
                               "-o", self.out("nl_ov.mp4"), env=good).stdout)
         self.assertNotIn("notes", doc)
+        self.assertEqual(len(doc["commands"]), 1)
+        self.assertEqual(doc["commands"][0].count("drawtext="), 1)
 
     def test_fourth_review_p3_regressions(self):
         """Fourth review P3 items: render re-encoded a clip at speed 1.0 (#47); a brand's default
