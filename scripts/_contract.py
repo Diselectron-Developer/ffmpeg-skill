@@ -832,9 +832,9 @@ def ffmpeg_security(versions: Dict[str, Optional[str]], sources: Optional[Dict[s
     return out
 
 
-# 2.11.0 deprecates Python 3.9 (docs/contract.md "Deprecation policy"; DEPRECATED below). The same
+# 2.10.9 deprecates Python 3.9 (docs/contract.md "Deprecation policy"; DEPRECATED below). The same
 # line is printed by bin/install.js (PY39_DEPRECATION there; a test keeps the two equal).
-PY39_DEPRECATION = ("warning: Python 3.9 is deprecated since ffmpeg-skill 2.11.0 (CPython 3.9 reached end of life "
+PY39_DEPRECATION = ("warning: Python 3.9 is deprecated since ffmpeg-skill 2.10.9 (CPython 3.9 reached end of life "
                     "in October 2025 and gets no security fixes); it still works in 2.x and support ends in 3.0.0: use Python 3.10+.")
 
 
@@ -1404,7 +1404,7 @@ DEPRECATED: List[Dict[str, str]] = [
     # CPython 3.9 reached end of life in October 2025. Raising the floor is a break, so 2.x keeps
     # running on it (CI still tests 3.9) and doctor / bin/install.js print PY39_DEPRECATION.
     {"what": "running on Python 3.9 (the requirements.python floor)",
-     "since": "2.11.0", "removed_in": "3.0.0", "where": "behaviour",
+     "since": "2.10.9", "removed_in": "3.0.0", "where": "behaviour",
      "replacement": "Python 3.10 or later; on 3.9, doctor and the npx installer print a one-line warning"},
 ]
 
@@ -1644,7 +1644,7 @@ def build(detect: bool = True) -> Dict[str, Any]:
             },
             "not_provided": ["AI reasoning", "decisions", "production plans", "project IR", "approvals", "network access", "transcription engine"],
         },
-        "requirements": {"python": ">=3.9 (standard library only; 3.9 deprecated since 2.11.0, removed in 3.0.0; 3.10+ recommended)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0", "node": ">=16 (npx installer only)"},
+        "requirements": {"python": ">=3.9 (standard library only; 3.9 deprecated since 2.10.9, removed in 3.0.0; 3.10+ recommended)", "ffmpeg": ">=5.0", "ffprobe": ">=5.0", "node": ">=16 (npx installer only)"},
         "execution": {
             "shell": False,
             "arbitrary_executables": False,

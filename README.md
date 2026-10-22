@@ -419,7 +419,7 @@ The encode path a tool will actually take is Apple VideoToolbox, for h264, hevc 
 
 ## FFmpeg compatibility
 
-The tools need FFmpeg 5.0 or later and Python 3.9 or later (standard library only); Python 3.10+ is recommended: 3.9 still works but is deprecated since 2.11.0 (CPython 3.9 is end of life), `doctor` and the `npx` installer warn on it, and 3.0 drops it. What CI actually exercises on every pull request is FFmpeg 5.1.1 (static build), 6.1 (Ubuntu apt), 7.1 (Debian trixie apt), 8.x (macOS Homebrew) and 9.x (Windows gyan.dev), on Python 3.9 and 3.13 (the two ends of the supported range). The capability parser has been run against the listings of these builds:
+The tools need FFmpeg 5.0 or later and Python 3.9 or later (standard library only); Python 3.10+ is recommended: 3.9 still works but is deprecated since 2.10.9 (CPython 3.9 is end of life), `doctor` and the `npx` installer warn on it, and 3.0 drops it. What CI actually exercises on every pull request is FFmpeg 5.1.1 (static build), 6.1 (Ubuntu apt), 7.1 (Debian trixie apt), 8.x (macOS Homebrew) and 9.x (Windows gyan.dev), on Python 3.9 and 3.13 (the two ends of the supported range). The capability parser has been run against the listings of these builds:
 
 | FFmpeg | `-filters` row layout | Source |
 |---|---|---|

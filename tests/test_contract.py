@@ -1342,7 +1342,7 @@ class ContractTests(unittest.TestCase):
     # are what that major's own PR is checked against.
     # None: not released yet. Set it to the tag date when that version ships; a major bump fails
     # while it is None, because the 90-day window cannot be counted from an unknown date.
-    DEPRECATION_RELEASE_DATES = {"1.10.0": "2026-09-13", "2.11.0": None}
+    DEPRECATION_RELEASE_DATES = {"1.10.0": "2026-09-13", "2.10.9": "2026-10-22"}
     # A major released before step 2's 90 days had passed, by the maintainer's decision. Each one
     # must be stated in docs/contract.md (the needle below), so it is a written waiver, not a slip.
     WINDOW_WAIVERS = {2: "**2.0.0 waived the 90-day half of step 2.**"}
@@ -1694,12 +1694,12 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr or proc.stdout)
 
     def test_python_3_9_is_deprecated_on_every_surface(self):
-        """2.11.0 deprecates Python 3.9 per docs/contract.md's policy: an entry in `deprecated`
+        """2.10.9 deprecates Python 3.9 per docs/contract.md's policy: an entry in `deprecated`
         (removed in 3.0.0), the floor unchanged (3.9 still runs), and one identical warning line from
         doctor (Python) and the npx installer (Node)."""
         entry = [e for e in self.contract["deprecated"] if "Python 3.9" in e["what"]]
         self.assertEqual(len(entry), 1)
-        self.assertEqual((entry[0]["since"], entry[0]["removed_in"], entry[0]["where"]), ("2.11.0", "3.0.0", "behaviour"))
+        self.assertEqual((entry[0]["since"], entry[0]["removed_in"], entry[0]["where"]), ("2.10.9", "3.0.0", "behaviour"))
         self.assertIn("3.10", entry[0]["replacement"])
         self.assertTrue(self.contract["requirements"]["python"].startswith(">=3.9 "), "the hard floor stays 3.9 until 3.0")
         self.assertIn("deprecated", self.contract["requirements"]["python"])
