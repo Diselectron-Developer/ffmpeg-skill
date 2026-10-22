@@ -56,7 +56,7 @@ from _common.runner import (
     child_limit, _CHILDREN, _cleanup_partial_output, _cmdline, CODECS, Context, DEFAULT_TIMEOUT,
     _DRAWTEXT_PENDING, _DRAWTEXT_TMPDIR, _drawtext_tmpdir, dry_run_input_pending, _ENCODERS, _env_timeout,
     ERROR_CODE, ERROR_RETRYABLE, EVEN_SCALE, _execute, _fail, ffmpeg_base, ffmpeg_encoders, ffmpeg_exe, _FFMPEG_RELEASE, _FFMPEG_VERSION,
-    ffmpeg_release, ffmpeg_version, flush_drawtext_textfiles, INSTALL_HINTS, install_signal_handlers, _is_ffmpeg, _limit_for,
+    ffmpeg_bsfs, ffmpeg_release, ffmpeg_version, flush_drawtext_textfiles, INSTALL_HINTS, install_signal_handlers, _is_ffmpeg, _limit_for,
     _odd_dimension_retry, _on_signal, _OutputLock, _pid_dead, place_output, PROBE_TIMEOUT, _progress_line,
     read_text_or_die, refuse_output_is_input, _remember_output, require_tool, run, run_analysis, _run_captured,
     run_keeping_subtitles, run_tool, _run_with_progress, shell_quote, sibling_temp, _SIGNALS_INSTALLED, _stage_existing_output,
@@ -96,7 +96,7 @@ from _common.color import (
 )
 from _common.text import (
     ADVANCE_EM, BIDI_SCRIPTS, _char_em, char_script, default_font_file, detect_script, drawtext_boxborderw, drawtext_center_align,
-    drawtext_draws_newline_glyph, is_multiline, NEWLINE_GLYPH_RELEASES,
+    drawtext_draws_newline_glyph, is_multiline, drawtext_clean, drawtext_line_metrics, NEWLINE_GLYPH_RELEASES,
     drawtext_shaping, drawtext_text_opts, emoji_asset_for, EMOJI_ASSET_HINT, emoji_clusters, emoji_codepoint_name,
     _EMOJI_COLOR_FAMILIES, _emoji_color_font, emoji_filter_chain, _emoji_name_candidates, EMOJI_RANGES,
     _EMOJI_REGIONAL, emoji_support, _EMOJI_SUPPORT_CACHE, _EMOJI_TAIL, escape_drawtext, _family_rank, FC_LANG,
@@ -147,7 +147,7 @@ class _Facade(_types.ModuleType):
     # defining module (audit 14, P1-1); every other name is a plain re-export of the same object.
     _LIVE = {
         "_FFMPEG_VERSION": "runner", "_FFMPEG_RELEASE": "runner", "_FFMPEG_RELEASE_READ": "runner", "_SIGNALS_INSTALLED": "runner",
-        "_DRAWTEXT_TMPDIR": "runner", "_ENCODERS": "runner", "_CURRENT_CTX": "emit",
+        "_DRAWTEXT_TMPDIR": "runner", "_ENCODERS": "runner", "_BSFS": "runner", "_CURRENT_CTX": "emit",
     }
 
     def __getattribute__(self, name):
@@ -190,14 +190,14 @@ __all__ = [
     "BEAT_REFRACTORY_S", "BEAT_WINDOW_S", "BEAT_SUPPORT_DIVISOR", "BEAT_ALIGN_DIVISOR",
     "BEAT_Z_FLOOR", "BEAT_Z_SPAN",
     "_onset_strength", "_pick_onsets", "_autocorrelation_peak", "_grid_score",
-    "default_font_file", "default_output", "DEFAULT_TIMEOUT", "detect_script", "die", "drawtext_boxborderw", "drawtext_center_align", "drawtext_draws_newline_glyph", "is_multiline", "NEWLINE_GLYPH_RELEASES",
+    "default_font_file", "default_output", "DEFAULT_TIMEOUT", "detect_script", "die", "drawtext_boxborderw", "drawtext_center_align", "drawtext_draws_newline_glyph", "is_multiline", "drawtext_clean", "drawtext_line_metrics", "NEWLINE_GLYPH_RELEASES",
     "_DRAWTEXT_PENDING", "drawtext_shaping", "drawtext_text_opts", "_DRAWTEXT_TMPDIR", "_drawtext_tmpdir",
     "dry_run_input_pending", "emit", "emoji_asset_for", "EMOJI_ASSET_HINT", "emoji_clusters",
     "emoji_codepoint_name", "_EMOJI_COLOR_FAMILIES", "_emoji_color_font", "emoji_filter_chain",
     "_emoji_name_candidates", "EMOJI_RANGES", "_EMOJI_REGIONAL", "emoji_support", "_EMOJI_SUPPORT_CACHE",
     "_EMOJI_TAIL", "encoder_args", "_ENCODERS", "_env_timeout", "ERROR_CODE", "ERROR_RETRYABLE", "escape_drawtext",
     "escape_filter_path", "EVEN_SCALE", "_execute", "_fail", "_family_rank", "FC_LANG", "_fc_list_fonts",
-    "FC_UNKNOWN", "ffmpeg_base", "ffmpeg_encoders", "ffmpeg_exe", "_FFMPEG_RELEASE", "_FFMPEG_VERSION", "ffmpeg_release", "ffmpeg_version", "fingerprint",
+    "FC_UNKNOWN", "ffmpeg_base", "ffmpeg_bsfs", "ffmpeg_encoders", "ffmpeg_exe", "_FFMPEG_RELEASE", "_FFMPEG_VERSION", "ffmpeg_release", "ffmpeg_version", "fingerprint",
     "flush_drawtext_textfiles", "fold_bt709_matrix", "fmt_secs", "fmt_smpte_time", "fmt_srt_time", "font_covers_script",
     "font_family_for_script", "font_family_of_file", "FONT_FLAG_HINT", "font_for_script", "FONT_INSTALL_HINT",
     "fonts_dir_covers_script", "_fraction", "has_emoji", "info", "INSTALL_HINTS", "install_signal_handlers",

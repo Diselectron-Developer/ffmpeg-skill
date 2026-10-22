@@ -179,7 +179,15 @@ these had ever shown up before.
   `ametadata=mode=select`; do not use `aselect` for removal.
 - **FFmpeg 8.0, 8.0.1 and 8.1.0 draw the font's missing-glyph box at each line break of a multi-line
   `drawtext`** (each line is shaped with its newline; fixed in 8.0.2/8.1.1). `ffmpeg_version()` cannot
-  tell 8.1.0 from 8.1.1; `drawtext_draws_newline_glyph()` reads the point release.
+  tell 8.1.0 from 8.1.1; `drawtext_draws_newline_glyph()` reads the point release. graphics.py routes
+  such a label through libass; overlay.py draws one drawtext per line at positions a drawtext run
+  measured (`drawtext_line_metrics()`), since the multi-line block's own `text_w` carries the box.
+- **`-colorspace`/`-color_primaries`/`-color_trc` are not tags on 7.1+.** They feed the filter
+  graph's colourspace negotiation: a bt709-tagged H.264 re-encoded with `smpte170m` options came
+  out with a converted matrix and bt709 primaries/transfer (8.0.1, 8.1.3). Label the frames with
+  `setparams` (or the encoder's own VUI params) instead. On a stream copy they change only the
+  container: H.264/HEVC/MPEG-2/AV1/VP9 keep their own description, which decoders read first, so
+  rewrite it with the codec's `*_metadata` bitstream filter (`color.py --retag`).
 - **Not a 7.1 issue, found while chasing it: `color --correct` desaturates a bt709-*tagged*
   source by ~8 % at identity settings on 6.1 and 7.1 alike** (113.6 → 103.9 saturation_avg):
   the RGB stages (exposure/colortemperature/colorbalance) make swscale go yuv→rgb with the

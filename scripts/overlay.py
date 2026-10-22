@@ -21,11 +21,12 @@ Examples:
   python3 overlay.py bg.mp4 --video greenscreen.mp4 --chromakey 0x00ff00 --chromakey-similarity 0.15
 """
 import argparse
+import re
 import sys
 from typing import List, Optional
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
-from _common import STATE, script_font_for_text, drawtext_text_opts, drawtext_draws_newline_glyph, is_multiline, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, drawn_chain, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
+from _common import STATE, script_font_for_text, drawtext_clean, drawtext_line_metrics, drawtext_text_opts, drawtext_draws_newline_glyph, is_multiline, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, drawn_chain, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
 
 # Per-edge margins: a platform's UI does not cover the same fraction of every edge (TikTok's
 # like column is 14 % of the width, its description block 22 % of the height), so a position
@@ -87,6 +88,56 @@ def alpha_expr(opacity: float, start: Optional[float], end: Optional[float], fad
     return "max(0," + "*".join(parts) + ")"
 
 
+def _num(v: float) -> str:
+    """A measured pixel value as an expression literal (no exponent form)."""
+    return f"{v:.6f}".rstrip("0").rstrip(".")
+
+
+def per_line_drawtext(lines: List[str], x: str, y: str, font_opt: str, args: argparse.Namespace,
+                      box: List[str], timing: List[str]) -> str:
+    """The drawtext chain for a multi-line --text on a release whose drawtext draws a box at each
+    line break (drawtext_draws_newline_glyph): one drawtext per line, each line alone, placed
+    where one multi-line drawtext puts it on a fixed release.
+
+    That block's layout is drawtext's own (measure_text/draw_text): text_w is the widest line,
+    text_h = lh*(lines-1) + the first line's top_a + the last line's bottom_d, the lines are
+    left-aligned at x, and line i's baseline is y + top_a + i*lh. Each line is measured alone
+    (drawtext_line_metrics), so the box the bug adds is in no number; x and y keep the caller's
+    position expressions with text_w/text_h replaced by the block's values, and each line is
+    drawn with y_align=baseline at its own baseline. The outlines of every line are drawn before
+    any line's text, as one drawtext draws them, so a descender's outline never covers the next
+    line's glyphs; the --box is drawn once, by the first line, at the block's size (boxw/boxh).
+    Bit-identical to one multi-line drawtext on 8.1.3 for every named position, with and without
+    --box; a font whose glyph boxes are not whole pixels (no hinting) can sit one row lower, since
+    drawtext reports top_a rounded up."""
+    m = drawtext_line_metrics(lines, font_opt, args.font_size)
+    seen = [d for d in m if d]
+    lh = seen[0]["lh"]
+    width = max(d["w"] for d in seen)
+    # an empty first/last line has no glyphs: drawtext's -32000/64 start values, as it measures them
+    top = m[0]["top"] if m[0] else -500.0
+    bottom = m[-1]["bottom"] if m[-1] else -500.0
+    height = lh * (len(lines) - 1) + top + bottom
+
+    def block(expr: str) -> str:
+        return re.sub(r"\btext_h\b", _num(height), re.sub(r"\btext_w\b", _num(width), expr))
+
+    bx, by = block(x), block(y)
+    passes = ([[f"borderw={args.border}", f"bordercolor={args.border_color}", "fontcolor=black@0"],
+               ["fontcolor=" + args.font_color]] if args.border else [["fontcolor=" + args.font_color]])
+    filters = []
+    for n, paint in enumerate(passes):
+        for i, line in enumerate(lines):
+            if not line:
+                continue
+            opts = [drawtext_text_opts(line), f"fontsize={args.font_size}", f"x={bx}", f"y={by}+{_num(top + i * lh)}",
+                    "y_align=baseline", font_opt] + paint + timing[:1]
+            if box and n == 0 and not filters:
+                opts += box + [f"boxw={_num(width)}", f"boxh={_num(height)}"]
+            filters.append("drawtext=" + ":".join(opts + timing[1:]))
+    return ",".join(filters)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
@@ -144,7 +195,6 @@ def main() -> int:
     add_common(ap)
     args = ap.parse_args()
     apply_common(args)
-    notes: List[str] = []
 
     brand = load_brand(args.brand)
     if args.logo:
@@ -335,29 +385,23 @@ def main() -> int:
         x, y = position_exprs(args.position, args.margin, text_mode=True, margins=safe_margins)
         # 1.15: the text goes in a FILE with expansion off, so `'` and `%` survive verbatim
         # (they used to be dropped by escape_drawtext) and no character can reach the graph parser.
-        if is_multiline(args.text) and drawtext_draws_newline_glyph():
-            # overlay has no libass route to send it to (graphics.py's --text-render auto does)
-            notes.append("this ffmpeg's drawtext (FFmpeg 8.0, 8.0.1 and 8.1.0; fixed in 8.0.2 and 8.1.1) draws "
-                         "the font's missing-glyph box at the end of every line but the last of a multi-line "
-                         "--text: draw multi-line text with graphics.py or caption.py, or upgrade FFmpeg")
-            info("warning: " + notes[-1])
-        opts = [drawtext_text_opts(args.text), f"fontsize={args.font_size}", f"x={x}", f"y={y}",
-                f"borderw={args.border}", f"bordercolor={args.border_color}"]
-        if args.font_file:
-            opts.append(f"fontfile={escape_filter_path(args.font_file)}")
-        else:
-            opts.append(f"font='{escape_drawtext(args.font)}'")
+        font_opt = (f"fontfile={escape_filter_path(args.font_file)}" if args.font_file
+                    else f"font='{escape_drawtext(args.font)}'")
         alpha = alpha_expr(args.opacity, start if start is not None else (0.0 if args.fade > 0 else None), end, args.fade)
-        opts.append(f"fontcolor={args.font_color}")
-        if alpha != "1":
-            opts.append(f"alpha='{alpha}'")
-        if args.box:
-            opts += ["box=1", f"boxcolor={args.box_color}", "boxborderw=12"]
-        if enable:
-            opts.append(f"enable='{enable}'")
+        timing = ([f"alpha='{alpha}'"] if alpha != "1" else []) + ([f"enable='{enable}'"] if enable else [])
+        box = ["box=1", f"boxcolor={args.box_color}", "boxborderw=12"] if args.box else []
+        if is_multiline(args.text) and drawtext_draws_newline_glyph():
+            # this release's drawtext draws the font's missing-glyph box at every line break and
+            # counts it in text_w: one drawtext per line, placed where one block would put it
+            drawing = per_line_drawtext(drawtext_clean(args.text).split("\n"), x, y, font_opt, args, box, timing)
+        else:
+            opts = [drawtext_text_opts(args.text), f"fontsize={args.font_size}", f"x={x}", f"y={y}",
+                    f"borderw={args.border}", f"bordercolor={args.border_color}", font_opt,
+                    f"fontcolor={args.font_color}"] + timing[:1] + box + timing[1:]
+            drawing = "drawtext=" + ":".join(opts)
         # a font/border/box colour with chroma lands in the BT.709 the output is tagged with
         colours = [args.font_color] + ([args.border_color] if args.border else []) + ([args.box_color] if args.box else [])
-        cmd += ["-vf", drawn_chain("drawtext=" + ":".join(opts), meta, colours), "-map", "0:v:0"]
+        cmd += ["-vf", drawn_chain(drawing, meta, colours), "-map", "0:v:0"]
         if meta.get("audio"):
             cmd += ["-map", f"0:a:{args.audio_stream}"]
 
@@ -367,7 +411,7 @@ def main() -> int:
     if not STATE.dry_run:
         result = probe(output, role="output")
         info(f"wrote {output} ({fmt_secs(result['duration'])})")
-    emit(output, dropped_non_av_streams=dropped_streams, **({"notes": notes} if notes else {}))
+    emit(output, dropped_non_av_streams=dropped_streams)
     return 0
 
 

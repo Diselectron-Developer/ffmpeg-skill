@@ -185,7 +185,10 @@ TOOL_META: Dict[str, Dict[str, Any]] = {
                  video_required=False, audio_only=True, visual=True, verify=["probe", "look"], produces_artifact=True, idempotency="content_equivalent", deterministic=True),
     "color": dict(role="execution", inputs=["video asset", ".cube LUT (--lut)"], outputs=["video artifact with converted colour"],
                   required=FF, optional=[{"capability": X264, "when": "--to-sdr / --lut / --correct"}, {"capability": "filter:zscale", "when": "--to-sdr"}, {"capability": "filter:tonemap", "when": "--to-sdr"},
-                                         {"capability": "filter:lut3d", "when": "--lut"}, {"capability": "bsf:filter_units", "when": "--strip-dovi"}, {"capability": X265, "when": "--lut on an HDR source"}, {"capability": AAC, "when": "re-encode"},
+                                         {"capability": "filter:lut3d", "when": "--lut"}, {"capability": "bsf:filter_units", "when": "--strip-dovi"}, {"capability": "bsf:h264_metadata", "when": "--retag on H.264 (without it the video is re-encoded)"},
+                                         {"capability": "bsf:hevc_metadata", "when": "--retag on HEVC (without it the video is re-encoded)"},
+                                         {"capability": "bsf:mpeg2_metadata", "when": "--retag on MPEG-2 (without it the video is re-encoded)"}, {"capability": "bsf:av1_metadata", "when": "--retag on AV1 (without it the video is re-encoded)"},
+                                         {"capability": "bsf:vp9_metadata", "when": "--retag on VP9 (without it the video is re-encoded)"}, {"capability": X265, "when": "--lut on an HDR source"}, {"capability": AAC, "when": "re-encode"},
                                          {"capability": "filter:exposure", "when": "--correct"}, {"capability": "filter:eq", "when": "--correct"},
                                          {"capability": "filter:colorbalance", "when": "--correct"}, {"capability": "filter:colortemperature", "when": "--correct"},
                                          {"capability": "filter:colorlevels", "when": "--correct with any --levels-*"}, {"capability": "filter:curves", "when": "--correct --curves"}],
@@ -240,6 +243,7 @@ DRY_RUN_ANALYSIS = {
     "loudness": "the loudnorm measurement pass runs so input_i and the planned pass-2 command are real; the normalised output is not written",
     "check": "read-only tool; the loudness measurement (or, when it is skipped, the audio row's volumedetect) and the --content decode run under --dry-run too, so every row is present",
     "stabilize": "vidstabdetect (pass 1, into a temp file) runs; the stabilised output (pass 2) is not written",
+    "overlay": "only for a multi-line --text on FFmpeg 8.0, 8.0.1 or 8.1.0: one drawtext measures each line on a generated one-frame picture (the input is not read), so the planned per-line positions are the ones a run uses; otherwise no ffmpeg runs and the composited output is never written",
 }
 DRY_RUN_NOTES = {
     "probe": "read-only tool; --dry-run changes nothing (ffprobe still runs)",
@@ -287,7 +291,7 @@ REENCODE_META: Dict[str, Dict[str, str]] = {
     "loudness":  dict(video="never", audio="always"),
     "silence":   dict(video="always", audio="always", note="removing gaps requires cutting on non-keyframe boundaries"),
     "join":      dict(video="always", audio="always"),
-    "color":     dict(video="conditional", audio="conditional", note="--strip-dovi and --retag (when the stream copy succeeds) are -c copy of both streams; --retag falls back to re-encoding only if the copy attempt fails; --to-sdr / --lut / --correct always re-encode both"),
+    "color":     dict(video="conditional", audio="conditional", note="--strip-dovi and --retag (when the stream copy succeeds) are -c copy of both streams; --retag falls back to re-encoding only if the copy attempt fails or ffprobe still reads the old tags on the copy (a codec with no metadata bitstream filter here); --to-sdr / --lut / --correct always re-encode both"),
     "proxy":     dict(video="always", audio="conditional", note="video is always re-encoded at proxy-grade quality; audio is re-encoded when present, dropped entirely with --no-audio or when the source has none"),
     "export":    dict(video="conditional", audio="conditional", note="--preset copy is -c:v copy -c:a copy (no re-encode); every other preset re-encodes both"),
     "check":     dict(video="never", audio="never", note="read-only, no artifact"),
@@ -444,8 +448,6 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
                  "sources": {"type": "array", "description": "1.18: [{path, offset_s, confidence, drift_ppm}], one per SOURCE; the only per-source shape once more than one SOURCE is given"}}
     elif name == "look":
         extra = {"outputs": {"type": "array", "items": {"type": "string"}}}
-    elif name == "overlay":
-        extra = {"notes": {"type": "array", "items": {"type": "string"}, "description": "a multi-line --text on FFmpeg 8.0, 8.0.1 or 8.1.0, whose drawtext draws a box at each line break (fixed in 8.0.2 and 8.1.1)"}}
     elif name == "render":
         extra = {"stages": {"type": "array", "items": {"type": "string"}}, "check": {"type": ["object", "null"]},
                  "plan": {"type": "string", "description": "when the argument was a plan.json (written by <tool> --plan): its path"},
@@ -473,7 +475,8 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
     elif name == "color":
         extra = {"dropped_non_av_streams": {"type": "boolean"},
                  "sdr_path": {"enum": ["tonemap", "gamut"], "description": "--to-sdr only: tonemap for PQ / HLG / Dolby Vision (and --force on an untagged file); gamut for BT.2020 primaries on an SDR transfer, converted to BT.709 without a tone map"},
-                 "notes": {"type": "array", "items": {"type": "string"}, "description": "--to-sdr only: which path was taken and why"},
+                 "notes": {"type": "array", "items": {"type": "string"}, "description": "--to-sdr: which path was taken and why; --retag: why the video was re-encoded (the stream copy failed, or ffprobe still read the old tags on it)"},
+                 "reencoded": {"type": "boolean", "description": "--retag: true when the stream copy could not carry the tags and the video was re-encoded with them on its frames"},
                  "measurements": {"type": "object", "description": "--correct only: signalstats levels of input and output"}}
     elif name == "loop":
         extra = {"boomerang": {"type": "boolean", "description": "--boomerang: frames 0..N-1 then N-2..1, repeated, so neither turnaround frame is shown twice"},
@@ -1690,7 +1693,7 @@ def build(detect: bool = True) -> Dict[str, Any]:
         "json_output": {
             "success": {"status": "completed", "exit_code": 0, "stdout": "one JSON document (output_schema)"},
             "failure": {"status": "failed", "exit_code": "non-zero (127 when ffmpeg/ffprobe is missing)", "stdout": "{\"status\": \"failed\", \"exit_code\": N, \"error\": {\"kind\": ..., \"message\": ...}, \"commands\": [...]} when --json was given", "stderr": "human-readable message"},
-            "error_kinds": {"input": "missing or unsuitable input, bad arguments", "ffmpeg": "ffmpeg/ffprobe returned an error (message carries the last stderr lines)", "output": "ffmpeg exited 0 but the artifact is missing, empty or unreadable (an empty file is removed)", "missing_tool": "ffmpeg or ffprobe not on PATH", "timeout": "one ffmpeg/ffprobe run exceeded --timeout (default 1800 s, FFMPEG_SKILL_TIMEOUT) and was killed; partial output removed; exit 124", "verification": "the tool ran but its result failed the requested check: check.py platform rows (checks attached), render.py's check stage (output written, check attached), batch.py items (results attached), verify.py steps (files attached); exit 1", "interrupted": "the tool received SIGINT or SIGTERM: the running ffmpeg (or sibling script) was stopped and its partial output removed; exit 130 or 143"},
+            "error_kinds": {"input": "missing or unsuitable input, bad arguments", "ffmpeg": "ffmpeg/ffprobe returned an error (message carries the last stderr lines)", "output": "ffmpeg exited 0 but the artifact is missing, empty or unreadable (an empty file is removed)", "missing_tool": "ffmpeg or ffprobe not on PATH", "timeout": "one ffmpeg/ffprobe run exceeded --timeout (default 1800 s, FFMPEG_SKILL_TIMEOUT) and was killed; partial output removed; exit 124", "verification": "the tool ran but its result failed the requested check: check.py platform rows (checks attached), render.py's check stage (output written, check attached), batch.py items (results attached), verify.py steps (files attached), color.py --retag (output written, but ffprobe does not read the requested colour tags on it); exit 1", "interrupted": "the tool received SIGINT or SIGTERM: the running ffmpeg (or sibling script) was stopped and its partial output removed; exit 130 or 143"},
             "success_criterion": "exit 0 AND the output exists AND is non-empty AND ffprobe reads a stream from it; only then is status completed printed and the output probe attached",
         },
         "capabilities": caps,

@@ -163,7 +163,7 @@ One entry per tool under `tools`, sorted by id. Tool ids are stable:
 | `produces_artifact` | writes a file (media, PNG, HTML, EDL) |
 | `verification` | `{required, tools}`: which tools to run on the output afterwards |
 | `requires_visual_verification` | the picture changed; run `ffmpeg-skill/look` and inspect the PNG |
-| `reencodes_video`, `reencodes_audio` | `"always"` / `"never"` / `"conditional"`, meaning *when that stream is present in the input* — not whether the tool touches the file at all. `"conditional"` tools (`cut`, `export`, `render`, `batch`, `verify`, `caption`, `color`) carry a `reencode_note` explaining what it depends on — for `caption`, `--mode burn` (default) always re-encodes both streams, `--mode mux` copies both untouched; for `color`, `--strip-dovi` and `--retag` are a stream copy of both (retag only re-encodes if the copy attempt fails), while `--to-sdr` / `--lut` / `--correct` always re-encode both. Several visual tools (`fit`, `overlay`, `graphics`, `join`, `multicam`, `silence`) are `"always"` on audio too: this codebase never mixes `-c:v` re-encode with `-c:a copy` in one call, so a caller cannot assume the original audio codec survives just because only the picture changed |
+| `reencodes_video`, `reencodes_audio` | `"always"` / `"never"` / `"conditional"`, meaning *when that stream is present in the input* — not whether the tool touches the file at all. `"conditional"` tools (`cut`, `export`, `render`, `batch`, `verify`, `caption`, `color`) carry a `reencode_note` explaining what it depends on — for `caption`, `--mode burn` (default) always re-encodes both streams, `--mode mux` copies both untouched; for `color`, `--strip-dovi` and `--retag` are a stream copy of both (retag only re-encodes if the copy attempt fails or ffprobe still reads the old tags on the copy), while `--to-sdr` / `--lut` / `--correct` always re-encode both. Several visual tools (`fit`, `overlay`, `graphics`, `join`, `multicam`, `silence`) are `"always"` on audio too: this codebase never mixes `-c:v` re-encode with `-c:a copy` in one call, so a caller cannot assume the original audio codec survives just because only the picture changed |
 | `audio_only` | accepts an audio-only input (WAV, MP3, M4A, FLAC, OGG, Opus) |
 | `video_required` | refuses an input without a video stream ("input has no video stream") |
 | | `join` has `audio_only: true` and `video_required: false` since 0.9.1: audio-only inputs are joined as audio (no `look` needed then); mixing audio and video inputs is refused |
@@ -212,7 +212,9 @@ exceptions are stated per tool in the contract's `dry_run` field: `probe` and `c
 read-only (ffprobe still runs); `sync`, `multicam`, `scenes`, `cropdetect`, `report`, `silence`,
 `loudness` and `stabilize` still run their ffmpeg/ffprobe measurements (the analysis is the
 tool's job; only the artifact is skipped, including side files such as `--edl`, `--sheet` or a
-generated `.ass`), and `verify` does not support dry-run (its steps run). `SKILL.md` and
+generated `.ass`), `overlay` measures the lines of a multi-line `--text` with one drawtext on a
+generated frame on FFmpeg 8.0, 8.0.1 and 8.1.0 (it draws them one by one there), and `verify`
+does not support dry-run (its steps run). `SKILL.md` and
 `references/scripts.md` repeat the same list; the contract is the authority.
 
 `--codec h264|hevc|av1|prores` and `--quality N` (1.8) are on every tool that re-encodes,
@@ -696,7 +698,8 @@ file was written. `probe` prints its measurement document directly.
 Every writing tool also reports what it verified itself (1.7): `verification` lists the
 steps (`{"step": "probe", "ok": true}`; `loudness` with the measured and target values for
 `loudness.py` and the platform presets of `export.py`; `check` with the platform for
-`render.py`), and `verified` is `true` only when the artifact was written, probed and every
+`render.py`; `color_tags` with the tags ffprobe read back for `color.py --retag`, which fails
+with `kind: verification` when they are not the requested ones), and `verified` is `true` only when the artifact was written, probed and every
 listed step met its target. A `--dry-run` document has `verified: false` and an empty list.
 `export.py` whose written file misses the platform's loudness spec stays `completed` (the
 file is valid) with `verified: false` and the fix in `notes`, so a caller keys on one field.

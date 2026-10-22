@@ -18,11 +18,12 @@ Examples:
   python3 color.py flat.mp4 --correct --levels-in-black 16 --levels-in-white 235 --curves medium_contrast
 """
 import argparse
+import json
 import os
 import sys
-from typing import List
+from typing import List, Optional
 
-from _common import STATE, add_common, analyze_levels, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, info, probe, run, run_keeping_subtitles, x264_args, X264_PRESETS, fmt_secs
+from _common import STATE, add_common, analyze_levels, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, ffmpeg_bsfs, ffmpeg_exe, info, probe, run, run_analysis, run_keeping_subtitles, x264_args, X264_PRESETS, fmt_secs
 
 TONEMAPS = ["hable", "mobius", "reinhard", "bt2390", "clip", "linear", "gamma"]
 
@@ -193,6 +194,144 @@ def is_bt2020_sdr(v: dict) -> bool:
         and v.get("color_transfer") not in ("smpte2084", "arib-std-b67")
 
 
+# --retag targets: ffprobe's names (colorspace, primaries, transfer) and the ITU-T H.273 code points
+# h264_metadata/hevc_metadata write into the VUI (matrix_coefficients, colour_primaries,
+# transfer_characteristics).
+RETAG = {
+    "bt709": (("bt709", "bt709", "bt709"), (1, 1, 1)),
+    "bt2020-pq": (("bt2020nc", "bt2020", "smpte2084"), (9, 9, 16)),
+    "bt2020-hlg": (("bt2020nc", "bt2020", "arib-std-b67"), (9, 9, 18)),
+    "bt601": (("smpte170m", "smpte170m", "smpte170m"), (6, 6, 6)),
+}
+# codecs whose colour description lives in the bitstream, and the bitstream filter that rewrites it
+# without touching a coded picture (each in every FFmpeg from 5.0: tests/fixtures/ffmpeg_bsfs_*)
+RETAG_BSF = {"h264": "h264_metadata", "hevc": "hevc_metadata", "mpeg2video": "mpeg2_metadata",
+             "av1": "av1_metadata", "vp9": "vp9_metadata"}
+# VP9 has only a colour space (its primaries and transfer are the container's); vp9_metadata's names
+VP9_SPACE = {"bt709": "bt709", "smpte170m": "smpte170", "bt2020nc": "bt2020"}
+
+
+def retag_bsf(meta: dict, target: str) -> List[str]:
+    """`-bsf:v:0 <codec>_metadata=...` writing `target`'s colour description into the first video
+    stream's own headers (H.264/HEVC VUI, MPEG-2 sequence display extension, AV1 sequence header,
+    VP9 frame header), or [] when the codec has no such filter (ProRes, DNxHD, MPEG-4 Part 2 ...)
+    or this build lacks it.
+
+    A stream copy with -colorspace/-color_primaries/-color_trc changes only the container's
+    description (mp4 `colr`, Matroska Colour); decoders, ffprobe included, read the stream's own
+    description first, so a source that already carried tags there kept them while the tool
+    reported success. The filter rewrites those headers and nothing else: the copy stays
+    lossless. Where the filter has a range field it gets the source's probed range (pc/tv),
+    because h264_metadata/hevc_metadata set it to limited when the VUI had no signal type at all;
+    an unknown range is left alone."""
+    v = meta["video"]
+    codec = v.get("codec") or ""
+    bsf = RETAG_BSF.get(codec)
+    if not bsf or bsf not in ffmpeg_bsfs():
+        return []
+    names, (matrix, prim, trc) = RETAG[target]
+    rng = v.get("color_range") if v.get("color_range") in ("tv", "pc") else None
+    if codec == "vp9":
+        opts = f"color_space={VP9_SPACE[names[0]]}" + (f":color_range={rng}" if rng else "")
+    elif codec == "av1":
+        opts = (f"color_primaries={prim}:transfer_characteristics={trc}:matrix_coefficients={matrix}"
+                + (f":color_range={rng}" if rng else ""))
+    else:
+        opts = f"colour_primaries={prim}:transfer_characteristics={trc}:matrix_coefficients={matrix}"
+        if rng and codec != "mpeg2video":
+            opts += f":video_full_range_flag={1 if rng == 'pc' else 0}"
+    return ["-bsf:v:0", f"{bsf}={opts}"]
+
+
+def retag_mismatch(output: str, want: tuple) -> "Optional[str]":
+    """None when the output carries `want` (colorspace, primaries, transfer), else what was read
+    -- the check behind every completed --retag.
+
+    Two readings, because they disagree: ffprobe's stream tags (from 8.1 the container's `colr`
+    wins there over an H.264 VUI that still says bt709, while 6.1 and 8.0 show the VUI) and the
+    first decoded frame's, which is what a player or filter graph gets. Each stream tag must be
+    the requested one; a frame tag must be the requested one or unspecified (8.1's ProRes decoder
+    leaves its frames untagged and players read the container's)."""
+    got = probe(output, role="output")["video"]
+    stream = (got.get("color_space"), got.get("color_primaries"), got.get("color_transfer"))
+    keys = ("color_space", "color_primaries", "color_transfer")
+    proc = run_analysis([ffmpeg_exe("ffprobe")[0] or "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_frames",
+                         "-read_intervals", "%+#1", "-show_entries", "frame=" + ",".join(keys), "-of", "json", output],
+                        check=False)
+    try:
+        frames = json.loads(proc.stdout or "{}").get("frames") or [{}]
+    except ValueError:
+        frames = [{}]
+    frame = tuple(frames[0].get(k) for k in keys)
+    if stream == tuple(want) and all(f in (None, "unknown", w) for f, w in zip(frame, want)):
+        return None
+    shown = "/".join(str(t) for t in stream)
+    return shown if frame in ((None,) * 3, stream) else f"{shown} (decoded frames: {'/'.join(str(t) for t in frame)})"
+
+
+def retag(args: argparse.Namespace, meta: dict, has_audio: bool) -> int:
+    """--retag: rewrite the colour description, never the pixels.
+
+    First a stream copy of every stream: the container options plus, where the codec keeps its
+    own description, its rewrite (retag_bsf). When the copy fails, or ffprobe still reads other
+    tags on its output (a codec with no such filter here), the video is re-encoded with the tags
+    put on the frames (`setparams`): from FFmpeg 7.1 the encoder takes them from the frames and the output options feed the
+    filter graph's colourspace negotiation, which converted the matrix of a tagged source and left
+    its primaries and transfer as they were (measured on 8.0.1 and 8.1.3), while setparams labels
+    the frames on 5.x-8.x alike. Every completed run has been checked: ffprobe reads the requested
+    tags on the output (`verification`'s `color_tags` step), or the run fails with kind `verification`."""
+    names = RETAG[args.retag][0]
+    output = args.output or default_output(args.input, "retag")
+    ext = os.path.splitext(output)[1].lower()
+    tags = ["-colorspace", names[0], "-color_primaries", names[1], "-color_trc", names[2]]
+    bsf = retag_bsf(meta, args.retag)
+    cmd = ffmpeg_base() + ["-i", args.input, "-map", "0", "-c", "copy"] + bsf + tags
+    if ext in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(output)
+    proc = run(cmd, check=False)
+    notes: List[str] = []
+    reencoded = proc.returncode != 0
+    if not reencoded and not STATE.dry_run:
+        wrong = retag_mismatch(output, names)
+        if wrong:
+            reencoded = True
+            notes.append(f"a stream copy cannot rewrite the colour tags of {meta['video'].get('codec')} here "
+                         f"(the output still read {wrong}), so the video was re-encoded with the tags on its frames")
+            info("note: " + notes[-1])
+    elif reencoded:
+        notes.append("the stream copy failed, so the video was re-encoded with the tags on its frames")
+    dropped_streams = False
+    if reencoded:
+        # The copy path (-map 0 -c copy) keeps every stream -- extra audio tracks, subtitles,
+        # chapters, attached pictures -- byte-for-byte; -c:s/-c:d copy here keeps that same
+        # guarantee for subtitle/data streams even though video/audio must be re-encoded. Only if
+        # THAT also fails (e.g. a subtitle codec genuinely incompatible with the target container)
+        # do we drop to video+selected-audio-only, and even then we say so explicitly rather than
+        # silently reporting "completed" with streams missing.
+        info("re-encoding video/audio with the new tags (subtitles/data streams kept)")
+        label = ["-vf", f"setparams=color_primaries={names[1]}:color_trc={names[2]}:colorspace={names[0]}"]
+        enc = x264_args(args.crf, args.preset, keep_bt709=False) + (aac_args() if has_audio else [])
+        cmd = ffmpeg_base() + ["-i", args.input, "-map", "0:v:0", "-map", f"0:a:{args.audio_stream}?",
+                                "-map", "0:s?", "-map", "0:d?"] + label + enc + ["-c:s", "copy", "-c:d", "copy", output]
+        proc2 = run(cmd, check=False)
+        if proc2.returncode != 0:
+            info("re-encode with subtitles/data streams kept also failed; dropping them")
+            dropped_streams = True
+            cmd = ffmpeg_base() + ["-i", args.input, "-map", "0:v:0", "-map", f"0:a:{args.audio_stream}?"] + label + enc + [output]
+            run(cmd)
+        wrong = None if STATE.dry_run else retag_mismatch(output, names)
+        if wrong:
+            die(f"--retag {args.retag}: the re-encoded output still reads {wrong}, not {'/'.join(names)}",
+                kind="verification", hint=f"the output was written to {output} but is not tagged as asked")
+    info(f"wrote {output} (tags -> {args.retag})")
+    check = [] if STATE.dry_run else [{"step": "color_tags", "ok": True, "color_space": names[0],
+                                       "color_primaries": names[1], "color_transfer": names[2]}]
+    emit(output, reencoded=reencoded, dropped_non_av_streams=dropped_streams, verification=check,
+         **({"notes": notes} if notes else {}))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
@@ -261,45 +400,7 @@ def main() -> int:
         return 0
 
     if args.retag:
-        tags = {
-            "bt709": ["bt709", "bt709", "bt709"],
-            "bt2020-pq": ["bt2020nc", "bt2020", "smpte2084"],
-            "bt2020-hlg": ["bt2020nc", "bt2020", "arib-std-b67"],
-            "bt601": ["smpte170m", "smpte170m", "smpte170m"],
-        }[args.retag]
-        output = args.output or default_output(args.input, "retag")
-        ext = os.path.splitext(output)[1].lower()
-        cmd = ffmpeg_base() + ["-i", args.input, "-map", "0", "-c", "copy",
-               "-colorspace", tags[0], "-color_primaries", tags[1], "-color_trc", tags[2]]
-        if ext in (".mp4", ".mov", ".m4v"):
-            cmd += ["-movflags", "+faststart"]
-        cmd.append(output)
-        proc = run(cmd, check=False)
-        dropped_streams = False
-        if proc.returncode != 0:
-            # Some codecs cannot carry retagged colour info without a bitstream filter, so the
-            # stream copy above fails and we fall back to re-encoding video+audio. The copy path
-            # (-map 0 -c copy) keeps every stream -- extra audio tracks, subtitles, chapters,
-            # attached pictures -- byte-for-byte; -c:s/-c:d copy here keeps that same guarantee
-            # for subtitle/data streams even though video/audio must be re-encoded. Only if THAT
-            # also fails (e.g. a subtitle codec genuinely incompatible with the target container)
-            # do we drop to video+selected-audio-only, and even then we say so explicitly rather
-            # than silently reporting "completed" with streams missing.
-            info("stream copy could not rewrite tags, re-encoding video/audio (subtitles/data streams kept)")
-            cmd = ffmpeg_base() + ["-i", args.input, "-map", "0:v:0", "-map", f"0:a:{args.audio_stream}?",
-                                    "-map", "0:s?", "-map", "0:d?"] + x264_args(args.crf, args.preset, keep_bt709=False)
-            cmd += ["-colorspace", tags[0], "-color_primaries", tags[1], "-color_trc", tags[2]]
-            cmd += (aac_args() if has_audio else []) + ["-c:s", "copy", "-c:d", "copy"] + [output]
-            proc2 = run(cmd, check=False)
-            if proc2.returncode != 0:
-                info("re-encode with subtitles/data streams kept also failed; dropping them")
-                dropped_streams = True
-                cmd = ffmpeg_base() + ["-i", args.input, "-map", "0:v:0", "-map", f"0:a:{args.audio_stream}?"] + x264_args(args.crf, args.preset, keep_bt709=False)
-                cmd += ["-colorspace", tags[0], "-color_primaries", tags[1], "-color_trc", tags[2]] + (aac_args() if has_audio else []) + [output]
-                run(cmd)
-        info(f"wrote {output} (tags -> {args.retag})")
-        emit(output, reencoded=proc.returncode != 0, dropped_non_av_streams=dropped_streams)
-        return 0
+        return retag(args, meta, has_audio)
 
     measurements = None
     sdr_extra: dict = {}

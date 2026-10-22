@@ -1,6 +1,6 @@
 # Script reference
 
-Every script prints the same information with `--help`; this file exists so the agent can read several at once. All scripts accept `--dry-run`, `--json`, `--json-brief` (since 1.11.0: the same JSON result trimmed to `status`, `output`, `dry_run`, `verified`, a compact `summary` of the output probe -- duration_s, width, height, fps, vcodec, acodec, channels, and lufs when measured -- the tool's own keys, and the count of commands instead of the command lines; it implies `--json`, leaves `--json`'s own output untouched, and failures print the usual full failure document), `--fast`, `--progress`, `--timeout SECONDS`, `--overwrite`, `--plan FILE` (the dry run written as a plan document that `render.py FILE` executes later; see render.py), `-o OUT`; every re-encoding tool and `export.py` also take `--hw`/`--no-hw` (h264/hevc/prores on Apple VideoToolbox, Apple Silicon only, CRF mapped to `-q:v`; AV1 stays on the CPU; a job VideoToolbox itself refuses -- the encoder cannot open or its compression session fails -- is re-encoded on the CPU and reported in `hw.fallback`/`hw.notes`, any other failure is not retried; a GPU encode adds a `notes` line that its quality is not CRF-equivalent; `FFMPEG_SKILL_HW=1` makes it the default for every tool except `export.py`, whose delivery presets need `--hw` itself; `render.py`/`batch.py --hw`/`--no-hw` apply to every stage, export included; results name the `encoder` that ran); every editing tool that re-encodes (not `export.py`, whose preset decides the codec) also takes `--codec h264|hevc|av1|prores` (the encoder for the re-encode; default x264 for SDR, x265 Main10 for HDR, unchanged) and `--quality N` (CRF scale, default 18 -- 30 for `proxy.py`; up to 63 for av1; ignored by prores). 2.0 removed `--crf` from these tools (it was `--quality`'s alias); `export.py` keeps its own `--crf`, which is not an alias. Every tool refuses (`kind: input`, before anything runs) to replace an existing output unless `--overwrite` is given. `--codec hevc` on SDR writes 8-bit BT.709 HEVC (`hvc1`), `av1` uses SVT-AV1 (libaom fallback), `prores` is 422 HQ and needs an explicit `-o NAME.mov` (or `.mkv`), `h264` refuses an HDR source (`kind: input`, run `color.py --to-sdr` first). `export.py` keeps choosing the codec from its preset and has neither `--codec` nor `--quality`; a `render.py` project cannot choose a codec either -- but `--dry-run` only guarantees nothing is written for writing tools: `probe` (read-only, `--dry-run` changes nothing) still runs ffprobe, `check`/`sync`/`multicam`/`scenes`/`cropdetect`/`report`/`silence`/`loudness`/`stabilize`/`join` still run their ffmpeg/ffprobe measurements (a dry-run plan rests on real numbers; they just don't write the final artifact), and `verify` accepts the flag but ignores it entirely. Exact per-tool semantics: `contract --json`'s `dry_run` field (or `docs/contract.md`).
+Every script prints the same information with `--help`; this file exists so the agent can read several at once. All scripts accept `--dry-run`, `--json`, `--json-brief` (since 1.11.0: the same JSON result trimmed to `status`, `output`, `dry_run`, `verified`, a compact `summary` of the output probe -- duration_s, width, height, fps, vcodec, acodec, channels, and lufs when measured -- the tool's own keys, and the count of commands instead of the command lines; it implies `--json`, leaves `--json`'s own output untouched, and failures print the usual full failure document), `--fast`, `--progress`, `--timeout SECONDS`, `--overwrite`, `--plan FILE` (the dry run written as a plan document that `render.py FILE` executes later; see render.py), `-o OUT`; every re-encoding tool and `export.py` also take `--hw`/`--no-hw` (h264/hevc/prores on Apple VideoToolbox, Apple Silicon only, CRF mapped to `-q:v`; AV1 stays on the CPU; a job VideoToolbox itself refuses -- the encoder cannot open or its compression session fails -- is re-encoded on the CPU and reported in `hw.fallback`/`hw.notes`, any other failure is not retried; a GPU encode adds a `notes` line that its quality is not CRF-equivalent; `FFMPEG_SKILL_HW=1` makes it the default for every tool except `export.py`, whose delivery presets need `--hw` itself; `render.py`/`batch.py --hw`/`--no-hw` apply to every stage, export included; results name the `encoder` that ran); every editing tool that re-encodes (not `export.py`, whose preset decides the codec) also takes `--codec h264|hevc|av1|prores` (the encoder for the re-encode; default x264 for SDR, x265 Main10 for HDR, unchanged) and `--quality N` (CRF scale, default 18 -- 30 for `proxy.py`; up to 63 for av1; ignored by prores). 2.0 removed `--crf` from these tools (it was `--quality`'s alias); `export.py` keeps its own `--crf`, which is not an alias. Every tool refuses (`kind: input`, before anything runs) to replace an existing output unless `--overwrite` is given. `--codec hevc` on SDR writes 8-bit BT.709 HEVC (`hvc1`), `av1` uses SVT-AV1 (libaom fallback), `prores` is 422 HQ and needs an explicit `-o NAME.mov` (or `.mkv`), `h264` refuses an HDR source (`kind: input`, run `color.py --to-sdr` first). `export.py` keeps choosing the codec from its preset and has neither `--codec` nor `--quality`; a `render.py` project cannot choose a codec either -- but `--dry-run` only guarantees nothing is written for writing tools: `probe` (read-only, `--dry-run` changes nothing) still runs ffprobe, `check`/`sync`/`multicam`/`scenes`/`cropdetect`/`report`/`silence`/`loudness`/`stabilize`/`join` still run their ffmpeg/ffprobe measurements (a dry-run plan rests on real numbers; they just don't write the final artifact), `overlay` measures a multi-line `--text`'s lines on FFmpeg 8.0, 8.0.1 and 8.1.0 (one drawtext on a generated frame), and `verify` accepts the flag but ignores it entirely. Exact per-tool semantics: `contract --json`'s `dry_run` field (or `docs/contract.md`).
 
 ## Time grammar (every time-taking flag, 1.9)
 
@@ -1497,6 +1497,11 @@ Devanagari/Thai-class scripts and cannot load a colour emoji font: a shaping
 script is refused by name pointing at `caption.py`/`graphics.py`, and
 `--emoji png|color` is refused the same way (`--emoji mono`, the default here,
 draws whatever glyph the text font has; `--emoji none` strips them).
+A multi-line `--text` is one block: the lines are left-aligned and the block is
+placed by `--position`. FFmpeg 8.0, 8.0.1 and 8.1.0 draw the font's missing-glyph box
+at each line break, so on those releases each line gets its own drawtext at the
+place the block puts it (measured by one drawtext run on a generated frame, also
+under `--dry-run`); the picture is the one a fixed release draws.
 
 ### sync.py — offset detection, alignment, drift correction
 ```
@@ -1539,7 +1544,7 @@ them.
 ```
 color.py INPUT --to-sdr [--tonemap hable|mobius|reinhard|bt2390] [--peak 1000] [--desat 0] [-o OUT]
 color.py INPUT --lut grade.cube [--lut-strength 0..1] [-o OUT]
-color.py INPUT --retag bt709|bt2020-pq|bt2020-hlg|bt601 [-o OUT]      # metadata only, stream copy
+color.py INPUT --retag bt709|bt2020-pq|bt2020-hlg|bt601 [-o OUT]      # metadata only, stream copy (checked with ffprobe)
 color.py INPUT --strip-dovi [-o OUT]                                 # drop the Dolby Vision RPU, keep the HLG/HDR10 base layer (stream copy)
 color.py INPUT --correct [--exposure -3..3] [--contrast 0..2] [--saturation 0..2] [--gamma 0.1..10]
          [--temperature 2000..12000] [--tint -1..1] [--lift -1..1] [--gain -1..1]
@@ -1569,6 +1574,20 @@ input is not HDR unless `--force`. `--lut` applies a 3D .cube with
 tetrahedral interpolation (Log→709 conversions, creative looks); blend with
 `--lut-strength`. Everything else in the skill assumes SDR BT.709, so run this
 first on HDR or Log sources.
+
+`--retag` relabels, never converts. H.264, HEVC, MPEG-2, AV1 and VP9 carry
+their colour description in the stream itself, and decoders read that before
+the container's, so the stream copy rewrites it with the codec's
+`*_metadata` bitstream filter (the coded pictures are untouched) as well as
+the container's `colr`/Colour. Every run then probes the output, stream and
+first decoded frame (from FFmpeg 8.1 the two can disagree): when either
+still reads other tags (a codec without such a filter, or a build that lacks
+it) or the copy fails, the video is re-encoded with the tags on its frames
+(`setparams`), `reencoded: true` and a `notes` line say so, and the check is
+`verification`'s `color_tags` step. Tags that are still wrong after the
+re-encode fail the run with `kind: verification`. The re-encode is H.264
+unless `--codec` says otherwise, so an output container that cannot hold it
+(`.webm`) fails with `kind: ffmpeg` instead of completing with the old tags.
 
 ### audio.py — clean-up, music, ducking, layout
 ```
