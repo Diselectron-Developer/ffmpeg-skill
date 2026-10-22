@@ -2607,6 +2607,67 @@ class ContractTests(unittest.TestCase):
         out = subprocess.run([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, text=True, check=True).stdout
         self.assertEqual(out.strip(), "(7, 0)")
 
+    def _release_shim(self, name, banner):
+        """A PATH holding an ffprobe that answers `-version` with `banner` and hands every other
+        call to the real ffprobe, so a tool plans for that release on any machine."""
+        shim = self.out(name); shim.mkdir(exist_ok=True)
+        (shim / "ffprobe").write_text("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then printf '%s\\n'; exit 0; fi\n"
+                                      "exec %s \"$@\"\n" % (banner, shutil.which("ffprobe")))
+        (shim / "ffprobe").chmod(0o755)
+        return dict(os.environ, PATH=f"{shim}{os.pathsep}{os.environ['PATH']}")
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffprobe is a #!/bin/sh shim on a POSIX-only PATH")
+    def test_ffmpeg_release_reads_the_point_release(self):
+        """A drawtext bug that 8.0 introduced and 8.0.2 / 8.1.1 fixed cannot be told apart by
+        ffmpeg_version()'s major.minor; ffmpeg_release() reads the patch level too (a distro suffix
+        is ignored, a bare major.minor is .0) and has none for a git build."""
+        code = ("import sys; sys.path.insert(0, %r); import _common; "
+                "print(_common.ffmpeg_release(), _common.drawtext_draws_newline_glyph())" % str(SCRIPTS))
+        for banner, expected in (("ffprobe version 8.0.1-3ubuntu2 Copyright (c) 2007-2025", "(8, 0, 1) True"),
+                                 ("ffprobe version n8.1 Copyright (c) 2007-2026", "(8, 1, 0) True"),
+                                 ("ffprobe version 8.0.2 Copyright (c) 2007-2026", "(8, 0, 2) False"),
+                                 ("ffprobe version 8.1.1 Copyright (c) 2007-2026", "(8, 1, 1) False"),
+                                 ("ffprobe version 6.1.1-3ubuntu5 Copyright (c) 2007-2023", "(6, 1, 1) False"),
+                                 ("ffprobe version N-121000-g1234abcd Copyright (c) 2007-2026", "None False")):
+            env = self._release_shim("release_shim", banner)
+            out = subprocess.run([sys.executable, "-c", code], env=env, stdout=subprocess.PIPE, text=True, check=True).stdout
+            self.assertEqual(out.strip(), expected, banner)
+
+    @unittest.skipIf(platform.system() == "Windows", "the fake ffprobe is a #!/bin/sh shim on a POSIX-only PATH")
+    def test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break(self):
+        """FFmpeg 8.0, 8.0.1 (Ubuntu 26.04's apt build) and 8.1.0 shape each line of a multi-line
+        drawtext WITH its newline, so the font's missing-glyph box is drawn at the end of every line
+        but the last (CI on ubuntu-latest: the lower-third's title measured as three yellow bands).
+        graphics.py's auto route sends such a label -- given with a newline or wrapped there --
+        through libass on those releases, keeps drawtext for one line and on fixed releases, and a
+        pinned --text-render drawtext warns; overlay.py, which has no libass route, says so in notes."""
+        bad = self._release_shim("nl_shim_801", "ffprobe version 8.0.1-3ubuntu2 Copyright (c) 2007-2025")
+        good = self._release_shim("nl_shim_802", "ffprobe version 8.0.2 Copyright (c) 2007-2026")
+
+        def gfx(env, *extra):
+            proc = tool("graphics", self.src, "--template", "lower-third", "--name", "Jane", *extra,
+                        "--dry-run", "--json", "-o", self.out("nl_gfx.mp4"), env=env)
+            return json.loads(proc.stdout), proc.stderr
+
+        doc, err = gfx(bad, "--title", "CEO\nand founder")
+        self.assertEqual(doc["text_renderer"], "ass", err[-400:])
+        self.assertIn("box at each line break", err)
+        wrapped = json.loads(tool("graphics", self.src, "--template", "meme", "--top", "a caption far too long to fit "
+                                  "across the frame on a single line", "--dry-run", "--json", "-o", self.out("nl_meme.mp4"),
+                                  env=bad).stdout)
+        self.assertEqual(wrapped["text_renderer"], "ass", "a label graphics.py wrapped to two lines")
+        self.assertEqual(gfx(bad, "--title", "CEO")[0]["text_renderer"], "drawtext", "one line keeps drawtext")
+        self.assertEqual(gfx(good, "--title", "CEO\nand founder")[0]["text_renderer"], "drawtext", "8.0.2 is fixed")
+        doc, err = gfx(bad, "--title", "CEO\nand founder", "--text-render", "drawtext")
+        self.assertEqual(doc["text_renderer"], "drawtext")
+        self.assertIn("warning: this ffmpeg's drawtext draws a box", err)
+        doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
+                              "-o", self.out("nl_ov.mp4"), env=bad).stdout)
+        self.assertTrue(any("missing-glyph box" in n for n in doc.get("notes", [])), doc.get("notes"))
+        doc = json.loads(tool("overlay", self.src, "--text", "two\nlines", "--dry-run", "--json",
+                              "-o", self.out("nl_ov.mp4"), env=good).stdout)
+        self.assertNotIn("notes", doc)
+
     def test_fourth_review_p3_regressions(self):
         """Fourth review P3 items: render re-encoded a clip at speed 1.0 (#47); a brand's default
         caption.animate made --mode mux fail (#32); shell_quote left a newline bare (#54);

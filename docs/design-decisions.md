@@ -1650,3 +1650,27 @@ not a new file format this tool would have to maintain.
   pending intermediate and a plan for it is no plan. A missing `image` is unchanged: a dry run
   still plans it and a real run fails in the overlays stage. Code: `render.main()`. Test:
   `test_render_video_overlay_refusals_and_dry_run_plan`.
+
+## Unreleased — FFmpeg 8.0.1 (Ubuntu 26.04)
+
+- **`pad.py` builds one `-filter_complex` for a clip with sound, not a `-vf` and an `-af`.** On
+  8.0.1 and conda-forge's 7.1.1 (not Debian's 7.1.5 or 8.1.3), one demuxer feeding two simple
+  graphs deadlocks when the audio one both delays and pads (`adelay` + `apad`); one graph reading
+  both streams runs on 5.1.1, 6.1.1, 7.0.2, 8.0.1 and 8.1.3. A command
+  compared with 2.10.8's differs by design. Code: `pad.main()`. Test:
+  `test_pad_with_sound_is_one_filter_graph`.
+- **`silence.py` selects the sound with two `ametadata` filters, not `aselect`.** 8.0 and 8.0.1's
+  `aselect` passes every frame. The first `ametadata` tags a frame when the same `between()`
+  expression (as a timeline `enable`, so the same per-frame `t`) is true and the second keeps the
+  tagged frames, which is what `aselect` keeps. `asplit` + an `atrim` per range + `concat` was
+  tried and works, but costs about 81 command bytes per range against 56: at `--max-cuts 400` on
+  an hour-long file that is past Windows' 32767-character command line. `asegment`'s timestamp
+  mode compares pts with a sample count and is right only for a stream that starts at 0. Code:
+  `silence.main()`. Test: `test_silence_removal_cuts_the_sound_with_the_picture`.
+- **On 8.0, 8.0.1 and 8.1.0, a multi-line `graphics.py` label goes through libass under
+  `--text-render auto`**, decided after the template has wrapped its labels (so `main()` runs
+  once more with the route forced). The releases are named, not probed: `--dry-run` may not start
+  ffmpeg, and a git build without a release number is taken to be fixed. `overlay.py` has no
+  libass route and warns in `notes` instead of drawing each line with its own `drawtext`, which
+  would change how a block is aligned. Code: `drawtext_draws_newline_glyph()`. Test:
+  `test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break`.

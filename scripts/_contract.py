@@ -444,6 +444,8 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
                  "sources": {"type": "array", "description": "1.18: [{path, offset_s, confidence, drift_ppm}], one per SOURCE; the only per-source shape once more than one SOURCE is given"}}
     elif name == "look":
         extra = {"outputs": {"type": "array", "items": {"type": "string"}}}
+    elif name == "overlay":
+        extra = {"notes": {"type": "array", "items": {"type": "string"}, "description": "a multi-line --text on FFmpeg 8.0, 8.0.1 or 8.1.0, whose drawtext draws a box at each line break (fixed in 8.0.2 and 8.1.1)"}}
     elif name == "render":
         extra = {"stages": {"type": "array", "items": {"type": "string"}}, "check": {"type": ["object", "null"]},
                  "plan": {"type": "string", "description": "when the argument was a plan.json (written by <tool> --plan): its path"},

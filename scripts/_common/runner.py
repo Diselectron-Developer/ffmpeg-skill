@@ -125,6 +125,30 @@ def ffmpeg_version() -> "Tuple[int, int]":
     return _FFMPEG_VERSION
 
 
+_FFMPEG_RELEASE: "Optional[Tuple[int, int, int]]" = None
+_FFMPEG_RELEASE_READ = False
+
+
+def ffmpeg_release() -> "Optional[Tuple[int, int, int]]":
+    """(major, minor, patch) of a tagged FFmpeg release on PATH ("8.0.1-3ubuntu2", "n8.1" ->
+    (8, 1, 0)), or None for a git/vendor build or an unreadable one. ffmpeg_version()'s
+    major.minor is the right test for an option spelling; this is for a bug that one point
+    release introduced and the next one fixed, which major.minor cannot tell apart. Read from
+    ffprobe for the same dry-run reason; cached per process."""
+    global _FFMPEG_RELEASE, _FFMPEG_RELEASE_READ
+    if not _FFMPEG_RELEASE_READ:
+        _FFMPEG_RELEASE_READ = True
+        try:
+            out = subprocess.run([ffmpeg_exe("ffprobe")[0] or "ffprobe", "-version"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
+                                 timeout=PROBE_TIMEOUT).stdout
+            m = re.search(r"ffprobe version\s+n?(\d+)\.(\d+)(?:\.(\d+))?", out)
+            if m:
+                _FFMPEG_RELEASE = (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return _FFMPEG_RELEASE
+
+
 def _homebrew_full_build(path: str, name: str) -> str:
     """On macOS, the keg-only `ffmpeg-full` binary that should replace `path`, or "".
 

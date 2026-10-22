@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from typing import Dict, Optional
 from _common.decision import escape_filter_path
-from _common.runner import STATE, _DRAWTEXT_PENDING, _drawtext_tmpdir, ffmpeg_exe, ffmpeg_version
+from _common.runner import STATE, _DRAWTEXT_PENDING, _drawtext_tmpdir, ffmpeg_exe, ffmpeg_release, ffmpeg_version
 
 
 def drawtext_boxborderw(vertical: int, horizontal: int) -> str:
@@ -95,6 +95,26 @@ def escape_drawtext(text: str) -> str:
         .replace("]", "\\]")
         .replace(";", "\\;")
     )
+
+
+# FFmpeg 8.0 rewrote drawtext's line splitter to hand harfbuzz `p - start` bytes after GET_UTF8 had
+# already stepped past the line break, so every line but the last is shaped WITH its newline and
+# the font's .notdef box is drawn at its end (and counted in text_w). 8.0.2 and 8.1.1 measure the
+# length before the step; 8.0, 8.0.1 (Ubuntu 26.04) and 8.1 ship the bug.
+NEWLINE_GLYPH_RELEASES = frozenset({(8, 0, 0), (8, 0, 1), (8, 1, 0)})
+
+
+def drawtext_draws_newline_glyph() -> bool:
+    """Whether this build's drawtext draws a box at each line break of a multi-line text (see
+    NEWLINE_GLYPH_RELEASES). A git or vendor build without a release number is taken to be fixed:
+    the fix is on master, and a guess the other way would reroute every multi-line title."""
+    return ffmpeg_release() in NEWLINE_GLYPH_RELEASES
+
+
+def is_multiline(text: "Optional[str]") -> bool:
+    """`text` draws as more than one line (the normalisation drawtext_text_opts() applies)."""
+    cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+    return "\n" in cleaned
 
 
 def drawtext_center_align() -> str:

@@ -617,6 +617,32 @@ class EditingTests(MediaFixtures):
         m = probe(str(out))
         self.assertClose(m["duration"], 15.0, 0.3)
 
+    def test_pad_with_sound_is_one_filter_graph(self):
+        """FFmpeg 8.0.1's scheduler (and conda-forge's 7.1.1) deadlocks (no CPU, until --timeout) when one demuxer feeds
+        a -vf graph and an -af graph whose audio both delays its start and pads its tail: pad.py
+        hung for 1800 s on Ubuntu 26.04's 8.0.1 (and on conda-forge's 7.1.1 before it). Both
+        streams now go through one -filter_complex, which runs on every release. That graph gets
+        no even scale from run()'s retry, so pad.py adds it for an odd-sized source itself."""
+        doc = json.loads(script("pad.py", self.src, "--start", "1", "--end", "2", "--dry-run", "--json",
+                                "-o", OUT / "pad_plan.mp4").stdout)
+        cmd = doc["commands"][-1]
+        self.assertIn("-filter_complex", cmd)
+        self.assertNotIn(" -af ", cmd)
+        self.assertNotIn(" -vf ", cmd)
+        odd = OUT / "pad_odd_in.mp4"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=641x359:rate=30",
+           "-f", "lavfi", "-i", "sine=f=440:r=48000", "-t", "2", "-pix_fmt", "yuv444p", "-c:v", "libx264",
+           "-preset", "veryfast", "-c:a", "aac", odd)
+        out = OUT / "pad_odd.mp4"
+        script("pad.py", odd, "--start", "1", "--end", "1", "--color", "0x2878C8", "--preset", "veryfast", "-o", out)
+        m = probe(str(out))
+        self.assertEqual((m["video"]["width"] % 2, m["video"]["height"] % 2), (0, 0))
+        self.assertClose(m["duration"], 4.0, 0.15)
+        streams = json.loads(sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+                                "-of", "json", out).stdout)["streams"]
+        lengths = {s["codec_type"]: float(s["duration"]) for s in streams}
+        self.assertClose(lengths["audio"], lengths["video"], 0.1)
+
     def test_pad_nothing_refused(self):
         script("pad.py", self.src, expect_fail=True)
 
@@ -1013,6 +1039,28 @@ class EditingTests(MediaFixtures):
         out2 = OUT / "tight_via_cut.mp4"
         script("cut.py", gappy, "--segments", segs, "--accurate", "--preset", "veryfast", "-o", out2)
         self.assertClose(probe(str(out2))["duration"], 6.75, 0.4)
+
+    def test_silence_removal_cuts_the_sound_with_the_picture(self):
+        """FFmpeg 8.0 and 8.0.1 (Ubuntu 26.04) ship an `aselect` that passes every frame through (its
+        activate callback was lost when the filter was converted; fixed in 8.0.2/8.1), so silence.py
+        cut the picture to 6.75 s and left the sound at 12 s. The container duration is the longer
+        stream, so each stream is measured here. The sound is selected through ametadata (tag the
+        frames the expression keeps, keep the tagged ones), which behaves the same on every release,
+        and is never planned through aselect again."""
+        gappy = OUT / "gappy_streams.mp4"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "lavfi", "-i", "aevalsrc='0.5*sin(2*PI*440*t)*gt(sin(2*PI*0.25*t)\\,0)':s=48000",
+           "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30", "-t", "12", "-c:v", "libx264", "-preset", "veryfast",
+           "-c:a", "aac", gappy)
+        plan = json.loads(script("silence.py", gappy, "--dry-run", "--json", "-o", OUT / "tight_plan.mp4").stdout)
+        self.assertNotIn("aselect", plan["commands"][-1])
+        for name in ("tight_streams.mp4", "tight_streams.m4a"):
+            out = OUT / name
+            script("silence.py", gappy, "--preset", "veryfast", "-o", out)
+            streams = json.loads(sh("ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+                                    "-of", "json", out).stdout)["streams"]
+            for s in streams:
+                self.assertClose(float(s["duration"]), 6.75, 0.1, f"{name} {s['codec_type']}")
 
     def test_silence_on_wav_input_keeps_pcm_not_forced_aac(self):
         """silence.py's final ffmpeg command used to unconditionally append aac_args() (-c:a aac)

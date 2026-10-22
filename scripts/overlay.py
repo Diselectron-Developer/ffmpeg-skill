@@ -25,7 +25,7 @@ import sys
 from typing import List, Optional
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
-from _common import STATE, script_font_for_text, drawtext_text_opts, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, drawn_chain, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
+from _common import STATE, script_font_for_text, drawtext_text_opts, drawtext_draws_newline_glyph, is_multiline, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, drawn_chain, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
 
 # Per-edge margins: a platform's UI does not cover the same fraction of every edge (TikTok's
 # like column is 14 % of the width, its description block 22 % of the height), so a position
@@ -144,6 +144,7 @@ def main() -> int:
     add_common(ap)
     args = ap.parse_args()
     apply_common(args)
+    notes: List[str] = []
 
     brand = load_brand(args.brand)
     if args.logo:
@@ -334,6 +335,12 @@ def main() -> int:
         x, y = position_exprs(args.position, args.margin, text_mode=True, margins=safe_margins)
         # 1.15: the text goes in a FILE with expansion off, so `'` and `%` survive verbatim
         # (they used to be dropped by escape_drawtext) and no character can reach the graph parser.
+        if is_multiline(args.text) and drawtext_draws_newline_glyph():
+            # overlay has no libass route to send it to (graphics.py's --text-render auto does)
+            notes.append("this ffmpeg's drawtext (FFmpeg 8.0, 8.0.1 and 8.1.0; fixed in 8.0.2 and 8.1.1) draws "
+                         "the font's missing-glyph box at the end of every line but the last of a multi-line "
+                         "--text: draw multi-line text with graphics.py or caption.py, or upgrade FFmpeg")
+            info("warning: " + notes[-1])
         opts = [drawtext_text_opts(args.text), f"fontsize={args.font_size}", f"x={x}", f"y={y}",
                 f"borderw={args.border}", f"bordercolor={args.border_color}"]
         if args.font_file:
@@ -360,7 +367,7 @@ def main() -> int:
     if not STATE.dry_run:
         result = probe(output, role="output")
         info(f"wrote {output} ({fmt_secs(result['duration'])})")
-    emit(output, dropped_non_av_streams=dropped_streams)
+    emit(output, dropped_non_av_streams=dropped_streams, **({"notes": notes} if notes else {}))
     return 0
 
 

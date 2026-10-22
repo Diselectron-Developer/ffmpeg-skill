@@ -167,9 +167,19 @@ these had ever shown up before.
   `color_space=bt709` on the trixie/macOS/Windows jobs and the untagged case silently went untested
   there (#333's colour fixtures until 2.10.3). Relabel the frames `setparams=colorspace=unknown`
   before the encode, and assert the probe says unknown.
-- **The conda-forge 7.1.1 build deadlocks on `tpad` + `adelay`/`apad` (pad.py) and ignores
-  SIGTERM.** Debian's 7.1.5 in CI does not. Run pad tests against CI, not that build, and note
-  that the tools have no subprocess timeout to get an agent out of such a hang.
+- **FFmpeg 8.0.1 and conda-forge's 7.1.1 deadlock when one input feeds a `-vf` graph and an `-af` graph whose sound is
+  both delayed and padded** (`adelay` + `apad`, the shape pad.py used): no CPU, no progress, until
+  `--timeout`. First seen on conda-forge's 7.1.1 and filed as that build's quirk; Ubuntu 26.04's
+  8.0.1 (`ubuntu-latest`) has it too; Debian's 7.1.5 and 8.1.3 do not. pad.py puts both streams in
+  one `-filter_complex`, which runs on 5.1.1, 6.1.1, 7.0.2, 8.0.1 and 8.1.3. A tool that delays and
+  pads audio should do the same.
+- **FFmpeg 8.0 and 8.0.1's `aselect` passes every frame through** (its `activate` callback was lost
+  in the filter conversion; fixed in 8.0.2/8.1). Nothing fails: the picture is cut and the sound is
+  not. silence.py tags the kept frames with `ametadata=mode=add:...:enable='<expr>'` and keeps them with
+  `ametadata=mode=select`; do not use `aselect` for removal.
+- **FFmpeg 8.0, 8.0.1 and 8.1.0 draw the font's missing-glyph box at each line break of a multi-line
+  `drawtext`** (each line is shaped with its newline; fixed in 8.0.2/8.1.1). `ffmpeg_version()` cannot
+  tell 8.1.0 from 8.1.1; `drawtext_draws_newline_glyph()` reads the point release.
 - **Not a 7.1 issue, found while chasing it: `color --correct` desaturates a bt709-*tagged*
   source by ~8 % at identity settings on 6.1 and 7.1 alike** (113.6 → 103.9 saturation_avg):
   the RGB stages (exposure/colortemperature/colorbalance) make swscale go yuv→rgb with the

@@ -4,7 +4,14 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+Three failures on Ubuntu 26.04 (`ubuntu-latest` since 2026-10-21), whose apt FFmpeg is 8.0.1. Each is an FFmpeg bug in specific releases; the tools now behave the same on 5.1.1, 6.1.1, 7.0.2, 8.0.1 and 8.1.3, the builds they were run on.
+
+- **`pad.py` no longer hangs on a clip with sound.** FFmpeg 8.0.1 (and conda-forge's 7.1.1, though not Debian's 7.1.5) deadlocks with no CPU use when one input feeds a `-vf` graph and an `-af` graph whose sound both starts late (`adelay`) and is padded at the end (`apad`). 8.1.3 does not. The job sat until `--timeout` (1800 s), with `--end 0` too. This is the conda-forge 7.1.1 hang `references/ci-platform-pitfalls.md` recorded as one build's quirk. Both streams now go through one `-filter_complex`. An odd-sized source gets its even scale in that graph, because `run()`'s retry adds one only to a `-vf`.
+- **`silence.py` cuts the sound as well as the picture.** FFmpeg 8.0 and 8.0.1 ship an `aselect` that passes every frame through: its `activate` callback was lost when the filter was converted, and 8.0.2 and 8.1 restore it. On those builds a 12 s talk came out with 6.75 s of picture and 12 s of sound (the container reported 12.01 s), and `--filler` removed nothing. The sound is now cut by tagging the frames the same `between()` expression keeps (`ametadata=mode=add` with a timeline `enable`) and keeping the tagged ones (`ametadata=mode=select`). That keeps exactly the frames `aselect` kept on every other release, in a command no longer than before.
+- **Multi-line titles and lower-thirds have no box at the line break.** FFmpeg 8.0, 8.0.1 and 8.1.0 pass each line of a multi-line `drawtext` to HarfBuzz with its newline, so the font's missing-glyph box is drawn at the end of every line but the last and counted in `text_w`. 8.0.2 and 8.1.1 fix it. On those releases `graphics.py --text-render auto` renders a label that is drawn on more than one line through libass (`text_renderer: "ass"`), whether the newline was given or added by the wrap. A pinned `--text-render drawtext` keeps drawtext and warns. `overlay.py --text`, which has no libass route, warns and adds a `notes` line. The release is read with a new `ffmpeg_release()`, because `ffmpeg_version()`'s major.minor cannot tell 8.1.0 from 8.1.1.
+- ci: the Python 3.9 jobs run on `ubuntu-24.04`, since Ubuntu 26.04 has no Python 3.9 build.
 
 ## 2.10.8
 
