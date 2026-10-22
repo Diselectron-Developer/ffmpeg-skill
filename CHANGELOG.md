@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.10.9
+
+_Automated release: version and notes generated from pull requests merged since 2.10.8._
+
 ### Added
 
 - **`doctor` warns when the FFmpeg it runs is older than the upstream fix for a known high-severity CVE.** ffmpeg-skill does not ship FFmpeg, so a decoder bug in the installed build stays until the user upgrades it. `doctor --json` has a new `ffmpeg_security` field (`source`, `checked`, per-binary `version`/`status`/`advisories`, `warnings`), and each older version gets one `warning:` line on stderr. The table is small, dated and hand-maintained from https://ffmpeg.org/security.html (checked 2026-10-22). It holds CVE-2026-8461 ("PixelSmash", MagicYUV decoder heap out-of-bounds write, CVSS 8.8), fixed in 8.0.3, 8.1.2 and 9.0. A version on an older branch with no fixed release (7.1, 6.1, ...) is compared with 8.0.3. The line never says the build is vulnerable: an Ubuntu (`8.0.1-3ubuntu2`) or Debian (`+deb13u1`) package may carry the fix as a backport under the old number, and the line says so and names the update command. An unparseable version (a git snapshot) gets no warning. It is advice only: `ok`, every tool's `usable` and the exit code are unchanged, and nothing is fetched. AISLE's CVE-2026-64830..64835 are not on security.html yet and have no row.
@@ -20,6 +26,7 @@ Three failures on Ubuntu 26.04 (`ubuntu-latest` since 2026-10-21), whose apt FFm
 - **`silence.py` cuts the sound as well as the picture.** FFmpeg 8.0 and 8.0.1 ship an `aselect` that passes every frame through: its `activate` callback was lost when the filter was converted, and 8.0.2 and 8.1 restore it. On those builds a 12 s talk came out with 6.75 s of picture and 12 s of sound (the container reported 12.01 s), and `--filler` removed nothing. The sound is now cut by tagging the frames the same `between()` expression keeps (`ametadata=mode=add` with a timeline `enable`) and keeping the tagged ones (`ametadata=mode=select`). That keeps exactly the frames `aselect` kept on every other release, in a command no longer than before.
 - **Multi-line titles and lower-thirds have no box at the line break.** FFmpeg 8.0, 8.0.1 and 8.1.0 pass each line of a multi-line `drawtext` to HarfBuzz with its newline, so the font's missing-glyph box is drawn at the end of every line but the last and counted in `text_w`. 8.0.2 and 8.1.1 fix it. On those releases `graphics.py --text-render auto` renders a label that is drawn on more than one line through libass (`text_renderer: "ass"`), whether the newline was given or added by the wrap. A pinned `--text-render drawtext` keeps drawtext and warns. `overlay.py --text`, which has no libass route, warns and adds a `notes` line. The release is read with a new `ffmpeg_release()`, because `ffmpeg_version()`'s major.minor cannot tell 8.1.0 from 8.1.1.
 - ci: the Python 3.9 jobs run on `ubuntu-24.04`, since Ubuntu 26.04 has no Python 3.9 build.
+- fix: FFmpeg 8.0.1 (Ubuntu 26.04) failures; doctor CVE advisory; deprecate Python 3.9 (#346)
 
 ## 2.10.8
 
