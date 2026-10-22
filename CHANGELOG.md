@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.10.10
+
+_Automated release: version and notes generated from pull requests merged since 2.10.9._
+
 ### Fixed
 
 - **The Python 3.9 deprecation is dated 2.10.9, the release that shipped it.** The warning, `contract --json`'s `deprecated` entry and the docs said 2.11.0, the version the change was written for before the automated release numbered it 2.10.9.
+- fix: date the Python 3.9 deprecation 2.10.9, the release that shipped it (#347)
 
 ## 2.10.9
 
