@@ -901,6 +901,7 @@
   "name": "render",
   "properties": [
    "argv",
+   "audit_log",
    "brand",
    "cache",
    "chapters",

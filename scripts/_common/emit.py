@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from _common.runner import Context, ERROR_CODE, ERROR_RETRYABLE, STATE
 
 
-def die(msg: str, code: int = 1, kind: str = "input", *, ctx: "Optional[Context]" = None, **extra: Any) -> "None":
+def die(msg: str, code: int = 1, kind: str = "input", *, ctx: "Optional[Context]" = None,
+        error_extra: "Optional[Dict[str, Any]]" = None, **extra: Any) -> "None":
     """Exit with a message. Under --json also print a machine-readable failure document
     (status: failed) on stdout so callers get the same shape as a success; exit codes are unchanged.
 
@@ -21,7 +22,10 @@ def die(msg: str, code: int = 1, kind: str = "input", *, ctx: "Optional[Context]
     platform rows, render.py's check stage, batch.py's per-item results, verify.py's steps) keeps
     reporting that detail while the top-level status says failed. Before 1.4.3 those four printed
     `status: "completed"` next to a non-zero exit code, so a caller keying on the status alone
-    read a failed delivery as a success."""
+    read a failed delivery as a success.
+
+    `error_extra` goes inside `error` (refuse() passes `reason` and `details` there); the
+    collector's records (warn() and friends) are merged into the document as emit() merges them."""
     hint = extra.pop("hint", None)
     ctx = ctx or STATE  # 1.10: the optional per-request Context (2.0 makes it required); STATE is the default instance
     _set_current_ctx(ctx)  # the atexit hook has no argument: it reads the ctx emit()/die() last used
@@ -48,9 +52,101 @@ def die(msg: str, code: int = 1, kind: str = "input", *, ctx: "Optional[Context]
         }
         if hint:
             doc["error"]["hint"] = hint
+        for key, value in (error_extra or {}).items():
+            if value is not None:
+                doc["error"][key] = value
         doc.update(extra)
+        _merge_collector(doc, ctx)
         print_json(doc)
     sys.exit(code)
+
+
+def refuse(kind: str, reason: str, msg: str, *, hint: Optional[str] = None, code: int = 1,
+           ctx: "Optional[Context]" = None, extra: "Optional[Dict[str, Any]]" = None, **details: Any) -> "None":
+    """die() for a refusal a caller has to act on: `error.reason` is a stable snake_case code for
+    *why* (output_exists, output_is_input, output_locked, plan_inputs_changed, ...), and
+    `error.details` holds the facts the message is written from (paths, expected and actual
+    values), so a caller never parses the prose. `extra` adds top-level keys as die()'s do."""
+    die(msg, code=code, kind=kind, ctx=ctx, hint=hint, error_extra={"reason": reason, "details": json_safe(details)}, **(extra or {}))
+
+
+def _record(bucket: str, msg: str, code: str, ctx: "Optional[Context]", data: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+    ctx = ctx or STATE
+    entry: Dict[str, Any] = {"code": code, "message": msg}
+    entry.update(data)
+    getattr(ctx, bucket).append(entry)
+    sys.stderr.write(f"{prefix}{msg}\n")
+    return entry
+
+
+def warn(msg: str, code: str, *, ctx: "Optional[Context]" = None, **data: Any) -> Dict[str, Any]:
+    """Say something went other than asked, on stderr AND in the document
+    (`diagnostics.warnings`: {code, message, ...data}). Use it where a bare info("warning: ...")
+    would leave the caller of --json nothing to read."""
+    return _record("warnings", msg, code, ctx, data, "warning: ")
+
+
+def record_fallback(msg: str, code: str, *, ctx: "Optional[Context]" = None, **data: Any) -> Dict[str, Any]:
+    """The run took another route than the asked one and went on (`diagnostics.fallbacks`)."""
+    return _record("fallbacks", msg, code, ctx, data, "")
+
+
+def record_skip(msg: str, code: str, *, ctx: "Optional[Context]" = None, **data: Any) -> Dict[str, Any]:
+    """A step that was asked for, or would normally run, did not (`diagnostics.skipped`)."""
+    return _record("skipped", msg, code, ctx, data, "")
+
+
+def note(msg: str, ctx: "Optional[Context]" = None) -> None:
+    """A plain `notes` line that also goes to stderr."""
+    ctx = ctx or STATE
+    if msg not in ctx.notes:
+        ctx.notes.append(msg)
+    sys.stderr.write(f"{msg}\n")
+
+
+def _merge_collector(doc: Dict[str, Any], ctx: "Context") -> None:
+    """The collector into a result or failure document: ctx.notes join `notes` (once each), and
+    the three record lists become `diagnostics`, present only when one of them is not empty
+    (`warnings` and `skipped` are not top-level keys: check.py's `warnings` is a count and join.py's
+    `skipped` its left-out inputs)."""
+    extra_notes = [n for n in ctx.notes if n not in (doc.get("notes") or [])]
+    if extra_notes:
+        doc["notes"] = list(doc.get("notes") or []) + extra_notes
+    diag = {k: list(getattr(ctx, k)) for k in ("warnings", "fallbacks", "skipped") if getattr(ctx, k)}
+    if diag:
+        merged = dict(doc.get("diagnostics") or {})
+        for k, v in diag.items():
+            merged[k] = list(merged.get(k) or []) + [e for e in v if e not in (merged.get(k) or [])]
+        doc["diagnostics"] = merged
+
+
+def audit(event: str, details: Dict[str, Any], *, default_path: Optional[str] = None, plan_sha256: Optional[str] = None,
+          ctx: "Optional[Context]" = None) -> Dict[str, Any]:
+    """Append one JSON line to the audit log: {ts, tool, event, pid, plan_sha256?, details}.
+    The log is render.py's --audit-log FILE when given, else the event's own `default_path` (a
+    plan's `<plan>.audit.jsonl`, a lock's hidden sibling); neither = nothing to write. Never under
+    --dry-run (a dry run writes nothing). A write that fails is a recorded warning, never a
+    failure of the run. Returns what happened, for the caller's `details.audit_log`."""
+    import datetime
+    ctx = ctx or STATE
+    path = ctx.audit_log or default_path
+    if not path:
+        return {"path": None, "written": False, "reason": "no_audit_log"}
+    if ctx.dry_run:
+        return {"path": path, "written": False, "reason": "dry_run"}
+    rec: Dict[str, Any] = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                           "tool": os.path.splitext(os.path.basename(sys.argv[0] or "?"))[0], "event": event, "pid": os.getpid()}
+    if plan_sha256:
+        rec["plan_sha256"] = plan_sha256
+    rec["details"] = details
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(json_safe(rec), ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError as exc:
+        warn(f"could not append the {event} record to the audit log {path} ({exc}); the run is unaffected",
+             "audit_log_unwritable", ctx=ctx, path=path, event=event, error=str(exc))
+        return {"path": path, "written": False, "reason": "unwritable", "error": str(exc)}
+    return {"path": path, "written": True}
 
 
 def info(msg: str, ctx: "Optional[Context]" = None) -> None:
@@ -195,6 +291,24 @@ def absorb_stage_hw(stage: str, doc: Any, ctx: "Optional[Context]" = None) -> No
                           "used": hw.get("used"), "fallback": bool(hw.get("fallback")), "quality_note": quality})
 
 
+def absorb_stage(stage: str, doc: Any, ctx: "Optional[Context]" = None) -> Dict[str, Any]:
+    """A child tool's --json document into this result: its `hw` facts (absorb_stage_hw) and its
+    `diagnostics` records, each tagged with the stage it came from. Returns the fields a re-raise
+    of the stage's failure carries in its own `error`: the child's `reason` and `details`."""
+    ctx = ctx or STATE
+    absorb_stage_hw(stage, doc, ctx)
+    if not isinstance(doc, dict):
+        return {}
+    for bucket in ("warnings", "fallbacks", "skipped"):
+        for entry in (doc.get("diagnostics") or {}).get(bucket) or []:
+            if isinstance(entry, dict):
+                tagged = dict(entry, stage=entry.get("stage") or stage)
+                if tagged not in getattr(ctx, bucket):
+                    getattr(ctx, bucket).append(tagged)
+    err = doc.get("error") if isinstance(doc.get("error"), dict) else {}
+    return {k: err[k] for k in ("reason", "details") if err.get(k) is not None}
+
+
 def steps_encoder_report(steps: Sequence["Tuple[str, Any]"]) -> Dict[str, Any]:
     """batch.py's per-item `encoder`, `hw` and `notes`, from the --json documents of the steps
     (child processes) that made the item: the last encoder a step ran (a later stream copy keeps
@@ -246,6 +360,7 @@ def emit(output: Optional[str], *, ctx: "Optional[Context]" = None, **extra: Any
         hw_notes = [n for n in _hw_notes_for(ctx) if n not in (doc.get("notes") or [])]
         if hw_notes:
             doc["notes"] = list(doc.get("notes") or []) + hw_notes
+        _merge_collector(doc, ctx)
         if ctx.plan:
             doc["plan"] = write_plan(ctx.plan, output, extra, ctx=ctx)
         print_json(_brief(doc, meta) if ctx.json_brief else doc)
@@ -345,6 +460,41 @@ def _plan_inputs(commands: Sequence[str], argv: Sequence[str] = (), ctx: "Option
     return seen
 
 
+def _plan_unbound_inputs(commands: Sequence[str], ctx: "Optional[Context]" = None) -> List[str]:
+    """The inputs _plan_inputs() could not fingerprint because they did not exist when the plan
+    was made: a planned command's `-i` file (or a side input registered through
+    escape_filter_path) that is not on disk and is not written by an earlier planned command (the
+    tool's own intermediates are bound by the command that makes them). render.py reports them on
+    execution: nothing checks that their content is what the plan was made for."""
+    import shlex
+    produced: List[str] = []
+    out: List[str] = []
+
+    def consider(p: str) -> None:
+        if (not p or p == "-" or p.startswith("pipe:") or os.path.exists(p)
+                or os.path.abspath(p) in produced or os.path.abspath(p) in out):
+            return
+        out.append(os.path.abspath(p))
+    for p in (ctx or STATE).plan_inputs:
+        consider(p)
+    for line in commands:
+        try:
+            toks = shlex.split(line.split("] ", 1)[1] if line.startswith("[dry-run] ") else line)
+        except ValueError:
+            continue
+        fmt = None  # an input's -f (lavfi's "inputs" are filter graphs, not files)
+        for i, tok in enumerate(toks[:-1]):
+            if tok == "-f":
+                fmt = toks[i + 1]
+            elif tok == "-i":
+                if fmt != "lavfi":
+                    consider(toks[i + 1])
+                fmt = None
+        if toks:
+            produced.append(os.path.abspath(toks[-1]))
+    return out
+
+
 def write_plan(path: str, output: Optional[str], extra: Dict[str, Any], ctx: "Optional[Context]" = None) -> str:
     """The dry run as an artifact: what will run, on which exact inputs, producing what, checked
     how. `render.py PLAN` executes it after re-fingerprinting the inputs (issue #189 C).
@@ -382,6 +532,8 @@ def write_plan(path: str, output: Optional[str], extra: Dict[str, Any], ctx: "Op
         "argv": cleaned,
         "cwd": os.getcwd(),
         "inputs": [fingerprint(p) for p in _plan_inputs(ctx.commands, cleaned, ctx)],
+        # inputs that did not exist yet, so carry no fingerprint (render.py reports them on execution)
+        "unbound_inputs": _plan_unbound_inputs(ctx.commands, ctx),
         "commands": list(ctx.commands),
         "output": os.path.abspath(output) if output else None,
         "verify": verify,

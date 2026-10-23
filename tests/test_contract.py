@@ -2984,6 +2984,129 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(json.loads(proc.stdout)["error"]["kind"], "input")
         self.assertIn("changed", json.loads(proc.stdout)["error"]["message"])
 
+    def test_a_refused_plan_says_what_changed_and_leaves_an_audit_record(self):
+        """docs/design-decisions.md, "Nothing happens silently": a refused plan named the changed
+        input only in prose. The refusal now carries error.reason plan_inputs_changed and
+        error.details (each input's expected and actual size + head/tail hash, or "missing"; the
+        plan's sha256; when it was checked) and appends one JSON line to <plan>.audit.jsonl, or to
+        --audit-log FILE. A log that cannot be written is a warning, never the failure."""
+        import hashlib
+        src = self.out("aud_src.mp4"); shutil.copy(self.src, src)
+        plan = self.out("aud_plan.json"); out = self.out("aud_out.mp4")
+        tool("cut", src, "--start", "0", "--end", "1", "-o", out, "--plan", plan)
+        p = json.loads(plan.read_text())
+        self.assertEqual(p["unbound_inputs"], [])
+        ffmpeg("-i", self.src, "-t", "0.5", "-c", "copy", "-y", src)
+        log = Path(str(plan) + ".audit.jsonl")
+        # a dry run predicts the refusal and writes nothing, the audit log included
+        doc = json.loads(tool("render", plan, "--dry-run", "--json", check=False).stdout)
+        self.assertEqual(doc["error"]["reason"], "plan_inputs_changed")
+        self.assertEqual(doc["error"]["details"]["audit_log"], {"path": str(log), "written": False, "reason": "dry_run"})
+        self.assertFalse(log.exists())
+        proc = tool("render", plan, "--json", check=False)
+        err = json.loads(proc.stdout)["error"]
+        self.assertEqual((err["kind"], err["reason"]), ("input", "plan_inputs_changed"))
+        self.assertIn("changed", err["message"])
+        d = err["details"]
+        self.assertEqual(d["plan_sha256"], hashlib.sha256(plan.read_bytes()).hexdigest())
+        self.assertRegex(d["checked_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        row = d["inputs"][0]
+        self.assertEqual((row["path"], row["status"]), (str(src), "changed"))
+        self.assertEqual(row["expected"], {"size": p["inputs"][0]["size"], "sha256_head_tail": p["inputs"][0]["sha256_head_tail"]})
+        self.assertEqual(row["actual"]["size"], src.stat().st_size)
+        self.assertNotEqual(row["actual"]["sha256_head_tail"], row["expected"]["sha256_head_tail"])
+        self.assertEqual(d["audit_log"], {"path": str(log), "written": True})
+        rec = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual((rec["event"], rec["tool"], rec["plan_sha256"]), ("plan_rejected", "render", d["plan_sha256"]))
+        self.assertEqual(rec["details"]["inputs"], d["inputs"])
+        self.assertTrue(rec["ts"].endswith("Z"))
+        # a missing input: actual "missing"; --audit-log names another file
+        src.unlink()
+        other = self.out("aud_other.jsonl")
+        err = json.loads(tool("render", plan, "--json", "--audit-log", other, check=False).stdout)["error"]
+        self.assertEqual((err["details"]["inputs"][0]["status"], err["details"]["inputs"][0]["actual"]), ("missing", "missing"))
+        self.assertEqual(json.loads(other.read_text(encoding="utf-8"))["event"], "plan_rejected")
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1, "--audit-log replaced the default")
+        # an audit log that cannot be written: recorded, and the refusal is still the refusal
+        doc = json.loads(tool("render", plan, "--json", "--audit-log", self.work / "no_such_dir" / "a.jsonl", check=False).stdout)
+        self.assertEqual(doc["error"]["reason"], "plan_inputs_changed")
+        self.assertFalse(doc["error"]["details"]["audit_log"]["written"])
+        self.assertEqual([w["code"] for w in doc["diagnostics"]["warnings"]], ["audit_log_unwritable"])
+        # the neighbours are structured too
+        bad = self.out("aud_v2.json"); bad.write_text(json.dumps(dict(p, plan_version=99)))
+        err = json.loads(tool("render", bad, "--json", check=False).stdout)["error"]
+        self.assertEqual((err["reason"], err["details"]["plan_version"]), ("plan_version_unsupported", 99))
+        bad.write_text(json.dumps(dict(p, tool="nope")))
+        self.assertEqual(json.loads(tool("render", bad, "--json", check=False).stdout)["error"]["reason"], "plan_unknown_tool")
+
+    def test_a_plan_names_the_inputs_it_could_not_bind_and_render_reports_them(self):
+        """_plan_inputs() skips an input that does not exist yet (an earlier step's output), so
+        nothing fingerprinted it and nothing said so. The plan now lists it under unbound_inputs
+        and render.py reports it on execution: a top-level unbound_inputs and a
+        diagnostics.warnings entry."""
+        a = self.out("ub_a.mp4"); shutil.copy(self.src, a)
+        pending = self.out("ub_pending.mp4")
+        if pending.exists():
+            pending.unlink()
+        plan = self.out("ub_plan.json"); out = self.out("ub_out.mp4")
+        tool("join", a, pending, "--transition", "none", "-o", out, "--plan", plan)
+        p = json.loads(plan.read_text())
+        self.assertEqual(p["unbound_inputs"], [str(pending)])
+        self.assertEqual([i["path"] for i in p["inputs"]], [str(a)])
+        shutil.copy(self.src, pending)
+        doc = json.loads(tool("render", plan, "--json").stdout)
+        self.assertEqual(doc["status"], "completed")
+        self.assertEqual(doc["unbound_inputs"], [str(pending)])
+        warning = doc["diagnostics"]["warnings"][0]
+        self.assertEqual((warning["code"], warning["paths"]), ("plan_unbound_inputs", [str(pending)]))
+
+    def test_refusals_at_the_runner_choke_points_carry_a_reason_and_details(self):
+        """The runner's guards refused in prose only. Each now names error.reason and the facts in
+        error.details; render.py executing a plan forwards its tool's reason and details."""
+        out = self.out("rf_exists.mp4"); out.write_bytes(b"theirs")
+        err = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", out, "--json", check=False).stdout)["error"]
+        self.assertEqual(err["reason"], "output_exists")
+        self.assertEqual(err["details"]["outputs"][0]["path"], str(out))
+        self.assertEqual(err["details"]["outputs"][0]["size"], 6)
+        clone = self.out("rf_same.mp4"); shutil.copy(self.src, clone)
+        err = json.loads(tool("crop", clone, "--x", "0", "--y", "0", "--width", "32", "--height", "32", "--json",
+                              "-o", self.work / ("." + os.sep + clone.name), check=False).stdout)["error"]
+        self.assertEqual((err["reason"], err["details"]["resolved"]), ("output_is_input", os.path.realpath(clone)))
+        err = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", self.work / "nodir" / "x.mp4", "--json", check=False).stdout)["error"]
+        self.assertEqual((err["reason"], err["details"]["directory"]), ("output_dir_missing", str(self.work / "nodir")))
+        err = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", self.work, "--json", check=False).stdout)["error"]
+        self.assertEqual(err["reason"], "output_is_directory")
+        # a plan whose output now exists: render re-raises the tool's own structured refusal
+        plan = self.out("rf_plan.json"); pout = self.out("rf_plan_out.mp4")
+        tool("cut", self.src, "--start", "0", "--end", "1", "-o", pout, "--plan", plan)
+        pout.write_bytes(b"theirs")
+        err = json.loads(tool("render", plan, "--json", check=False).stdout)["error"]
+        self.assertEqual((err["kind"], err["reason"]), ("input", "output_exists"))
+        self.assertEqual(err["details"]["outputs"][0]["path"], str(pout))
+
+    def test_a_stale_lock_taken_over_is_recorded_in_the_document_and_the_audit_log(self):
+        """A dead writer's lock was taken over without a word. The run now records it
+        (diagnostics.fallbacks, stderr) and appends a lock_takeover line to the hidden
+        .<output>.ffskill-audit.jsonl; render.py carries a stage's record with its stage name."""
+        out = self.out("lk_out.mp4")
+        lock = self.out(".lk_out.mp4.ffskill-lock"); lock.write_text("999999")
+        proc = tool("cut", self.src, "--start", "0", "--end", "1", "-o", out, "--json")
+        doc = json.loads(proc.stdout)
+        fb = doc["diagnostics"]["fallbacks"][0]
+        self.assertEqual((fb["code"], fb["why"], fb["pid"], fb["pid_alive"]), ("stale_lock_taken_over", "pid_dead", 999999, False))
+        self.assertIn("took over the stale output lock", proc.stderr)
+        rec = json.loads(self.out(".lk_out.mp4.ffskill-audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual((rec["event"], rec["tool"], rec["details"]["pid"]), ("lock_takeover", "cut", 999999))
+        # through render executing a plan: the stage's record comes back tagged
+        plan = self.out("lk_plan.json"); pout = self.out("lk_plan_out.mp4")
+        tool("cut", self.src, "--start", "0", "--end", "1", "-o", pout, "--plan", plan)
+        self.out(".lk_plan_out.mp4.ffskill-lock").write_text("999999")
+        doc = json.loads(tool("render", plan, "--json").stdout)
+        fb = doc["diagnostics"]["fallbacks"][0]
+        self.assertEqual((fb["code"], fb["stage"]), ("stale_lock_taken_over", "cut"))
+        for name in (".lk_out.mp4.ffskill-audit.jsonl", ".lk_plan_out.mp4.ffskill-audit.jsonl"):
+            self.out(name).unlink()
+
     def test_fifth_review_regressions(self):
         """Review 5 (2026-09-12): render refuses an output that is one of its clip sources (it
         overwrote the source and said completed); fit --method trim drops a subtitle track whose
@@ -3118,11 +3241,13 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(json.loads(proc.stdout)["error"]["kind"], kind)
             self.assertTrue(keep.exists(), f"failed run deleted a pre-existing output ({extra})")
             self.assertEqual((keep.stat().st_size, keep.stat().st_mtime_ns), before, "pre-existing output was modified")
-            self.assertEqual([p.name for p in keep.parent.glob(".*ffskill*")], [], "temp file left behind after a failure")
+            # a lock takeover's audit log (another test's) is a deliberate record, not a temp file
+            self.assertEqual([p.name for p in keep.parent.glob(".*ffskill*") if not p.name.endswith(".ffskill-audit.jsonl")], [],
+                             "temp file left behind after a failure")
         # success replaces the file, through the same temp path, and leaves no temp behind
         self.assertEqual(tool("cut", self.src, "--start", "0", "--end", "2", "--overwrite", "-o", keep).returncode, 0)
         self.assertNotEqual(keep.stat().st_size, before[0])
-        self.assertEqual([p.name for p in keep.parent.glob(".*ffskill*")], [])
+        self.assertEqual([p.name for p in keep.parent.glob(".*ffskill*") if not p.name.endswith(".ffskill-audit.jsonl")], [])
         # a fresh path that the failed run created is still cleaned up
         fresh = self.out("fresh.mp4")
         proc = tool("color", self.src, "--lut", bad, "--json", "-o", fresh, check=False)
@@ -3466,6 +3591,151 @@ class ContractTests(unittest.TestCase):
                 self._run_structured("look", {"input": doc["output"], "output": str(self.out(p.stem + "_look.png")), "json": True})
             after = self._sha(p) if p.stat().st_size < 50_000_000 else p.stat().st_size
             self.assertEqual(before, after, f"{p.name} modified")
+
+
+class SilentPathTests(unittest.TestCase):
+    """docs/design-decisions.md, "Nothing happens silently": the output lock's decisions, in
+    process, and the source-level checks that keep the runner's refusals structured."""
+
+    class Refused(Exception):
+        pass
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="ffskill_silent_")
+        self.out = os.path.join(self.tmp, "out.mp4")
+        self.lock = Path(self.tmp, ".out.mp4.ffskill-lock")
+        self.audit = Path(self.tmp, ".out.mp4.ffskill-audit.jsonl")
+        self.saved = (_common.STATE.timeout, _common.STATE.dry_run, _common.STATE.audit_log)
+        _common.STATE.dry_run, _common.STATE.audit_log = False, None
+        for bucket in ("warnings", "fallbacks", "skipped", "notes"):
+            setattr(_common.STATE, bucket, [])
+
+    def tearDown(self):
+        _common.STATE.timeout, _common.STATE.dry_run, _common.STATE.audit_log = self.saved
+        for bucket in ("warnings", "fallbacks", "skipped", "notes"):
+            setattr(_common.STATE, bucket, [])
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def enter(self, at=None):
+        """Take the lock (time.time() reads `at` when given); return the refusal's kwargs or None."""
+        from unittest import mock
+
+        def refuse(kind, reason, msg, **kw):
+            raise self.Refused(dict(kw, kind=kind, reason=reason, message=msg))
+        import contextlib
+        try:
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch("_common.runner.refuse", refuse))
+                if at is not None:
+                    stack.enter_context(mock.patch("time.time", lambda: at))
+                with _common._OutputLock(self.out):
+                    return None
+        except self.Refused as r:
+            return r.args[0]
+
+    def test_a_live_holder_keeps_its_lock_past_an_hour_while_inside_its_own_limit(self):
+        """Through 2.10 a lock older than an hour was taken over even while its pid ran, so a
+        legitimate encode longer than an hour lost its lock to a second writer. The writer now
+        dates the lock to its own deadline (child_limit(): 4x --timeout + 60 s)."""
+        _common.STATE.timeout = 1800.0
+        lk = _common._OutputLock(self.out)
+        lk.__enter__()
+        try:
+            self.assertEqual(self.lock.read_text(), str(os.getpid()))
+            refused = self.enter(at=time.time() + 5400)  # 1.5 h later, inside 4 x 1800 + 60 s
+            self.assertIsNotNone(refused, "a live holder inside its own limit lost its lock")
+            self.assertEqual((refused["reason"], refused["pid"], refused["pid_alive"], refused["why"]),
+                             ("output_locked", os.getpid(), True, "held"))
+            self.assertEqual(refused["lock"], str(self.lock))
+            late = self.enter(at=time.time() + 7400)
+            if platform.system() == "Windows":
+                # Windows cannot delete a lock file its holder still has open: the takeover fails,
+                # and the refusal says why rather than the failure passing silently
+                self.assertIsNotNone(late, "an open lock cannot be deleted on Windows")
+                self.assertEqual((late["reason"], late["why"]), ("output_locked", "past_deadline"))
+                self.assertIn("takeover_error", late)
+                return
+            self.assertIsNone(late, "past its limit, a live pid is taken over")
+            fb = _common.STATE.fallbacks[-1]
+            self.assertEqual((fb["code"], fb["why"], fb["pid_alive"]), ("stale_lock_taken_over", "past_deadline", True))
+            self.assertEqual(json.loads(self.audit.read_text(encoding="utf-8"))["event"], "lock_takeover")
+        finally:
+            lk.__exit__()
+
+    def test_a_takeover_that_cannot_delete_the_lock_is_refused_with_the_reason(self):
+        """On Windows a lock its live holder still has open cannot be deleted; that failure used to
+        be swallowed (`except OSError: pass`). It now refuses with `takeover_error`."""
+        from unittest import mock
+        _common.STATE.timeout = 1800.0
+        lk = _common._OutputLock(self.out)
+        lk.__enter__()
+        try:
+            with mock.patch("os.remove", side_effect=PermissionError("in use by another process")):
+                late = self.enter(at=time.time() + 7400)
+            self.assertIsNotNone(late)
+            self.assertEqual((late["reason"], late["why"]), ("output_locked", "past_deadline"))
+            self.assertIn("in use by another process", late["takeover_error"])
+        finally:
+            lk.__exit__()
+
+    def test_with_no_time_limit_a_live_holders_lock_is_never_taken_over(self):
+        _common.STATE.timeout = 0.0
+        lk = _common._OutputLock(self.out)
+        lk.__enter__()
+        try:
+            self.assertIsNotNone(self.enter(at=time.time() + 5 * 365 * 86400))
+        finally:
+            lk.__exit__()
+
+    def test_a_lock_an_older_version_wrote_is_taken_over_after_an_hour_as_before(self):
+        self.lock.write_text(str(os.getpid()))
+        self.assertIsNotNone(self.enter(at=time.time() + 600))
+        self.assertIsNone(self.enter(at=time.time() + 3700))
+        self.assertEqual(_common.STATE.fallbacks[-1]["why"], "past_deadline")
+
+    def test_running_without_a_lock_is_a_recorded_warning(self):
+        """An unlockable location (os.open fails with something other than EEXIST) ran with no
+        lock and no record. It is now a diagnostics.warnings entry and an audit attempt."""
+        from unittest import mock
+        real_open = os.open
+
+        def no_lock(path, *a, **k):
+            if str(path).endswith(".ffskill-lock"):
+                raise PermissionError(13, "Permission denied", path)
+            return real_open(path, *a, **k)
+        with mock.patch("os.open", no_lock):
+            with _common._OutputLock(self.out):
+                pass
+        w = _common.STATE.warnings[-1]
+        self.assertEqual((w["code"], w["lock"]), ("output_unlocked", str(self.lock)))
+        self.assertEqual(json.loads(self.audit.read_text(encoding="utf-8"))["event"], "output_unlocked")
+
+    def test_a_failed_audit_write_is_a_warning_not_a_failure(self):
+        res = _common.audit("lock_takeover", {"x": 1}, default_path=os.path.join(self.tmp, "missing", "a.jsonl"))
+        self.assertEqual((res["written"], res["reason"]), (False, "unwritable"))
+        self.assertEqual(_common.STATE.warnings[-1]["code"], "audit_log_unwritable")
+        _common.STATE.dry_run = True
+        self.assertEqual(_common.audit("x", {}, default_path=str(self.audit))["reason"], "dry_run")
+        self.assertFalse(self.audit.exists())
+
+    def test_every_refusal_reason_is_in_the_contract_and_the_runner_guards_use_refuse(self):
+        """error.reason is a contract enum (json_output.error_reasons): every refuse(kind, "reason",
+        ...) literal under scripts/ must be listed there, and the runner's output guards must refuse
+        (structured), not die (prose only)."""
+        import inspect
+        reasons = set()
+        for path in script_sources():
+            text = path.read_text(encoding="utf-8")
+            reasons |= set(re.findall(r'\brefuse\(\s*"[a-z_]+",\s*"([a-z_]+)"', text))
+            reasons |= set(re.findall(r'_reject_plan\(path, digest, "([a-z_]+)"', text))
+        self.assertTrue(reasons)
+        self.assertEqual(sorted(reasons - set(_contract.ERROR_REASONS)), [], "refusal reasons missing from _contract.ERROR_REASONS")
+        self.assertEqual(sorted(set(_contract.ERROR_REASONS) - reasons), [], "_contract.ERROR_REASONS lists a reason nothing refuses with")
+        runner = sys.modules["_common.runner"]
+        for fn in (runner._check_no_overwrite_input, runner.refuse_output_is_input, runner._check_output_path,
+                   runner.refuse_existing_outputs, runner._OutputLock.__enter__):
+            src = inspect.getsource(fn)
+            self.assertNotRegex(src, r"(?<![\w.])die\(", f"{fn.__qualname__} refuses in prose only (use refuse())")
 
 
 class FfmpegSecurityTableTests(unittest.TestCase):
