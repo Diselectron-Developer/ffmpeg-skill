@@ -51,6 +51,8 @@ from _common import emoji_filter_chain, EMOJI_ASSET_HINT, emoji_asset_for, emoji
 # caption.parse_srt / caption.transcribe / caption.whisper_word_timings before 1.17 still does.
 from _common import asr as _asr
 from _common.asr import ENGINE_CHOICES
+from _common.emit import warn
+from _common.fonts import font_choice, record_font_choice
 from _common import (ASR_INSTALL_HINT, die_no_engine, parse_srt, transcribe, whisper_word_timings,
                      write_srt)
 from _common import (SAFE_WIDTH_FRACTION, ORPHAN_MIN_EM, WRAP_MODES, wrap_text, wrap_variants, best_break,
@@ -219,8 +221,8 @@ def plan_emoji(cues, args, play_w, play_h, brand=None):
         return out, plan
     if mode in ("color", "mono"):
         if mode == "mono":
-            info("warning: emoji rendered monochrome (no colour path on this ffmpeg; "
-                 "--emoji-assets DIR for colour). " + support["detail"])
+            warn("emoji rendered monochrome (no colour path on this ffmpeg; "
+                 "--emoji-assets DIR for colour). " + support["detail"], "emoji_monochrome")
         return cues, plan
     # --- the PNG overlay route -------------------------------------------------------------
     if not play_w or not play_h:
@@ -295,8 +297,8 @@ def plan_emoji(cues, args, play_w, play_h, brand=None):
             "--emoji-max raises it); ffmpeg's filter graph and the per-frame cost both grow "
             "linearly -- split the job, or use --emoji none", kind="input")
     if plan["missing"]:
-        info("warning: no PNG in the assets directory for " + ", ".join(plan["missing"]) +
-             " -- those clusters are drawn by the text font instead")
+        warn("no PNG in the assets directory for " + ", ".join(plan["missing"]) +
+             " -- those clusters are drawn by the text font instead", "emoji_assets_missing", missing=list(plan["missing"]))
     plan["box_px"] = int(round(box_px))
     return out_cues, plan
 
@@ -493,13 +495,16 @@ def parse_ass_dialogue(path: str) -> str:
     return "\n".join(text)
 
 
-def parse_ass_cues(path: str) -> List[Tuple[float, float, str]]:
-    """(start, end, drawn text) of every Dialogue line of an ASS file, override blocks stripped."""
+def parse_ass_cues(path: str, stats: Optional[dict] = None) -> List[Tuple[float, float, str]]:
+    """(start, end, drawn text) of every Dialogue line of an ASS file, override blocks stripped.
+    A Dialogue line with too few fields or an unreadable start/end is left out; `stats`, when
+    given, gets their number as `malformed` so the caller can say how many it could not count."""
     def secs(stamp: str) -> float:
         h, m, rest = stamp.strip().split(":")
         return int(h) * 3600 + int(m) * 60 + float(rest)
 
     cues: List[Tuple[float, float, str]] = []
+    malformed = 0
     # the [Events] Format line names the columns; Text is always last (libass reads it the same
     # way), and a file without one gets the standard ten
     names = ["layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect", "text"]
@@ -511,13 +516,17 @@ def parse_ass_cues(path: str) -> List[Tuple[float, float, str]]:
             continue
         fields = line.partition(":")[2].split(",", len(names) - 1)
         if len(fields) < len(names) or "start" not in names or "end" not in names:
+            malformed += 1
             continue
         try:
             start, end = secs(fields[names.index("start")]), secs(fields[names.index("end")])
         except (ValueError, IndexError):
+            malformed += 1
             continue
         text = re.sub(r"\{[^}]*\}", "", fields[-1]).replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ")
         cues.append((start, end, text))
+    if stats is not None:
+        stats["malformed"] = malformed
     return cues
 
 
@@ -540,8 +549,17 @@ def count_visible_cues(cues, duration) -> Tuple[int, int]:
     return burned, outside
 
 
-def shift_ass_file(src: str, dst: str, offset: float) -> int:
-    """Copy an ASS file with every Dialogue start/end moved by `offset` seconds."""
+def shift_ass_file(src: str, dst: str, offset: float) -> Tuple[int, int]:
+    """Copy an ASS file with every Dialogue start/end moved by `offset` seconds; (lines shifted,
+    Dialogue lines copied unshifted because their timestamps could not be read)."""
+    text, n, unshifted = shift_ass_text(Path(src).read_text(encoding="utf-8-sig"), offset)
+    Path(dst).write_text(text, encoding="utf-8-sig")
+    return n, unshifted
+
+
+def shift_ass_text(source: str, offset: float) -> Tuple[str, int, int]:
+    """shift_ass_file() on text: (shifted text, lines shifted, Dialogue lines left as they were).
+    Pure, so a dry run can report the counts without writing the copy."""
     def shift(stamp: str) -> str:
         h, m, rest = stamp.split(":")
         secs = int(h) * 3600 + int(m) * 60 + float(rest) + offset
@@ -552,22 +570,25 @@ def shift_ass_file(src: str, dst: str, offset: float) -> int:
         ss, cc = divmod(rem, 100)
         return f"{hh}:{mm:02d}:{ss:02d}.{cc:02d}"
 
-    n = 0
+    n = unshifted = 0
     out = []
-    for line in Path(src).read_text(encoding="utf-8-sig").splitlines():
+    for line in source.splitlines():
         if line.startswith("Dialogue:"):
             head, sep, rest = line.partition(":")
             fields = rest.split(",")
+            done = False
             if len(fields) >= 3:
                 try:
                     fields[1], fields[2] = shift(fields[1].strip()), shift(fields[2].strip())
                     line = head + sep + ",".join(fields)
                     n += 1
+                    done = True
                 except (ValueError, IndexError):
                     pass
+            if not done:
+                unshifted += 1  # copied as it was: counted and reported, not dropped unseen
         out.append(line)
-    Path(dst).write_text("\n".join(out) + "\n", encoding="utf-8-sig")
-    return n
+    return "\n".join(out) + "\n", n, unshifted
 
 
 def word_durations_from_timings(words: List[Tuple[float, float, str]], start: float, end: float,
@@ -1296,6 +1317,7 @@ def main() -> int:
     planned_cues: Optional[List[Tuple[float, float, str]]] = None
     # an English-only transcript made on an assumption says so first (asr.assumed_english_note)
     side_notes: List[str] = list(getattr(args, "_asr_notes", None) or [])
+    ass_counts: dict = {}  # --ass: ass_shifted / ass_unshifted (with --offset) and ass_malformed, into `caption`
     ass_sample_path = args.ass
     if args.srt and not (args.text or args.transcribe) and os.path.exists(srt_path or ""):
         adjusted, changed = lay_out(parse_srt(srt_path))
@@ -1315,10 +1337,18 @@ def main() -> int:
     if args.ass and args.offset and os.path.exists(args.ass):
         shifted = os.path.splitext(output)[0] + "_offset.ass"
         if STATE.dry_run:
-            info(f"[dry-run] would write {shifted} (cues shifted by {args.offset:+g} s)")
+            _text, n, unshifted = shift_ass_text(read_text_or_die(args.ass, "--ass").lstrip("\ufeff"), args.offset)
+            info(f"[dry-run] would write {shifted} ({n} cues shifted by {args.offset:+g} s)")
         else:
-            n = shift_ass_file(args.ass, shifted, args.offset)
+            n, unshifted = shift_ass_file(args.ass, shifted, args.offset)
             info(f"wrote {shifted} ({n} cues shifted by {args.offset:+g} s)")
+        # the counts reach the document (caption.ass_shifted / ass_unshifted), and a line
+        # whose timestamps could not be read -- copied unshifted -- is a warning, not a silence
+        ass_counts.update(ass_shifted=n, ass_unshifted=unshifted)
+        if unshifted:
+            warn(f"{unshifted} Dialogue line(s) in {args.ass} have timestamps that could not be read, so they were not "
+                 f"shifted by {args.offset:+g} s (copied as they were)", "ass_lines_unshifted",
+                 path=args.ass, count=unshifted, offset=args.offset)
         args.ass = shifted
         side_notes.append(f"the burned subtitles are {shifted}, the offset copy of "
                           f"{os.path.basename(ass_sample_path)} this run writes"
@@ -1449,6 +1479,19 @@ def main() -> int:
     _script, font_file, font_family = script_font_for_text(
         sample, lang=args.language, font=args.font, font_explicit=font_explicit,
         fonts_dir=args.fonts_dir)
+    # the font libass draws with, reported as `font_used`: a --fonts-dir (or a brand's font
+    # file) is searched first for the family, by libass itself; otherwise fontconfig resolves it
+    if args.ass:
+        # the caller's own ASS names its fonts in its styles; this run does not choose them
+        font_used = {"asked": None, "file": None, "family": None, "how": "ass_styles",
+                     "fonts_dir": args.fonts_dir or (os.path.dirname(font_file) if font_file else None), "substituted": False}
+    elif font_file or not args.fonts_dir:
+        # the family libass is given is the sanitised one (ass_font_name): that is what it resolves
+        font_used = record_font_choice(font_choice(ass_font_name(args.font), script_file=font_file, script_family=font_family,
+                                                   renderer="libass"))
+    else:
+        font_used = {"asked": ass_font_name(args.font), "file": None, "family": ass_font_name(args.font), "how": "fonts_dir",
+                     "fonts_dir": args.fonts_dir, "substituted": False}
     if font_file:
         args.font = font_family or args.font
         if not args.fonts_dir:
@@ -1508,10 +1551,16 @@ def main() -> int:
         # a dry run's pending --ass (an earlier step writes it): nothing to count yet
         burn_cues = None
     elif args.ass:
+        parsed: dict = {}
         if planned_ass:  # dry run: the offset copy is not written yet, shift the caller's file
-            burn_cues = [(s + args.offset, e + args.offset, t) for s, e, t in parse_ass_cues(ass_sample_path)]
+            burn_cues = [(s + args.offset, e + args.offset, t) for s, e, t in parse_ass_cues(ass_sample_path, parsed)]
         else:
-            burn_cues = parse_ass_cues(args.ass)
+            burn_cues = parse_ass_cues(args.ass, parsed)
+        ass_counts["ass_malformed"] = parsed.get("malformed", 0)
+        if ass_counts["ass_malformed"]:
+            warn(f"{ass_counts['ass_malformed']} Dialogue line(s) in {ass_sample_path} could not be read (too few fields "
+                 "or an unreadable start/end) and are not counted as cues", "ass_lines_malformed",
+                 path=ass_sample_path, count=ass_counts["ass_malformed"])
         if not burn_cues:
             die(f"no Dialogue lines found in {ass_sample_path} -- nothing would be drawn", kind="input")
     elif planned_cues is not None:
@@ -1533,7 +1582,7 @@ def main() -> int:
         if outside:
             msg = (f"{outside} cue(s) fall outside the video (0\u2013{float(meta['duration']):.1f} s) "
                    "and are not drawn")
-            info(f"warning: {msg}")
+            warn(msg, "cues_outside_video", count=outside, duration=float(meta["duration"]))
             side_notes.append(msg)
         caption_stats["cues_burned"] = burned
         caption_stats["cues_outside"] = outside
@@ -1606,7 +1655,8 @@ def main() -> int:
     if caption_stats["text_unchanged"]:
         info("caption text unchanged: the cues were burned exactly as given (line breaks, timing "
              "and type size only)")
-    extra["caption"] = dict(caption_stats)
+    extra["caption"] = dict(caption_stats, **ass_counts)
+    extra["font_used"] = font_used
     if getattr(args, "_asr", None):
         extra["transcription"] = args._asr
     if emoji_plan:

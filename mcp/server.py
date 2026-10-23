@@ -247,7 +247,13 @@ def main() -> int:
             continue
         try:
             req = json.loads(line)
-        except ValueError:
+        except ValueError as exc:
+            # JSON-RPC 2.0: a line that is not JSON is answered with -32700 and id null, not
+            # dropped -- a client whose request was mangled in transit otherwise waits for an
+            # answer that never comes, with nothing to say why
+            resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"parse error: {exc}"}}
+            stdout.write((json.dumps(resp) + "\n").encode("utf-8"))
+            stdout.flush()
             continue
         # json.loads accepts any valid JSON value, not just an object -- a bare `42`, `null`,
         # `true` or `[1,2]` line parses fine but isn't a JSON-RPC request. Without this guard,

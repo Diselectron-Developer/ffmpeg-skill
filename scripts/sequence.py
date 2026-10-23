@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 from _common import add_common, apply_common, default_output, die, emit, ffmpeg_base, info, probe, run, video_args, X264_PRESETS, concat_list_line, fmt_secs
+from _common.emit import warn
 
 
 def even(n: float) -> int:
@@ -97,8 +98,9 @@ def main() -> int:
         # to be dropped silently, giving a shorter video; name the gap and what was left out
         later = _frames_after(directory, args.pattern, i)
         if later:
-            info(f"WARNING: frame {args.pattern % i} is missing; {len(later)} later frame(s) "
-                 f"(from {later[0].name}) are NOT in the sequence -- fill the gap or rename them")
+            warn(f"frame {args.pattern % i} is missing; {len(later)} later frame(s) "
+                 f"(from {later[0].name}) are NOT in the sequence -- fill the gap or rename them", "sequence_gap",
+                 missing=args.pattern % i, frames_left_out=len(later), first_left_out=later[0].name)
 
     frame_meta = probe(str(frames[0]))
     if not frame_meta.get("video"):

@@ -38,6 +38,7 @@ from typing import Dict, List
 
 from _common import STATE, add_common, apply_common, bt709_matrix_args, bt709_tag_args, child_args, emit, cfr_args, default_output, die, encoder_args, ffmpeg_base, info, probe, run, run_tool, validate_color, pad_filters, add_pad_fill_args, fmt_secs
 from _common.decision import hw_preset_video, restate_last_swap
+from _common.emit import note, record_skip, warn
 from check import SPECS as PLATFORMS, measure_loudness
 from _platforms import ALIASES as _ALIASES, PLATFORMS as PLATFORM_TABLE, resolve as resolve_platform
 # Frame and duration limit come from the one platform table (scripts/_platforms.py) rather than
@@ -108,6 +109,22 @@ PLATFORM_OF["youtube4k"] = PLATFORM_TABLE["youtube"]["check"]
 PRESET_CHOICES: List[str] = sorted(set(PRESETS) | {a for a in _ALIASES if resolve_platform(a) in PRESETS})
 
 
+def _loudness_unmeasured(extra: Dict[str, object], notes: List[str], platform: str, spec: Dict, normalized: bool = False) -> None:
+    """The written file's loudness could not be read (ffmpeg's loudnorm JSON did not parse): the
+    platform's loudness was not verified, and the document says so -- a `loudness` block with null
+    values and a reason, a failing `loudness` verification step, a warning -- rather than leaving
+    the block out, which read as "nothing to check". check.py reports the same case as a WARN row."""
+    reason = "not_measured"
+    extra["loudness"] = {"lufs": None, "tp": None, "target_lufs": spec["lufs"], "target_tp": spec["tp"], "ok": None,
+                         "measured": False, "reason": reason, **({"normalized": True} if normalized else {})}
+    extra["verification"] = [{"step": "loudness", "ok": False, "platform": platform, "reason": reason}]
+    msg = (f"the written file's loudness could not be measured{' after --normalize' if normalized else ''} "
+           f"(ffmpeg's loudnorm output did not parse), so {platform}'s {spec['lufs']:g} LUFS / {spec['tp']:g} dBTP was not "
+           "verified; run check.py on the file")
+    notes.append(msg)
+    warn(msg, "loudness_not_measured", platform=platform, normalized=normalized)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", nargs="?")
@@ -154,7 +171,7 @@ def main() -> int:
         # not HDR but still needs converting before BT.709 tags describe it (eval 24 h1)
         kind = "HDR" if meta["video"].get("hdr") else "wide-gamut SDR, not HDR"
         notes.append("source is %s (%s). This preset outputs SDR BT.709 tags without converting it; run color.py --to-sdr first for correct colours." % (kind, meta["video"].get("hdr_format")))
-        info("warning: " + notes[-1])
+        warn(notes[-1], "colour_not_converted", preset=args.preset, hdr_format=meta["video"].get("hdr_format"))
     has_audio = bool(meta.get("audio"))
     output = args.output or default_output(args.input, args.preset, p["ext"])
     out_ext = Path(output).suffix.lstrip(".").lower()
@@ -227,15 +244,20 @@ def main() -> int:
     if out_ext == "mp4":
         cmd += ["-movflags", "+faststart"]
     cmd += (p["audio"] if has_audio else ["-an"])
+    trimmed = None
     if p["max"] and not args.allow_long and (meta.get("duration") or 0) > p["max"]:
-        info(f"trimming to the platform maximum of {p['max']:.0f}s (use --allow-long to keep full length)")
+        # the preset's promise (the platform's maximum), but the caller loses the tail: say how much
+        # in the document (`trimmed`, `notes`), not only on stderr
+        trimmed = {"from": round(float(meta["duration"]), 3), "to": round(float(p["max"]), 3)}
+        note(f"trimmed from {trimmed['from']:.3f}s to the {args.preset} maximum of {p['max']:.0f}s "
+             "(use --allow-long to keep full length)")
         cmd += ["-t", f"{p['max']:.3f}"]
     cmd.append(output)
     run(cmd)
     result = probe(output, role="output")
     v = result["video"]
     info(f"wrote {output} ({fmt_secs(result['duration'])}, {v['width']}x{v['height']}, {v['codec']})")
-    extra: Dict[str, object] = {}
+    extra: Dict[str, object] = {"trimmed": trimmed} if trimmed else {}
     platform = PLATFORM_OF.get(args.preset)
     if platform and has_audio and not STATE.dry_run:
         # Every eval run that exported for a platform then had to come back with loudness.py: the
@@ -243,6 +265,8 @@ def main() -> int:
         # written file here so the result names the gap and the caller plans one pass, not two.
         spec = PLATFORMS[platform]
         m = measure_loudness(output)
+        if not m:
+            _loudness_unmeasured(extra, notes, platform, spec)
         if m:
             ok = abs(m["lufs"] - spec["lufs"]) <= spec["lufs_tol"] and m["tp"] <= spec["tp"]
             extra["loudness"] = {"lufs": m["lufs"], "tp": m["tp"], "target_lufs": spec["lufs"], "target_tp": spec["tp"], "ok": ok}
@@ -253,7 +277,7 @@ def main() -> int:
                 extra["loudness"]["silent"] = True
                 notes.append(f"output audio is silent (integrated loudness -inf, {platform} expects {spec['lufs']:g} LUFS); "
                              "check the source's audio or give the export a real track (audio.py --replace)")
-                info("warning: " + notes[-1])
+                warn(notes[-1], "output_audio_silent", platform=platform)
             elif not ok and args.normalize:
                 # Eval 7: every platform job ran export -> loudness.py -> export again (two video
                 # encodes). The levels pass only re-encodes audio, so do it here on the written
@@ -275,17 +299,25 @@ def main() -> int:
                     die(f"--normalize: loudness.py failed: {err.get('message') or proc.stderr.strip()[-300:]}",
                         kind=err.get("kind") or "ffmpeg", output=output, hint=err.get("hint"))
                 os.replace(tmp, output)
-                m = measure_loudness(output) or m
-                ok = abs(m["lufs"] - spec["lufs"]) <= spec["lufs_tol"] and m["tp"] <= spec["tp"]
-                extra["loudness"] = {"lufs": m["lufs"], "tp": m["tp"], "target_lufs": spec["lufs"], "target_tp": spec["tp"], "ok": ok, "normalized": True}
-                extra["verification"] = [{"step": "loudness", "ok": ok, "platform": platform}]
+                m = measure_loudness(output)
+                if not m:
+                    # the file changed: the measurement before --normalize no longer describes it
+                    _loudness_unmeasured(extra, notes, platform, spec, normalized=True)
+                    ok = True  # nothing more to say about a level that was not measured
+                else:
+                    ok = abs(m["lufs"] - spec["lufs"]) <= spec["lufs_tol"] and m["tp"] <= spec["tp"]
+                    extra["loudness"] = {"lufs": m["lufs"], "tp": m["tp"], "target_lufs": spec["lufs"], "target_tp": spec["tp"], "ok": ok, "normalized": True}
+                    extra["verification"] = [{"step": "loudness", "ok": ok, "platform": platform}]
                 if not ok:
                     notes.append(f"loudness is still {m['lufs']:.1f} LUFS / {m['tp']:+.1f} dBTP after loudness.py (target {spec['lufs']:g} LUFS / {spec['tp']:g} dBTP): {child.get('result', {}).get('note') or 'the encoder overshoots the ceiling'}")
-                    info("warning: " + notes[-1])
+                    warn(notes[-1], "loudness_outside_spec", platform=platform, lufs=m["lufs"], tp=m["tp"], normalized=True)
             elif not ok:
                 notes.append(f"loudness {m['lufs']:.1f} LUFS / {m['tp']:+.1f} dBTP is outside {platform}'s {spec['lufs']:g} LUFS / {spec['tp']:g} dBTP; "
                              f"run loudness.py -I {spec['lufs']:g} --tp {spec['tp']:g} on this file, or export with --normalize")
-                info("warning: " + notes[-1])
+                warn(notes[-1], "loudness_outside_spec", platform=platform, lufs=m["lufs"], tp=m["tp"], normalized=False)
+    elif platform and not has_audio and not STATE.dry_run:
+        record_skip(f"no loudness check against {platform}'s spec: the source has no audio, so the export has none",
+                    "loudness_no_audio", platform=platform)
     elif platform and has_audio and args.normalize:
         spec = PLATFORMS[platform]
         notes.append(f"[dry-run] --normalize: loudness.py -I {spec['lufs']:g} --tp {spec['tp']:g} would run on the written file if it misses {platform}'s spec")

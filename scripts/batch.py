@@ -32,9 +32,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from _common import STATE, add_common, apply_common, child_args, die, emit, info, run_tool, read_text_or_die, MEDIA_EXT as _MEDIA_EXT
-from _common.runner import HW_FORCED_ENV, add_hw_orchestrator_args, env_hw
-from _common.emit import absorb_stage_hw, steps_encoder_report
+from _common import STATE, add_common, apply_common, child_args, die, emit, info, run_tool, MEDIA_EXT as _MEDIA_EXT
+from _common.runner import HW_FORCED_ENV, add_hw_orchestrator_args, env_hw, stop_children
+from _common.emit import absorb_stage_hw, audit, note, steps_encoder_report, warn
 
 HERE = Path(__file__).resolve().parent
 MEDIA_EXT = {e for e in _MEDIA_EXT if e not in (".png", ".jpg", ".jpeg", ".webp")}  # one list (_common); a batch walks media, not stills
@@ -70,8 +70,11 @@ def recipe_key(recipe: Dict[str, Any]) -> str:
     if recipe.get("project"):
         try:
             project_content = Path(recipe["project"]).read_text(encoding="utf-8")
-        except OSError:
-            pass
+        except (OSError, UnicodeDecodeError) as exc:
+            # keyed on the recipe alone: an unreadable project cannot invalidate the cache by its
+            # content, so say so (each item that needs it then fails on reading it)
+            warn(f"recipe.project {recipe['project']} could not be read ({exc}); the cache key covers the recipe only",
+                 "recipe_project_unreadable", path=str(recipe["project"]), error=str(exc))
     return hashlib.sha1((json.dumps(recipe, sort_keys=True) + "\0" + project_content).encode()).hexdigest()[:12]
 
 
@@ -90,6 +93,8 @@ def gpu_key() -> str:
 JOBS_CAP = 8   # beyond this, concurrent encodes contend for the same cores and memory
 
 _LOG = threading.local()
+# set by batch.py's signal handler: a --jobs worker between two steps must not start the next one
+_STOP = threading.Event()
 
 
 def log(message: str) -> None:
@@ -102,16 +107,46 @@ def log(message: str) -> None:
         buf.append(message)
 
 
+class ItemError(Exception):
+    """An item that cannot be processed, with the structured `error` its results row carries.
+    process() raises it instead of die(): die() inside an item printed a second JSON document
+    and left the row with error "1" (str(SystemExit))."""
+
+    def __init__(self, error: Dict[str, Any]) -> None:
+        super().__init__(error.get("message"))
+        self.error = error
+
+
+def step_error(index: Optional[int], tool: Optional[str], doc: Any) -> Dict[str, Any]:
+    """A failed step's own failure, for its item's row: {step, tool, kind, message, code, reason,
+    details, hint, exit_code} from the step's --json document (keys it did not report are left
+    out; step and tool are always there)."""
+    err = doc.get("error") if isinstance(doc, dict) and isinstance(doc.get("error"), dict) else {}
+    out: Dict[str, Any] = {"step": index, "tool": tool}
+    for k in ("kind", "message", "code", "reason", "details", "hint"):
+        if err.get(k) is not None:
+            out[k] = err[k]
+    if isinstance(doc, dict) and doc.get("exit_code") is not None:
+        out["exit_code"] = doc["exit_code"]
+    return out
+
+
 def run_step(argv: List[str], per_call: "Optional[float]" = None) -> "tuple[bool, Optional[dict]]":
-    """Returns (ok, doc): doc is the step's own --json result document, or None if it couldn't
-    be parsed. {in}/{out} are already resolved by the caller before argv reaches here, so forcing
+    """Returns (ok, doc): doc is the step's own --json result document; a failed step that
+    printed none that parses gets one in the failure shape (error.reason step_output_unparsed,
+    the last stderr line as the message), so its row still says why. {in}/{out} are already resolved by the caller before argv reaches here, so forcing
     --json on every step (harmless: no step reads another step's stdout, only its output path)
     costs nothing and lets a caller like process() read back tool-specific fields, e.g. cut.py's
     `reencoded`, without adding a bespoke flag per field it might someday want."""
     script = argv[0]
     if script not in ALLOWED_STEP_SCRIPTS:
-        die(f"recipe step names a script that isn't one of this skill's own tools: {script!r} "
-            f"(must be a bare filename like 'silence.py', found in scripts/)")
+        # main() refuses such a recipe before any item runs; this stays as the last line of defence
+        raise ItemError({"step": None, "tool": script, "kind": "input", "reason": "step_script_not_allowed",
+                         "message": f"recipe step names a script that isn't one of this skill's own tools: {script!r} "
+                                    "(must be a bare filename like 'silence.py', found in scripts/)"})
+    if _STOP.is_set():
+        return False, {"status": "failed", "exit_code": 130,
+                       "error": {"kind": "interrupted", "message": f"interrupted before {script} started"}}
     cmd = [str(HERE / script)] + argv[1:] + child_args() + (["--json"] if "--json" not in argv[1:] else [])
     log("  → " + " ".join(os.path.basename(c) if i < 1 else c for i, c in enumerate(cmd)))
     proc = run_tool(cmd, per_call=per_call)
@@ -121,6 +156,10 @@ def run_step(argv: List[str], per_call: "Optional[float]" = None) -> "tuple[bool
         doc = None
     if proc.returncode != 0:
         log("    " + "\n    ".join(proc.stderr.strip().splitlines()[-4:]))
+        if not isinstance(doc, dict):
+            doc = {"status": "failed", "exit_code": proc.returncode,
+                   "error": {"reason": "step_output_unparsed",
+                             "message": (proc.stderr.strip().splitlines() or [f"{script} exited {proc.returncode} and printed nothing"])[-1][:300]}}
         return False, doc
     for line in proc.stderr.splitlines():
         if line.startswith("warning:"):  # a step's deprecation notice is not swallowed by a success (review 9)
@@ -159,9 +198,13 @@ def process(src: Path, recipe: Dict[str, Any], outdir: Path, work: Path,
         return max(1.0, deadline - time.monotonic())
     if recipe.get("project"):
         try:
-            proj = json.loads(read_text_or_die(str(recipe["project"]), "recipe.project"))
-        except ValueError as e:
-            die(f"recipe.project: {recipe['project']} is not valid JSON: {e}")
+            proj = json.loads(Path(str(recipe["project"])).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise ItemError({"step": None, "tool": "render.py", "kind": "input", "reason": "recipe_project_unreadable",
+                             "message": f"recipe.project: {recipe['project']} could not be read as JSON: {e}"})
+        if not isinstance(proj, dict):
+            raise ItemError({"step": None, "tool": "render.py", "kind": "input", "reason": "recipe_project_unreadable",
+                             "message": f"recipe.project: {recipe['project']} is not a JSON object"})
         idx = int(recipe.get("clip_key", 0))
         proj.setdefault("clips", [{}])
         while len(proj["clips"]) <= idx:
@@ -172,14 +215,17 @@ def process(src: Path, recipe: Dict[str, Any], outdir: Path, work: Path,
         pj.write_text(json.dumps(proj, indent=2), encoding="utf-8")
         ok, _doc = run_step(["render.py", str(pj)], budget())
         step_docs = [("render", _doc)]
+        failure = None if ok else step_error(0, "render.py", _doc)
         cut_reencoded: List[bool] = []
         cut_reasons: List[str] = []
     else:
         steps = recipe.get("steps") or []
         if not steps:
-            die("recipe needs steps or project")
+            raise ItemError({"step": None, "tool": None, "kind": "input", "reason": "recipe_has_no_steps",
+                             "message": "recipe needs steps or project"})
         cur = str(src)
         ok = True
+        failure = None
         cut_reencoded = []
         step_docs = []
         cut_reasons = []
@@ -198,9 +244,30 @@ def process(src: Path, recipe: Dict[str, Any], outdir: Path, work: Path,
                 cut_reasons.extend(r for r in (doc.get("reencode_reason") or []) if isinstance(r, str))
             if not step_ok:
                 ok = False
+                failure = step_error(i, str(argv[0]) if argv else None, doc)
                 break
             cur = out
     result: Dict[str, Any] = {"file": str(src), "output": str(final), "ok": ok, "seconds": round(time.time() - t0, 1)}
+    if failure:
+        result["error"] = failure
+    # `ok` is "every step completed" (design-decisions: a spec miss a tool cannot fix is completed +
+    # verified false, not a failure); `verified` is whether every step also verified what it wrote,
+    # and `unverified` names the steps that did not and which of their checks failed
+    unverified = []
+    for idx, (name, doc) in enumerate(step_docs):
+        if ok and isinstance(doc, dict) and doc.get("verified") is not True:
+            unverified.append({"step": idx, "tool": name,
+                               "failed": [str(v.get("step")) + (f" ({v['stage']})" if v.get("stage") else "")
+                                          for v in doc.get("verification") or [] if isinstance(v, dict) and not v.get("ok")]})
+    result["verified"] = bool(ok and not STATE.dry_run and step_docs and not unverified)
+    if unverified and not STATE.dry_run:
+        result["unverified"] = unverified
+    diag: Dict[str, List[Any]] = {}
+    for name, doc in step_docs:
+        for bucket, entries in ((doc or {}).get("diagnostics") or {}).items() if isinstance(doc, dict) else []:
+            diag.setdefault(bucket, []).extend(dict(e, step=name) for e in entries if isinstance(e, dict))
+    if diag:
+        result["diagnostics"] = diag
     if cut_reencoded:
         result["cut_reencoded"] = cut_reencoded
         result["cut_reencode_reasons"] = cut_reasons
@@ -208,6 +275,34 @@ def process(src: Path, recipe: Dict[str, Any], outdir: Path, work: Path,
     # fell back and why): this process encodes nothing itself, so its top-level hw.used is null
     result.update(steps_encoder_report(step_docs))
     return result
+
+
+def output_identity(path: str) -> "Optional[Dict[str, int]]":
+    """What a cache entry remembers of the output it served: size and mtime_ns (a stat, no read)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return {"size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
+def cached_output_changed(hit: Dict[str, Any]) -> "Optional[Dict[str, Any]]":
+    """None when the entry's output is still the file this batch wrote; else why it is not served:
+    output_missing, output_changed (size or mtime differ: something replaced or edited it) or
+    entry_unverifiable (an entry written by 2.10.11 or earlier recorded no identity, so nothing can say
+    the file is the one it describes)."""
+    out = str(hit.get("output") or "")
+    now = output_identity(out) if out else None
+    if now is None:
+        return {"reason": "output_missing", "output": out, "message": "the output is gone"}
+    expected = hit.get("output_identity")
+    if not isinstance(expected, dict):
+        return {"reason": "entry_unverifiable", "output": out,
+                "message": "the cache entry predates output identities, so the file cannot be checked"}
+    if expected != now:
+        return {"reason": "output_changed", "output": out, "expected": expected, "actual": now,
+                "message": "the output changed since the batch wrote it"}
+    return None
 
 
 def main() -> int:
@@ -235,8 +330,20 @@ def main() -> int:
         recipe = json.loads(Path(args.recipe).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         die(f"cannot read recipe: {exc}")
+    if not isinstance(recipe, dict):
+        die("cannot read recipe: not a JSON object")
     if recipe.get("project") and not os.path.isabs(recipe["project"]):
         recipe["project"] = str((Path(args.recipe).resolve().parent / recipe["project"]))
+    # a recipe error is the same for every item: refuse it once, before any item runs, rather than
+    # failing each item with it
+    if not recipe.get("project"):
+        if not recipe.get("steps"):
+            die("recipe needs steps or project")
+        for st in recipe["steps"]:
+            name = st[0] if isinstance(st, list) and st else st
+            if not isinstance(name, str) or name not in ALLOWED_STEP_SCRIPTS:
+                die(f"recipe step names a script that isn't one of this skill's own tools: {name!r} "
+                    f"(must be a bare filename like 'silence.py', found in scripts/)")
     outdir = Path(recipe.get("output_dir") or (folder / "out"))
     if not outdir.is_absolute():
         outdir = folder / outdir
@@ -263,7 +370,15 @@ def main() -> int:
     if cache_path.exists() and not args.force:
         try:
             cache = json.loads(cache_path.read_text(encoding="utf-8"))
-        except ValueError:
+            if not isinstance(cache, dict):
+                raise ValueError("not a JSON object")
+        except (OSError, ValueError) as exc:
+            # every entry is lost: each item runs again, and the next store rewrites the file
+            size = cache_path.stat().st_size if cache_path.exists() else None
+            warn(f"the batch cache {cache_path} could not be read ({exc}); starting with an empty cache, so every item runs again",
+                 "batch_cache_reset", path=str(cache_path), size=size, error=str(exc))
+            audit("batch_cache_reset", {"path": str(cache_path), "size": size, "error": str(exc)},
+                  default_path=str(outdir / ".ffskill-audit.jsonl"))
             cache = {}
     rkey = recipe_key(recipe) + gpu_key()
     glob = recipe.get("glob") or "*"
@@ -294,10 +409,27 @@ def main() -> int:
     deadline = time.monotonic() + STATE.timeout if (shared_budget and STATE.timeout) else None
     cache_lock = threading.Lock()
     timed_out = {"hit": False}
-    interrupted = {"hit": False}
+    interrupted: Dict[str, Any] = {"hit": False, "signal": None}
+    _STOP.clear()
+    # Ctrl-C (and SIGTERM where it is delivered) stops the running steps and reports the table:
+    # the shared handler would exit with "nothing was written" and no rows, and inside an item it
+    # surfaced as that item's failure while the batch went on (spec 4.1)
+    import signal as _signal
+
+    def _interrupt(signum: int, frame: Any) -> None:
+        interrupted["signal"] = signum
+        _STOP.set()
+        stop_children()
+        raise KeyboardInterrupt
+    if threading.current_thread() is threading.main_thread():
+        for sig in (getattr(_signal, "SIGINT", None), getattr(_signal, "SIGTERM", None)):
+            if sig is not None:
+                try:
+                    _signal.signal(sig, _interrupt)
+                except (ValueError, OSError):
+                    pass
 
     def one_pass() -> List[Dict[str, Any]]:
-        results = []
         files = sorted(p for p in folder.glob(glob) if p.is_file() and p.suffix.lower() in MEDIA_EXT and outdir not in p.parents)
         # Two different sources can compute the same final path (most often a fixed recipe "ext"
         # collapsing e.g. clip.mp4 and clip.mov to the same clip_out.mp4) -- catch that before
@@ -332,7 +464,8 @@ def main() -> int:
                 # the other GPU setting) that names the same file now describes bytes that are gone
                 for stale in [k for k, v in cache.items() if k != key and isinstance(v, dict) and v.get("output") == r["output"]]:
                     del cache[stale]
-                cache[key] = r
+                # the output as this run left it: a later hit is served only while it is unchanged
+                cache[key] = dict(r, output_identity=output_identity(r["output"]))
                 # write_text isn't atomic -- a process killed mid-write (or a --watch loop racing
                 # a concurrent manual run) could leave a truncated file that json.loads() above
                 # then silently treats as "no cache" (a ValueError -> {}), discarding every prior
@@ -349,13 +482,23 @@ def main() -> int:
         # warm, which happens at --jobs 1 too and contradicts the order this tool promises.
         slots: "List[Optional[Dict[str, Any]]]" = [None] * len(files)
         pending: List[tuple] = []
+        cache_miss: Dict[int, Dict[str, Any]] = {}
         for i, src in enumerate(files):
             key = f"{file_key(src)}:{rkey}"
             hit = cache.get(key)
-            if hit and Path(hit.get("output", "")).exists() and not args.force:
-                info(f"skip (cached) {src.name}")
-                slots[i] = {**hit, "cached": True}
-                continue
+            if isinstance(hit, dict) and not args.force:
+                why = cached_output_changed(hit)
+                if why is None:
+                    info(f"skip (cached) {src.name}")
+                    slots[i] = {**{k: v for k, v in hit.items() if k != "output_identity"}, "cached": True}
+                    continue
+                cache_miss[i] = why
+                facts = {k: v for k, v in why.items() if k not in ("reason", "message")}
+                msg = f"{src.name}: the cached output {hit.get('output')} is not served ({why['message']}); the item runs again"
+                if why["reason"] == "output_changed":
+                    warn(msg, "batch_cache_output_changed", file=str(src), **facts)
+                elif why["reason"] == "entry_unverifiable":
+                    warn(msg, "batch_cache_entry_unverifiable", file=str(src), **facts)
             pending.append((i, src, key))
 
         def timed_out_row(src: Path) -> "Dict[str, Any]":
@@ -367,13 +510,41 @@ def main() -> int:
             """A worker that raised is a failed item, not a dead run. A die() inside a thread
             raises SystemExit through fut.result() and used to take the whole process down
             before the summary and the per-item table were printed -- so the one thing the user
-            needed, which item failed and which succeeded, was the thing they did not get."""
-            reason = str(exc) or exc.__class__.__name__
+            needed, which item failed and which succeeded, was the thing they did not get.
+            `error` is structured: an ItemError's own, else what the exception says (its class
+            in `exception`), never str(SystemExit) -- which was the exit code, "1"."""
+            if isinstance(exc, ItemError):
+                error = dict(exc.error)
+            elif isinstance(exc, SystemExit):
+                error = {"step": None, "tool": None, "exception": "SystemExit", "exit_code": exc.code,
+                         "message": f"the item stopped with exit code {exc.code}; its message is on stderr"}
+            else:
+                error = {"step": None, "tool": None, "exception": exc.__class__.__name__,
+                         "message": (str(exc) or exc.__class__.__name__)[:300]}
+            log(f"    failed: {error['message']}")
             return {"file": str(src), "output": str(final_path(src, recipe, outdir)),
-                    "ok": False, "seconds": 0.0, "error": reason[:300]}
+                    "ok": False, "verified": False, "seconds": 0.0, "error": error}
+
+        def interrupted_row(src: Path, started: bool, r: "Optional[Dict[str, Any]]" = None) -> "Dict[str, Any]":
+            """An item the interrupt reached: `interrupted: true` when it was running (its steps
+            were stopped), `skipped: "interrupted"` when it had not started."""
+            row = dict(r) if r else {"file": str(src), "output": str(final_path(src, recipe, outdir)), "seconds": 0.0}
+            row.update(ok=False, verified=False)
+            if started:
+                row["interrupted"] = True
+                row.setdefault("error", {"step": None, "tool": None, "kind": "interrupted",
+                                         "message": "interrupted while this item was running; its running step was stopped"})
+            else:
+                row["skipped"] = "interrupted"
+            return row
+
+        def with_miss(i: int, r: Dict[str, Any]) -> Dict[str, Any]:
+            if i in cache_miss:
+                r["cache_miss"] = {k: v for k, v in cache_miss[i].items() if k != "message"}
+            return r
 
         if jobs == 1 or len(pending) < 2:
-            for i, src, key in pending:
+            for n, (i, src, key) in enumerate(pending):
                 if deadline is not None and time.monotonic() >= deadline:
                     slots[i] = timed_out_row(src)
                     continue
@@ -382,13 +553,17 @@ def main() -> int:
                     r = process(src, recipe, outdir, item_work(i, src), deadline)
                 except KeyboardInterrupt:
                     interrupted["hit"] = True
+                    # the running item, then every one not started: each keeps its row
+                    slots[i] = interrupted_row(src, True)
+                    for j, later, _k in pending[n + 1:]:
+                        slots[j] = interrupted_row(later, False)
                     break
                 except BaseException as exc:            # noqa: BLE001 - reported, never swallowed
                     if isinstance(exc, SystemExit) and not exc.code:
                         raise
-                    slots[i] = failed_row(src, exc)
+                    slots[i] = with_miss(i, failed_row(src, exc))
                     continue
-                slots[i] = r
+                slots[i] = with_miss(i, r)
                 store(key, r)
             return [r for r in slots if r is not None]
 
@@ -398,8 +573,9 @@ def main() -> int:
             _LOG.buffer = [f"=== {src.name}"]
             try:
                 r = process(src, recipe, outdir, item_work(i, src), deadline)
-                store(key, r)
-                return r
+                if not interrupted["hit"]:   # a step the interrupt stopped is no result to keep
+                    store(key, r)
+                return with_miss(i, r)
             finally:
                 r_lines, _LOG.buffer = _LOG.buffer, None
                 setattr(_LOG, "lines", r_lines)
@@ -439,85 +615,33 @@ def main() -> int:
                 for i, src, key in queue:
                     slots[i] = timed_out_row(src)
             except KeyboardInterrupt:
-                # Spec 4.1: cancel what has not started, let the running children be killed by
-                # the shared signal handling, and REPORT what completed -- exit 130 with the
-                # partial table, never a traceback.
+                # Spec 4.1: cancel what has not started, stop the running steps (the handler
+                # already did), and REPORT every item -- exit 130 with the table, never a
+                # traceback. The pool's exit waits for the stopped items; they are read below.
                 interrupted["hit"] = True
                 for fut in futures:
                     fut.cancel()
-                for fut, (i, src) in futures.items():
-                    if slots[i] is not None or not fut.done():
-                        continue
-                    try:
-                        slots[i], lines[i] = fut.result()
-                    except BaseException:               # noqa: BLE001
-                        pass
                 info("interrupted: reporting what had already finished")
+        if interrupted["hit"]:
+            for fut, (i, src) in futures.items():
+                if slots[i] is not None:
+                    continue
+                if fut.cancelled():
+                    slots[i] = interrupted_row(src, False)
+                    continue
+                try:
+                    r, lines[i] = fut.result()
+                except BaseException:                   # noqa: BLE001 - its row says it was interrupted
+                    r = None
+                # finished in time: kept as it is; stopped by the interrupt: said so
+                slots[i] = r if (r and r.get("ok")) else interrupted_row(src, True, r)
+            for i, src, _key in queue:
+                if slots[i] is None:
+                    slots[i] = interrupted_row(src, False)
         for i, src in enumerate(files):
             for line in lines.get(i, []):
                 info(line)
         return [r for r in slots if r is not None]
-
-        import concurrent.futures
-
-        def work_one(i: int, src: Path, key: str) -> Dict[str, Any]:
-            _LOG.buffer = [f"=== {src.name}"]
-            try:
-                r = process(src, recipe, outdir, item_work(i, src), deadline)
-                store(key, r)
-                return r
-            finally:
-                r_lines, _LOG.buffer = _LOG.buffer, None
-                setattr(_LOG, "lines", r_lines)
-
-        # Submitted in the existing sorted order and collected into a list indexed by submission
-        # order, so the summary and the per-item table are identical to a serial run's whatever
-        # order the encodes actually finish in.
-        ordered: List[Optional[Dict[str, Any]]] = [None] * len(pending)
-        lines: List[List[str]] = [[] for _ in pending]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures: "Dict[Any, int]" = {}
-            queue = list(enumerate(pending))
-            in_flight: "set" = set()
-            try:
-                # The pool is topped up to `jobs` in flight and no further: submitting the whole
-                # list up front would put every item past the deadline check before the first one
-                # had finished, and the shared budget could then never stop anything.
-                while queue or in_flight:
-                    while queue and len(in_flight) < jobs:
-                        slot, (i, src, key) = queue[0]
-                        if deadline is not None and time.monotonic() >= deadline:
-                            break
-                        queue.pop(0)
-                        fut = pool.submit(_run_buffered, work_one, i, src, key)
-                        futures[fut] = slot
-                        in_flight.add(fut)
-                    if not in_flight:
-                        break
-                    done_now, in_flight = concurrent.futures.wait(
-                        in_flight, return_when=concurrent.futures.FIRST_COMPLETED)
-                    in_flight = set(in_flight)
-                    for fut in done_now:
-                        ordered[futures[fut]], lines[futures[fut]] = fut.result()
-                for slot, (i, src, key) in queue:
-                    timed_out["hit"] = True
-                    ordered[slot] = {"file": str(src),
-                                     "output": str(final_path(src, recipe, outdir)),
-                                     "ok": False, "seconds": 0.0, "skipped": "timeout"}
-            except KeyboardInterrupt:
-                for fut in futures:
-                    fut.cancel()
-                info("interrupted: finishing what had already started")
-                raise
-        for slot, (i, src, key) in enumerate(pending):
-            for line in lines[slot]:
-                info(line)
-            if ordered[slot] is None:
-                timed_out["hit"] = True
-                ordered[slot] = {"file": str(src), "output": str(final_path(src, recipe, outdir)),
-                                 "ok": False, "seconds": 0.0, "skipped": "timeout"}
-            results.append(ordered[slot])
-        return results
 
     results = one_pass()
     if args.watch:
@@ -534,6 +658,8 @@ def main() -> int:
                 finally:
                     signal.signal(signal.SIGINT, previous)
                 results = one_pass()
+                if interrupted["hit"]:
+                    break  # the pass reported its rows; a watch interrupted mid-pass stops here
         except KeyboardInterrupt:
             info("watch stopped")
     # the items' GPU facts (asked for, fell back and why) reach the top-level `hw`, as render.py's
@@ -547,10 +673,13 @@ def main() -> int:
             print(f"{'OK  ' if r['ok'] else 'FAIL'} {r['file']} -> {r['output']}" + (" (cached)" if r.get("cached") else ""))
     if interrupted["hit"]:
         # Ctrl-C on a batch that already produced files: the user needs the partial table, not a
-        # traceback and not "nothing was written". Exit 130 with everything that completed.
-        die(f"interrupted after {done} of {len(results)} item(s); the finished outputs are kept "
-            "and the rest were not started",
-            code=130, kind="interrupted", output=None, dry_run=STATE.dry_run, results=results,
+        # traceback and not "nothing was written". Exit 130 (143 for SIGTERM) with every item:
+        # finished, interrupted while running, or not started.
+        stopped = sum(1 for r in results if r.get("interrupted"))
+        not_started = sum(1 for r in results if r.get("skipped") == "interrupted")
+        die(f"interrupted after {done} of {len(results)} item(s): {stopped} stopped while running and "
+            f"{not_started} not started; the finished outputs are kept",
+            code=128 + int(interrupted["signal"] or 2), kind="interrupted", output=None, dry_run=STATE.dry_run, results=results,
             processed=done, total=len(results), jobs=jobs, jobs_requested=requested,
             timed_out=timed_out["hit"])
     if timed_out["hit"]:
@@ -593,7 +722,13 @@ def main() -> int:
         why = (" (reencode_reason: " + ", ".join(f"{k} x{v}" for k, v in reasons.items()) + ")") if reasons else ""
         info(f"cut.py: {copied}/{len(all_cuts)} call(s) stayed fully lossless stream-copy "
              f"({cut_summary['stream_copy_rate']:.0%}), {len(all_cuts) - copied} re-encoded a range or its --segments join{why}")
-    emit(None, results=results, processed=done, total=len(results),
+    unverified = [os.path.basename(r["file"]) for r in results if r.get("ok") and not r.get("verified")]
+    if unverified and not STATE.dry_run:
+        note(f"{len(unverified)} item(s) completed but did not verify everything they wrote (see each row's unverified): "
+             + ", ".join(unverified[:5]) + (" ..." if len(unverified) > 5 else ""))
+    emit(None, verification=[{"step": "item", "file": r["file"], "ok": bool(r.get("verified"))} for r in results]
+         if not STATE.dry_run else [],
+         results=results, processed=done, total=len(results),
          jobs=jobs, jobs_requested=requested, wall_seconds=round(time.time() - started, 1),
          item_seconds_total=round(sum(float(r.get("seconds") or 0) for r in results), 1),
          timed_out=timed_out["hit"], cut_stream_copy=cut_summary, cut_reencode_reasons=reasons)

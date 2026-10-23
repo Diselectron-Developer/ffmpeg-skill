@@ -29,17 +29,19 @@ import argparse
 import os
 import re
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
 from _common import (aac_args, add_common, brand_caption_style, script_font_for_text, apply_common, cfr_args,
-                     color_hex, default_font_file, default_output, die, draws_chroma, drawn_chain, emit, escape_drawtext, escape_filter_path,
+                     color_hex, default_output, die, draws_chroma, drawn_chain, emit, escape_drawtext, escape_filter_path,
                      ffmpeg_base, info, label_chain, load_brand, parse_time, probe, rgb_chain_to_bt709, run, run_keeping_subtitles, video_args,
                      drawtext_boxborderw, drawtext_center_align, X264_PRESETS, time_arg, fmt_secs, STATE, drawtext_text_opts,
                      LANGUAGE_NAMES, needs_shaping, detect_script, BIDI_SCRIPTS, font_family_of_file, font_family_for_script, has_emoji,
                      emoji_clusters, emoji_codepoint_name, char_script, emoji_filter_chain, emoji_asset_for, emoji_support, resolve_emoji_assets,
                      EMOJI_ASSET_HINT, text_width_em, drawtext_shaping, wrap_text, WRAP_MODES,
                      SAFE_WIDTH_FRACTION, drawtext_draws_newline_glyph, is_multiline, _DRAWTEXT_PENDING)
+from _common.emit import warn
+from _common.fonts import font_choice, record_font_choice
 from _ass_overlay import text_overlay_ass, EMOJI_SENTINEL
 
 # where the template's text chain goes in a filter_complex it builds (graphics.main fills it in)
@@ -52,15 +54,16 @@ def ff_color(hex_rgb: str, alpha: float = 1.0) -> str:
     return f"0x{color_hex(hex_rgb)}@{alpha:g}"
 
 
-def font_opts(brand: dict, font: Optional[str], font_file: Optional[str], script_file: Optional[str] = None) -> str:
-    if font_file or brand.get("font_file"):
-        return f"fontfile={escape_filter_path(font_file or brand['font_file'])}"
-    if script_file:  # a font picked by the script of the text itself (1.12)
-        return f"fontfile={escape_filter_path(script_file)}"
-    resolved = default_font_file(font or brand.get("font", "DejaVu Sans"))
-    if resolved:
-        return f"fontfile={escape_filter_path(resolved)}"
-    return f"font='{escape_drawtext(font or brand.get('font', 'DejaVu Sans'))}'"
+def font_opts(brand: dict, font: Optional[str], font_file: Optional[str], script_file: Optional[str] = None,
+              script_family: Optional[str] = None, renderer: str = "drawtext") -> "Tuple[str, dict]":
+    """(the drawtext font option, the choice behind it -- the result's `font_used`): the caller's
+    file, a font picked by the script of the text itself (1.12), the asked family resolved to a
+    file, or the family by name when nothing resolves."""
+    choice = font_choice(font or brand.get("font", "DejaVu Sans"), font_file=font_file or brand.get("font_file"),
+                         script_file=script_file, script_family=script_family, renderer=renderer)
+    if choice["file"]:
+        return f"fontfile={escape_filter_path(choice['file'])}", choice
+    return f"font='{escape_drawtext(font or brand.get('font', 'DejaVu Sans'))}'", choice
 
 
 def main(force_route: Optional[str] = None) -> int:
@@ -156,7 +159,7 @@ def main(force_route: Optional[str] = None) -> int:
     _script, script_file, _family = script_font_for_text(
         " ".join(t for t in (args.name, args.title, args.subtitle, args.text, args.top, args.bottom) if t),
         lang=args.lang, font=args.font, font_explicit=bool(args.font), font_file=args.font_file or brand.get("font_file"))
-    fo = font_opts(brand, args.font, args.font_file, script_file)
+    fo, font_used = font_opts(brand, args.font, args.font_file, script_file, _family)
 
     meta = probe(args.input)
     if not meta.get("video"):
@@ -263,8 +266,8 @@ def main(force_route: Optional[str] = None) -> int:
                  "be drawn as an empty box -- stripped from the text instead "
                  "(--text-render auto renders it monochrome through libass)")
     if emoji_mode == "mono":
-        info("warning: emoji rendered monochrome (no colour path on this ffmpeg; "
-             "--emoji-assets DIR for colour). " + support["detail"])
+        warn("emoji rendered monochrome (no colour path on this ffmpeg; "
+             "--emoji-assets DIR for colour). " + support["detail"], "emoji_monochrome")
     if emoji_mode == "none":
         if not "".join(ch for ch in all_text if char_script(ch) != "emoji").strip():
             die("the template's text is nothing but emoji and this machine can draw none of them "
@@ -565,9 +568,9 @@ def main(force_route: Optional[str] = None) -> int:
                  "(FFmpeg 8.0-8.0.1 and 8.1.0; fixed in 8.0.2/8.1.1), so it is rendered through libass")
             _DRAWTEXT_PENDING.clear()
             return main(force_route="ass")
-        info("warning: this ffmpeg's drawtext draws a box at each line break of a multi-line label "
+        warn("this ffmpeg's drawtext draws a box at each line break of a multi-line label "
              "(FFmpeg 8.0-8.0.1 and 8.1.0; fixed in 8.0.2/8.1.1): drop --text-render drawtext to render it "
-             "through libass, or upgrade FFmpeg")
+             "through libass, or upgrade FFmpeg", "drawtext_newline_glyph", text_render="drawtext")
 
     output = args.output or default_output(args.input, "gfx")
     ass_path = None
@@ -631,7 +634,7 @@ def main(force_route: Optional[str] = None) -> int:
                 f"(limit {_max}, --emoji-max raises it); ffmpeg's filter graph and the "
                 "per-frame cost both grow linearly -- split the job, or use --emoji none", kind="input")
         if missing:
-            info("warning: no PNG in the assets directory for " + ", ".join(missing))
+            warn("no PNG in the assets directory for " + ", ".join(missing), "emoji_assets_missing", missing=list(missing))
         if emoji_mode:
             emoji_result = {"mode": emoji_mode, "count": len(emoji_clusters(all_text)),
                             "clusters": sorted(seen) or sorted({emoji_codepoint_name(cl) for _i, cl in emoji_clusters(all_text)}),
@@ -708,8 +711,11 @@ def main(force_route: Optional[str] = None) -> int:
     dropped_streams = run_keeping_subtitles(cmd, output)
     r = probe(output, role="output")
     info(f"wrote {output} ({fmt_secs(r['duration'])}, {args.template})")
+    if route == "ass":
+        # libass looks the family up itself (fontconfig): the same choice, asked for that renderer
+        font_used = font_opts(brand, args.font, args.font_file, script_file, _family, renderer="libass")[1]
     extra = {"template": args.template, "dropped_non_av_streams": dropped_streams,
-             "text_renderer": route, "script": _script}
+             "text_renderer": route, "script": _script, "font_used": record_font_choice(font_used)}
     if ass_path:
         extra["ass"] = ass_path
     if emoji_result:

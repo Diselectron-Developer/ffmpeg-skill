@@ -26,7 +26,9 @@ import sys
 from typing import List, Optional
 
 from _platforms import PLATFORMS, PLATFORM_CHOICES, safe_margins_px, resolve as resolve_platform
-from _common import STATE, script_font_for_text, drawtext_clean, drawtext_line_metrics, drawtext_text_opts, drawtext_draws_newline_glyph, is_multiline, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, drawn_chain, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, default_font_file, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
+from _common import STATE, script_font_for_text, drawtext_clean, drawtext_line_metrics, drawtext_text_opts, drawtext_draws_newline_glyph, is_multiline, needs_shaping, LANGUAGE_NAMES, has_emoji, detect_script, emoji_clusters, load_brand, drawn_chain, label_chain, matrix_chain, rgb_chain_to_bt709, video_args, add_common, apply_common, emit, aac_args, cfr_args, default_output, die, escape_drawtext, escape_filter_path, ffmpeg_base, info, parse_time, probe, run, run_keeping_subtitles, validate_color, x264_args, X264_PRESETS, time_arg, fmt_secs
+from _common.emit import warn
+from _common.fonts import font_choice, record_font_choice
 
 # Per-edge margins: a platform's UI does not cover the same fraction of every edge (TikTok's
 # like column is 14 % of the width, its description block 22 % of the height), so a position
@@ -240,20 +242,22 @@ def main() -> int:
             if args.emoji == "none":
                 for _i, _cl in list(reversed(emoji_clusters(args.text))):
                     args.text = args.text[:_i] + args.text[_i + len(_cl):]
-                info("emoji: stripped from the drawn text (--emoji none)")
+                warn("emoji: stripped from the drawn text (--emoji none)", "emoji_stripped", mode="none")
             else:
-                info("warning: emoji are drawn by the text font here (monochrome at best); "
-                     "caption.py/graphics.py composite colour PNGs with --emoji-assets")
+                warn("emoji are drawn by the text font here (monochrome at best); "
+                     "caption.py/graphics.py composite colour PNGs with --emoji-assets", "emoji_monochrome")
+    script_file = script_family = None
     if args.text and not args.font_file:
         # 1.12: non-Latin overlay text picks a font by script, so a title in Japanese, Korean,
         # Arabic ... draws glyphs instead of boxes. drawtext does not shape or reorder RTL text --
         # see references/gotchas.md#fonts-by-script.
-        _script, script_file, _family = script_font_for_text(
+        _script, script_file, script_family = script_font_for_text(
             args.text, font=args.font, font_explicit=args.font != ap.get_default("font"), font_file=args.font_file)
-        if script_file:
-            args.font_file = script_file
-    if not args.font_file:
-        args.font_file = default_font_file(args.font)
+    # the font drawtext gets, reported as `font_used` and recorded when it is not the one asked for
+    font_used = font_choice(args.font, font_file=args.font_file, script_file=script_file, script_family=script_family)
+    args.font_file = font_used["file"]
+    if args.text:
+        record_font_choice(font_used)
     meta = probe(args.input)
     if not meta.get("video"):
         die("input has no video stream")
@@ -411,7 +415,7 @@ def main() -> int:
     if not STATE.dry_run:
         result = probe(output, role="output")
         info(f"wrote {output} ({fmt_secs(result['duration'])})")
-    emit(output, dropped_non_av_streams=dropped_streams)
+    emit(output, dropped_non_av_streams=dropped_streams, **({"font_used": font_used} if args.text else {}))
     return 0
 
 

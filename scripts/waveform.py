@@ -38,7 +38,7 @@ from _platforms import PLATFORMS, PLATFORM_CHOICES, resolve as resolve_platform
 from _common import (add_common, apply_common, aac_args, default_output, die, draws_chroma, emit, ffmpeg_base,
                      info, load_brand, pad_filters, probe, rgb_chain_to_bt709, run, STATE, validate_color, video_args, X264_PRESETS,
                      fmt_secs, child_args, run_tool, measured_level_dbfs)
-from _common.emit import absorb_stage_hw
+from _common.emit import absorb_stage_hw, warn
 
 WAVEFORM_MODES = ["point", "line", "p2p", "cline"]
 
@@ -272,7 +272,8 @@ def main() -> int:
                          f"{overlap}px: the captions or the app's own UI will sit over the waveform "
                          f"(lower --vis-height to {max(0.05, (args.height - safe_px) / args.height):.2f})")
     if silent_peak is not None:
-        info(f"warning: {args.input} is silent (peak {silent_peak:g} dBFS); the visualisation is a flat line")
+        warn(f"{args.input} is silent (peak {silent_peak:g} dBFS); the visualisation is a flat line", "silent_input",
+             path=args.input, peak_db=silent_peak)
         notes.append(f"the input audio is silent (peak {silent_peak:g} dBFS, at or below --silence-threshold "
                      f"{args.silence_threshold:g}): the visualisation is a flat line; pass --on-silent fail to refuse instead")
     duration_ok = True

@@ -74,7 +74,10 @@ def _record(bucket: str, msg: str, code: str, ctx: "Optional[Context]", data: Di
     ctx = ctx or STATE
     entry: Dict[str, Any] = {"code": code, "message": msg}
     entry.update(data)
-    getattr(ctx, bucket).append(entry)
+    # once per run: a decision taken for every encode of a job (an AV1 encoder fallback, a CRF
+    # clamp) is one record, though its stderr line is printed each time it is taken
+    if entry not in getattr(ctx, bucket):
+        getattr(ctx, bucket).append(entry)
     sys.stderr.write(f"{prefix}{msg}\n")
     return entry
 
@@ -82,7 +85,8 @@ def _record(bucket: str, msg: str, code: str, ctx: "Optional[Context]", data: Di
 def warn(msg: str, code: str, *, ctx: "Optional[Context]" = None, **data: Any) -> Dict[str, Any]:
     """Say something went other than asked, on stderr AND in the document
     (`diagnostics.warnings`: {code, message, ...data}). Use it where a bare info("warning: ...")
-    would leave the caller of --json nothing to read."""
+    would leave the caller of --json nothing to read (a source test refuses that spelling).
+    Every code is listed in the contract (`json_output.diagnostic_codes`)."""
     return _record("warnings", msg, code, ctx, data, "warning: ")
 
 
@@ -291,10 +295,32 @@ def absorb_stage_hw(stage: str, doc: Any, ctx: "Optional[Context]" = None) -> No
                           "used": hw.get("used"), "fallback": bool(hw.get("fallback")), "quality_note": quality})
 
 
+def _stage_hw_notes(doc: Dict[str, Any]) -> List[str]:
+    """The notes lines a stage's document carries only because of its GPU encode (its `hw.notes`
+    and the VideoToolbox quality line): absorb_stage_hw() already reports those, once."""
+    hw = doc.get("hw") if isinstance(doc.get("hw"), dict) else {}
+    out = [str(n) for n in hw.get("notes") or []]
+    enc, line = _video_encoders([str(c) for c in (doc.get("commands") or [])])
+    for no_cpu in (False, True):
+        q = hw_quality_note(enc, line, no_cpu)
+        if q:
+            out.append(q)
+    return out
+
+
+# A stage's own artifact checks: a stage that completed passed them (verify_output() fails the
+# stage otherwise), and its artifact is an intermediate, so carrying them would only lengthen the list.
+_STAGE_ARTIFACT_STEPS = ("probe", "exists")
+
+
 def absorb_stage(stage: str, doc: Any, ctx: "Optional[Context]" = None) -> Dict[str, Any]:
-    """A child tool's --json document into this result: its `hw` facts (absorb_stage_hw) and its
-    `diagnostics` records, each tagged with the stage it came from. Returns the fields a re-raise
-    of the stage's failure carries in its own `error`: the child's `reason` and `details`."""
+    """A child tool's --json document into this result: its `hw` facts (absorb_stage_hw), its
+    `diagnostics` records and its `notes` (each tagged with the stage it came from), and -- for a
+    stage that completed in a real run -- its verification steps beyond the artifact probe, tagged
+    with `stage`, which emit() adds to this result's own: the parent's `verified` is then the
+    conjunction of every stage's (a stage that said `verified: false` without a failing step adds
+    one `{step: verified, stage, ok: false}`). Returns the fields a re-raise of the stage's failure
+    carries in its own `error`: the child's `reason` and `details`."""
     ctx = ctx or STATE
     absorb_stage_hw(stage, doc, ctx)
     if not isinstance(doc, dict):
@@ -305,6 +331,22 @@ def absorb_stage(stage: str, doc: Any, ctx: "Optional[Context]" = None) -> Dict[
                 tagged = dict(entry, stage=entry.get("stage") or stage)
                 if tagged not in getattr(ctx, bucket):
                     getattr(ctx, bucket).append(tagged)
+    hw_only = _stage_hw_notes(doc)
+    for n in doc.get("notes") or []:
+        if not isinstance(n, str) or n in hw_only or n.endswith(ENV_HW_NOTE) or any(n.endswith(": " + h) for h in hw_only):
+            continue
+        # a nested stage's note (render.py inside a pack) already names its stage
+        tagged_note = n if n.startswith(f"{stage}: ") else f"{stage}: {n}"
+        if tagged_note not in ctx.notes:
+            ctx.notes.append(tagged_note)
+    if doc.get("status") == "completed" and not doc.get("dry_run") and not ctx.dry_run:
+        carried = [dict(s, stage=s.get("stage") or stage) for s in doc.get("verification") or []
+                   if isinstance(s, dict) and (s.get("step") not in _STAGE_ARTIFACT_STEPS or not s.get("ok"))]
+        if doc.get("verified") is False and all(s.get("ok") for s in carried):
+            carried.append({"step": "verified", "stage": stage, "ok": False})
+        for s in carried:
+            if s not in ctx.stage_verification:
+                ctx.stage_verification.append(s)
     err = doc.get("error") if isinstance(doc.get("error"), dict) else {}
     return {k: err[k] for k in ("reason", "details") if err.get(k) is not None}
 
@@ -351,6 +393,8 @@ def emit(output: Optional[str], *, ctx: "Optional[Context]" = None, **extra: Any
         # verified nothing. Spec failures the tool cannot fix on its own (export's loudness gap)
         # keep status completed and say verified: false, so a caller keys on one field.
         steps: List[Dict[str, Any]] = ([{"step": "probe", "ok": True}] if meta else []) + list(extra.pop("verification", None) or [])
+        # a tool that ran others (render.py) verified what its stages verified too (absorb_stage())
+        steps += [s for s in ctx.stage_verification if s not in steps]
         if output and not ctx.dry_run and os.path.splitext(output)[1].lower() not in MEDIA_EXT:
             steps.insert(0, {"step": "exists", "ok": True})
         doc["verified"] = not ctx.dry_run and bool(steps) and all(s.get("ok") for s in steps)

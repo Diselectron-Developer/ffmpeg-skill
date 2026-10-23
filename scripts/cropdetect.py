@@ -31,9 +31,10 @@ import argparse
 import re
 import sys
 from collections import Counter
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from _common import add_common, apply_common, die, emit, info, print_json, probe, require_tool, run_analysis, decode_gray_frames, frame_flow
+from _common.emit import warn
 
 MOTION_CENTRE_FPS = 2.0
 MOTION_CENTRE_W, MOTION_CENTRE_H = 64, 36
@@ -41,7 +42,11 @@ MOTION_CENTRE_W, MOTION_CENTRE_H = 64, 36
 CROP_RE = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
 
 
-def detect(path: str, seconds: float, samples: int, limit: float, round_to: int, duration: float) -> List[Tuple[int, int, int, int]]:
+def detect(path: str, seconds: float, samples: int, limit: float, round_to: int, duration: float,
+           failed: "Optional[List[Dict]]" = None) -> List[Tuple[int, int, int, int]]:
+    """Crop rectangles from `samples` windows spread over the file. A window ffmpeg cannot decode
+    is skipped, and appended to `failed` as {start, seconds, error} when the caller passes a list,
+    so the result can say how many of the readings it stands on."""
     ffmpeg = require_tool("ffmpeg")
     per_window = max(0.5, seconds / max(1, samples))
     rects: List[Tuple[int, int, int, int]] = []
@@ -56,6 +61,8 @@ def detect(path: str, seconds: float, samples: int, limit: float, round_to: int,
             # One window ffmpeg cannot decode (a damaged stretch) is skipped; the other windows
             # still measure. Only when every window fails is there nothing to report.
             failures.append(proc.stderr.strip().splitlines()[-1:] or ["?"])
+            if failed is not None:
+                failed.append({"start": round(start, 3), "seconds": round(per_window, 3), "error": failures[-1][0][:300]})
             continue
         for m in CROP_RE.finditer(proc.stderr):
             rects.append((int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))))
@@ -145,8 +152,16 @@ def main() -> int:
         sw, sh = sh, sw
     duration = meta.get("duration") or 0.0
 
-    rects = detect(args.input, args.seconds, args.samples, args.limit, args.round_to, duration)
-    result: Dict = {"file": args.input, "source_width": sw, "source_height": sh}
+    failed: List[Dict] = []
+    rects = detect(args.input, args.seconds, args.samples, args.limit, args.round_to, duration, failed)
+    # windows_failed: a window ffmpeg could not decode was skipped without a word, so a
+    # crop measured on one window of five read as well-founded as one measured on all five
+    result: Dict = {"file": args.input, "source_width": sw, "source_height": sh,
+                    "windows": args.samples, "windows_failed": len(failed)}
+    if failed:
+        warn(f"cropdetect could not decode {len(failed)} of {args.samples} sampled windows; the crop rests on the other "
+             f"{args.samples - len(failed)}: {failed[-1]['error']}", "cropdetect_windows_failed",
+             failed=len(failed), windows=args.samples, starts=[f["start"] for f in failed])
     if not rects:
         result["crop"] = None
         info("no crop bars detected (cropdetect produced no readings -- try --limit higher, or the source may already be full-frame)")

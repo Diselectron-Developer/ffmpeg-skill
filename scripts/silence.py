@@ -22,6 +22,7 @@ from typing import List, Tuple
 from _common import (filler_spans, FILLER_WORDS, FILLER_AMBIGUOUS, FILLER_DISCOURSE_MARKERS,
                      FILLER_PAD, read_text_or_die)
 from _common import asr as _asr
+from _common.emit import warn
 from _common import detect_silences as detect, STATE, video_args, add_common, apply_common, audio_codec_for, cfr_args, default_output, die, emit, ffmpeg_base, info, is_audio_output, print_json, probe, run, X264_PRESETS, measured_level_dbfs, fmt_secs
 
 
@@ -101,13 +102,14 @@ def resolve_filler(args, meta):
             "timestamps) or --transcribe. There is no way to find a filler word without them -- "
             "cutting the short quiet blips instead would remove real speech.", kind="input")
     source, engine, raw, transcription = None, None, None, {}
+    untimed: list = []  # transcript words without a usable timing (a --words file can carry them)
     if args.words:
         try:
             raw = json.loads(read_text_or_die(args.words, "--words"))
         except ValueError as exc:
             die(f"--words {args.words}: not readable JSON ({exc})", kind="input")
         source = f"whisper-json:{args.words}"
-        words, had_segments = _words_from_transcript(raw)
+        words, had_segments, untimed = _words_from_transcript(raw)
         if not words:
             if had_segments:
                 die(f"the transcript in {args.words} has segment timings but no word timings; "
@@ -186,7 +188,8 @@ def resolve_filler(args, meta):
     wordlist |= set(_word_list(args.filler_extra))
     wordlist -= set(_word_list(args.filler_keep))
 
-    spans = filler_spans(words, wordlist, pad=args.filler_pad)
+    kept: dict = {}
+    spans = filler_spans(list(words) + untimed, wordlist, pad=args.filler_pad, stats=kept)
     removed_words = sorted({s["word"] for s in spans})
     warnings = []
     ambiguous = sorted(set(FILLER_AMBIGUOUS.get(lang, ())) & set(
@@ -210,12 +213,21 @@ def resolve_filler(args, meta):
         "removed_seconds": round(sum(s["end"] - s["start"] for s in spans), 3),
         "word_timings": len(words), "list": listname, "removed_words": removed_words,
         "warnings": warnings,
+        # listed words this run did not cut, and why: a transcript word with no timing has
+        # nothing to cut on, and one longer than a filler is a held vowel someone meant
+        "matched_untimed": kept.get("matched_untimed", 0),
+        "matched_too_long": kept.get("matched_too_long", 0),
     }
+    if block["matched_untimed"]:
+        warn(f"--filler: {block['matched_untimed']} listed word(s) in the transcript carry no usable timing and were "
+             "not removed (nothing measured to cut on)", "filler_words_untimed", count=block["matched_untimed"])
     return block, [(s["start"], s["end"]) for s in spans]
 
 
 def _words_from_transcript(data):
-    """([{word,start,end}], whether the document had segments at all) from a whisper JSON."""
+    """([{word,start,end}], whether the document had segments at all, [{word}] of the words
+    that carried no usable timing) from a whisper JSON. The third list lets --filler count a
+    listed word it could not cut instead of dropping it unseen."""
     raw, had_segments = [], False
     if isinstance(data, dict):
         raw = list(data.get("words") or [])
@@ -225,7 +237,7 @@ def _words_from_transcript(data):
             raw.extend((seg or {}).get("words") or [])
     elif isinstance(data, list):
         raw = list(data)
-    out = []
+    out, untimed = [], []
     for w in raw:
         if not isinstance(w, dict):
             continue
@@ -233,8 +245,8 @@ def _words_from_transcript(data):
             out.append({"word": str(w.get("word") or w.get("text") or ""),
                         "start": float(w["start"]), "end": float(w["end"])})
         except (KeyError, TypeError, ValueError):
-            continue
-    return out, had_segments
+            untimed.append({"word": str(w.get("word") or w.get("text") or "")})
+    return out, had_segments, untimed
 
 
 def main() -> int:
@@ -353,7 +365,7 @@ def main() -> int:
              f"{filler_info['removed_seconds']:.2f}s, from {filler_info['word_timings']} word timings "
              f"({filler_info['lang']}, list {filler_info['list']})")
         for warning in filler_info.get("warnings") or []:
-            info("warning: " + warning)
+            warn(warning, "filler_removal_caution")
     if getattr(args, "_asr_notes", None):
         # an English-only transcript made on an assumption (asr.assumed_english_note): the
         # bridge already logged the warning; the result document carries it at the top level

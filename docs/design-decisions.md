@@ -34,8 +34,11 @@ exists. When a decision changes, edit the entry in the same PR.
   `_contract.DRY_RUN_ANALYSIS`. Tests: `test_dry_run_never_runs_ffmpeg_and_writes_nothing`,
   `test_dry_run_plans_rest_on_real_measurements`.
 - **When a measured input is an intermediate an earlier dry-run stage would have written**
-  (render/batch plans), the measurement is skipped with a note rather than failing the plan.
-  Code: `_common.dry_run_input_pending()`.
+  (render/batch plans), the measurement is skipped rather than failing the plan, and the skip is
+  recorded: a `diagnostics.skipped` entry (`measurement_input_pending`, once per path) beside the
+  stderr line, which until the "nothing happens silently" work was the only "note" there was.
+  Code: `_common.dry_run_input_pending()`. Test:
+  `test_a_measurement_skipped_for_a_pending_input_reaches_the_document`.
 - **`join.py --dry-run` plans on an input that does not exist yet, whatever `--on-missing`
   says.** The file is taken for an earlier step's output (render's cut clips, a TTS line): it
   stays in the planned command and is named under `pending` and in `notes`, never under
@@ -1037,7 +1040,11 @@ not a new file format this tool would have to maintain.
   left to add); an explicit `--no-hw` (or `render.py`/`batch.py --no-hw`) is the caller's choice of
   the CPU and is not overridden, ffmpeg then refuses it as before; `FFMPEG_SKILL_HW=0` is no flag
   and does not stop it; AV1 and ProRes are out of scope (their own missing-encoder refusals stand).
-  An unreadable encoder list (empty) proves nothing is missing and changes nothing. No CPU line is
+  An unreadable encoder list (empty) proves nothing is missing, so here it moves no encode onto
+  VideoToolbox. (Through 2.10.11 this sentence said it "changes nothing", which held only for this
+  function: the same empty set made `--codec av1`/`prores` refuse with "this build has neither" and
+  `--hw`'s note say "this ffmpeg build has no h264_videotoolbox". The read failure is now kept and
+  named -- see "nothing happens silently", the encoder list.) No CPU line is
   recorded for it, so a job VideoToolbox refuses is a plain `kind: ffmpeg` failure naming
   `h264_videotoolbox`, not a retry that could not run. `doctor` agrees: a missing
   `encoder:libx264`/`libx265` whose VideoToolbox encoder is in the build, on a machine that passes the
@@ -1821,3 +1828,194 @@ under it; the rest of the silent paths are converted onto the same infrastructur
   `test_with_no_time_limit_a_live_holders_lock_is_never_taken_over`,
   `test_a_lock_an_older_version_wrote_is_taken_over_after_an_hour_as_before`,
   `test_running_without_a_lock_is_a_recorded_warning`.
+
+### Part 2: a degraded or partial result is never reported as the asked-for one
+
+- **A stage's verdict is the parent's.** `absorb_stage()` now also carries a stage's `notes`
+  (prefixed with its tool: `export: loudness ... is outside x's ...`) and, for a stage that
+  completed in a real run, its verification steps tagged with `stage`; `emit()` adds them to the
+  parent's own, so `render.py`'s `verified` is the conjunction of every stage's. Through 2.10 an
+  export that missed its loudness (`completed`, `verified: false`) made a render that said
+  `verified: true`. Carried: every step except a passing `probe`/`exists` of the stage's
+  intermediate (a completed stage passed them by definition, and they would only lengthen the
+  list); a stage that said `verified: false` without a failing step adds `{step: verified, stage,
+  ok: false}`. The same carry applies to an executed plan (its tool's steps used to be copied by
+  hand, untagged) and to a pack's renders. The entry "`verified` is what the tool measured itself"
+  above still holds: render's stages *are* what it ran. Code: `_common.emit.absorb_stage()`,
+  `emit()`. Test: `test_render_verified_is_every_stages_and_carries_their_notes`.
+- **A cache hit replays what the stage verified.** A `render.py --cache` sidecar keeps the stage's
+  `verified`, `verification`, `notes` and `diagnostics`; a hit feeds them through
+  `absorb_stage()` as a live stage would, so a cached unverified export stays unverified.
+  `references/scripts.md` said "Any mismatch is a silent miss" (and `cache_lookup()` returned
+  False "silently, because a miss is not an error"); a miss is still not an error, but every
+  miss is now in `cache.miss_reasons` (`not_cached`, `sidecar_missing`, `artifact_missing`,
+  `sidecar_corrupt`, `artifact_truncated`, `no_output_path`); the two that mean something damaged
+  a file this tool wrote are also a `cache_entry_damaged` warning and an audit line in the cache
+  directory's `.ffskill-audit.jsonl` (the cache directory is the place the event names). A store
+  that fails is a `cache_store_failed` warning, an input that cannot be fingerprinted a
+  `cache_input_unreadable` warning (it keys as `"missing"`), and an unreadable ffprobe banner a
+  `cache_ffmpeg_banner_unreadable` fallback: the sentence "Unreadable falls back to the parsed
+  pair" in "The ffmpeg version is inside the render cache key" still describes the key, and the
+  fallback is now said. Code: `render.cache_lookup()`, `cache_store()`. Tests:
+  `test_render_cache_says_why_a_stage_missed_and_replays_what_a_hit_verified`,
+  `test_render_cache_store_failure_banner_fallback_and_unreadable_input_are_recorded`.
+- **`"check": {"content": true}` without a platform runs.** A plan's check step already honoured
+  `content` alone (`render.execute_plan()`), and `check.py --content` without `--platform` is a
+  valid call (youtube assumed, judgement rows WARN), so the project stage now follows the same rule
+  rather than refusing a key the schema accepts; a failure is reported as a platform check's is
+  (`kind: verification`, "the content check failed"). A check stage the run does not perform is
+  recorded: `check_dry_run` under `--dry-run` (a plan's check steps too), `check_nothing_to_check`
+  for a stage with neither key. check.py output that does not parse is a failure document
+  (`status: failed`, `error.reason: check_output_unparsed`, `exit_code`, `stderr_tail`) where a
+  bare string stood. Code: `render.run_check()`, `render.main()`. Tests:
+  `test_render_runs_a_content_only_check_and_records_a_dry_run_skip`,
+  `test_check_output_that_does_not_parse_is_a_structured_failure`.
+- **`export.py` says what it cut and what it could not measure.** A trim to the platform maximum
+  is `trimmed: {from, to}` and a `notes` line (it is the preset's promise, so not a warning). A
+  loudness measurement that did not parse is `loudness: {lufs: null, tp: null, ok: null,
+  measured: false, reason: not_measured, target_*}`, a failing `{step: loudness, ok: false,
+  reason: not_measured}` and a `loudness_not_measured` warning -- check.py's WARN row for the same
+  case is the model; leaving the block out read as "nothing to check" and kept `verified: true`.
+  After `--normalize` a re-measurement that fails is the same record: the earlier measurement no
+  longer describes the file, and reusing it (2.10) reported the old level as the new one. A
+  platform preset on a source without audio records a `loudness_no_audio` skip. Code:
+  `export._loudness_unmeasured()`. Tests: `test_export_says_it_trimmed_to_the_platform_maximum`,
+  `test_export_an_unmeasured_loudness_is_a_failing_step_not_an_absence`.
+- **`multicam.py`'s `cuts` name the camera on screen.** A range whose camera has not started plays
+  camera 0 (unchanged); `cuts` now says 0 for it, as `--write-project` already did, and a
+  `camera_not_started` fallback names the camera asked for. Code: `multicam.main()`. Test:
+  `test_multicam_names_the_camera_it_rendered_not_the_one_asked_for`.
+- **`report.py` accounts for every section.** Each section it tries to build -- loudness of each
+  file with audio, the `--platform` compliance table, each contact sheet -- is a verification step;
+  one that could not be built is `ok: false` with the child's `reason`/`kind`/`message` and a
+  `report_section_missing` warning, so `verified` is false and `check: null` no longer sits beside
+  `verified: true`. The compliance step's `ok` means "the table is in the report"; what the table
+  says about the file is `passed`. Under `--dry-run` a contact sheet is a `report_section_dry_run`
+  skip (look.py draws nothing in a dry run). `--no-sheets` is the caller's request and is not
+  recorded. Test: `test_report_records_a_section_it_could_not_build`.
+- **`batch.py`: `ok` stays "every step completed"; `verified` is new beside it.** The entry
+  "`verified` is what the tool measured itself" decides that a spec miss is `completed` +
+  `verified: false`, not a failure, so a step that completed unverified is not counted as failed;
+  the row says `verified: false` and `unverified: [{step, tool, failed}]`, the batch's own
+  `verification` has one `item` step per row (its `verified` was always false before: it had no
+  steps), and a note names the items. A failed row's `error` is the failing step's own
+  `{step, tool, kind, message, code, reason, details, hint, exit_code}`; the old string `error`
+  (only ever a worker's exception text, or `"1"` -- `str(SystemExit)`) is replaced by that object,
+  with `exception` for a worker that raised. A recipe error that is the same for every item (a step
+  script outside `scripts/`, no steps) is refused once before any item runs. Code:
+  `batch.process()`, `step_error()`. Tests:
+  `test_batch_a_failed_item_says_which_step_failed_and_why`,
+  `test_batch_counts_a_completed_but_unverified_step_as_ok_and_says_it_is_unverified`,
+  `test_batch_a_worker_that_raised_names_its_error_not_its_exit_code`.
+- **An interrupted batch reports every item.** The shared signal handler exited with "nothing was
+  written" and, inside an item, surfaced as that item's failure while the batch went on. batch.py
+  installs its own SIGINT/SIGTERM handler: it stops the running steps (`stop_children()`, the
+  shared handler's first half) and raises KeyboardInterrupt, and the table then has one row per
+  input -- finished, `interrupted: true` (stopped while running), or `skipped: "interrupted"` (not
+  started) -- so `total` is the folder's count; exit 130 (143 for SIGTERM), `kind: interrupted`. A
+  `--watch` loop stops after an interrupted pass. Test:
+  `test_batch_interrupted_reports_every_item_and_the_right_total`.
+- **A batch cache hit is served only while its output is the file the batch wrote.** An entry now
+  keeps the output's `{size, mtime_ns}` (a stat, no read: a multi-GB delivery is not re-hashed per
+  run); a hit whose output changed is a miss (`cache_miss.reason: output_changed`, a
+  `batch_cache_output_changed` warning). An entry written by 2.10.11 or earlier has no identity and is not
+  served either (`entry_unverifiable`): one re-run per item is the cost of not serving a replaced
+  file as "cached ok". The GPU entry's "older caches still hit" is about the key and still holds; it
+  is this identity check that re-runs them once. A cache file that does not parse is a
+  `batch_cache_reset` warning plus an audit line in the output folder's `.ffskill-audit.jsonl`,
+  and an unreadable `recipe.project` (its content is in the key) a `recipe_project_unreadable`
+  warning. Code: `batch.cached_output_changed()`, `recipe_key()`. Tests:
+  `test_batch_serves_a_cached_output_only_while_it_is_unchanged_and_records_a_reset_cache`,
+  `test_batch_recipe_key_records_an_unreadable_project`.
+- **`verify.py` keeps each tool's own failure.** Steps run with `--json`; a failed step keeps the
+  tool's `kind`, `reason`, `message`, `details` and `exit_code` (`step_timeout`,
+  `step_output_unparsed` where the tool printed none), and the probe of an unreadable file keeps
+  probe's own message instead of "ffprobe failed". `error` stays the one-line table cell. A step
+  that does not apply is listed under the file's `skipped` (`quick`, `no_video`, `no_audio`,
+  `not_hdr`, `not_multichannel`, `input_unreadable`) and as a SKIP row in the report; `total` and
+  `failed` count only steps that ran, as before. Test:
+  `test_verify_keeps_the_tools_own_failure_and_lists_the_steps_it_skipped`.
+
+Part 3 converts the remaining fallbacks, skips and stderr-only warnings onto that infrastructure.
+What was decided there:
+
+- **A record is kept once per run; its stderr line is printed each time.** `_record()` does not
+  append an entry identical to one already there, so a decision taken for every encode of a job
+  (the libaom fallback, a CRF clamp, an odd-dimension retry) is one record. Code:
+  `_common.emit._record()`. Test: `test_the_libaom_fallback_and_a_clamped_crf_are_recorded`.
+- **Every code is a contract enum, and no tool prints a `warning:` line with `info()`.**
+  `json_output.diagnostic_codes` lists each code with its bucket (warnings / fallbacks / skipped)
+  and meaning; a source test reads every `warn()`/`record_fallback()`/`record_skip()` call against
+  it in both directions, and another refuses `info("warning ...")` (or `print`/`stderr.write`) under
+  `scripts/`, with no exception: part 2 converted `export.py`'s four (`colour_not_converted`,
+  `output_audio_silent`, `loudness_outside_spec` twice) and `multicam.py`'s low-confidence line
+  (`sync_low_confidence`, as `sync.py` records it), and the allowance the test held for them is gone. Code: `_contract.DIAGNOSTIC_CODES`. Tests:
+  `test_every_diagnostic_code_is_in_the_contract_under_its_bucket`,
+  `test_no_stderr_only_warning_is_left_in_the_sources`.
+- **Which bucket.** A fallback is another route the run took and went on with, whose result
+  differs from the asked one: an odd-sized frame scaled to even (`odd_dimensions_scaled_even`; the
+  output is a row or column smaller), subtitle/data streams dropped on a retry
+  (`non_av_streams_dropped`, with the first attempt's last stderr lines; `dropped_non_av_streams`
+  stays the boolean it was), libaom for a missing SVT-AV1 (`av1_encoder_libaom`), a substituted
+  font (`font_substituted`). A skip is a step that would normally run and did not: a dry-run
+  measurement of a pending input, a `--fix-drift` correction (`drift_correction_skipped`). The rest
+  are warnings, including `render.py`'s two defaults (`frame_from_export_preset`,
+  `normalize_on_by_default`): they are choices made for the caller, and the stderr wording is
+  kept (tests read `frame: 1920x1080 from the youtube export preset`). Tests:
+  `test_an_odd_sized_source_scaled_to_even_is_a_recorded_fallback`,
+  `test_run_keeping_subtitles_records_the_first_attempts_error`,
+  `test_stderr_only_warnings_reach_the_document`.
+- **An encoder list that could not be read is named, not taken for a missing encoder.**
+  `ffmpeg_encoders()`/`ffmpeg_bsfs()` still return an empty set (every caller's membership test
+  keeps working), but keep why (`ffmpeg_list_error()`: did not run, timed out, exited non-zero,
+  listed nothing) and record it once (`ffmpeg_list_unreadable`). `--codec av1`/`prores` then refuse
+  under their own reason, `kind: ffmpeg`, `error.reason: encoder_list_unreadable` -- not
+  `missing_tool`, which a build that was never read cannot be said to be -- while a list that was
+  read and lacks the encoder is `missing_tool`/`encoder_missing` as before. They still refuse
+  rather than guess an encoder: the encode would run on the binary that could not even list its
+  encoders. `--hw`'s CPU note says the VideoToolbox encoder "could not be confirmed". Code:
+  `_common.runner._read_ff_list()`, `_common.decision._refuse_missing_encoder()`, `_vt_args()`.
+  Test: `test_an_unreadable_encoder_list_is_named_not_taken_for_a_missing_encoder`.
+- **The CRF clamp is reported where it bites, which is the HEVC HDR line.** It asks x265 for
+  CRF+2, so `--quality 50`/`51` is encoded at 51 (`crf_clamped`, with requested, asked and used);
+  the AV1 cap at 63 is checked the same way but `apply_common()` already refuses a higher
+  `--quality`. Code: `_common.decision._clamped_crf()`.
+- **`FFMPEG_SKILL_TIMEOUT` keeps its meaning and gains a record.** Not a number (or NaN): the
+  default 1800 s, as before; negative: 0, i.e. no limit, as before (`max(0, value)`); each is a
+  `timeout_env_invalid` warning, recorded only when no `--timeout` overrides the variable. Blank
+  is unset. Changing a negative value to the default was considered and left: it would change what
+  a running deployment's setting does in a patch. Code: `_common.runner._read_env_timeout()`.
+  Test: `test_an_invalid_ffmpeg_skill_timeout_is_a_recorded_warning`.
+- **`font_used` says which font file drew the text, as far as this process can know it.**
+  `how` is `font_file`, `script`, `resolved` (fc-match, or the Windows Fonts folder), `by_name` (no
+  file: ffmpeg or libass resolve the name themselves, so the file is not claimed), `fonts_dir` or
+  `ass_styles` (`caption.py`). A resolved file is a substitute when none of the families
+  fontconfig lists for it is the asked one, compared without case, spaces or punctuation and as a
+  prefix either way ("DejaVu Sans Bold" is DejaVu Sans); a generic alias (`sans-serif`, `mono`,
+  ...) is never a substitute. On Windows a family that is not in the Fonts folder is a substitute
+  (Arial, or a CJK system font for a CJK-looking request). For libass on Windows nothing is
+  resolved (`by_name`): libass may find the family itself, and claiming Arial there would be the
+  same unverified guess this work removes. The script-coverage lines in `script_font_for_text()`
+  became records too (`font_lacks_script`, `font_coverage_unverified`, `fonts_dir_lacks_script`).
+  Code: `_common.fonts.resolve_font()`, `font_choice()`, `record_font_choice()`. Test:
+  `test_the_font_drawn_with_is_reported_and_a_substitute_recorded`.
+- **Counted skips get a field as well as a record.** `cropdetect.py` `windows`/`windows_failed`;
+  `sync.py --fix-drift` `drift_skipped_reason` (`too_short` / `low_confidence` / null, also in each
+  `sources` entry); `caption.py --ass` `caption.ass_shifted`/`ass_unshifted` (with `--offset`) and
+  `ass_malformed`; `silence.py --filler` `filler.matched_untimed` and `matched_too_long`. The
+  filler reader used to drop an untimed word before `filler_spans()` saw it, so it now hands them
+  over to be counted; `word_timings` still counts only timed words. `sync.py` printed the
+  single-source low-confidence warning twice (once per source, once overall); it is one
+  `sync_low_confidence` record. Tests: `test_cropdetect_counts_the_windows_it_could_not_decode`,
+  `test_a_skipped_drift_correction_says_why`, `test_caption_counts_ass_lines_it_could_not_shift_or_read`,
+  `test_filler_words_with_no_timing_are_counted`.
+- **A timeline that does not read back keeps its reason in a warning, not in the step.** The
+  `parse` verification step stays `{step, ok}` (`render.py` is not touched here);
+  `timeline.parses()` records `timeline_parse_failed` with the exception or what was read instead.
+  A JSON value that is not an object is now a reason, not an `AttributeError`. Code:
+  `_common.timeline.parses()`, `parse_error()`. Test: `test_a_timeline_that_does_not_parse_keeps_the_reason`.
+- **The MCP server answers a line that is not JSON with `-32700`, id null.** A JSON value that is
+  not an object and a notification still get no response (`test_mcp_server_survives_a_non_object_json_line`
+  pins that): JSON-RPC answers an invalid request with `-32600`, but a scalar on stdin is no request
+  this server can name, and replying to one was not asked for. Code: `mcp/server.py` `main()`. Test:
+  `test_mcp_server_error_paths_raw_argv_and_call_helper`.

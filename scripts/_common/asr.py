@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from _common.decision import fmt_srt_time, parse_time
-from _common.emit import die, info
+from _common.emit import die, info, warn
 from _common.runner import read_text_or_die
 
 # The engines this skill knows how to drive, and how to install each -- one string, so every
@@ -296,7 +296,7 @@ def _parakeet_attempt(engines: "List[str]", facts: Dict[str, Any], wanted: str, 
             else:
                 run.notes.append(assumed_english_note(language_flag, whisper_failed=facts.get("routing") == ROUTING_LAST_RESORT,
                                                       parakeet_model=facts.get("routing") == ROUTING_PARAKEET_MODEL))
-                info("warning: " + run.notes[-1])
+                warn(run.notes[-1], "asr_language_assumed")
         return run, os.path.basename(chosen)
     return None
 

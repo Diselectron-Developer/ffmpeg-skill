@@ -25,6 +25,7 @@ import math
 import sys
 
 from _common import add_common, aac_args, apply_common, cfr_args, default_output, die, emit, ffmpeg_base, info, parse_time, probe, run, video_args, X264_PRESETS, time_arg, fmt_secs
+from _common.emit import warn
 
 
 # The loop filter's size is capped at 32767 frames, so one boomerang cycle (2N-2 frames) must fit.
@@ -51,8 +52,9 @@ def _boomerang_graph(meta, src_dur: float, times) -> str:
     bytes_per_frame = v["width"] * v["height"] * 1.5 * (2 if (v.get("bit_depth") or 8) > 8 else 1)
     held = bytes_per_frame * frames
     if held > 2 * 1024 ** 3:
-        info(f"warning: --boomerang holds about {held / 1024 ** 3:.1f} GiB of decoded frames in memory "
-             f"({frames} frames of {v['width']}x{v['height']}) -- cut the clip shorter first (cut.py) if RAM is tight")
+        warn(f"--boomerang holds about {held / 1024 ** 3:.1f} GiB of decoded frames in memory "
+             f"({frames} frames of {v['width']}x{v['height']}) -- cut the clip shorter first (cut.py) if RAM is tight",
+             "memory_heavy", bytes=int(held))
     repeats = -1 if times is None else times - 1
     # Retimed by frame index at the source's nominal rate: a VFR source's reversed half carries
     # its gaps mirrored, and a CFR conform after the graph duplicated a frame against them (a
