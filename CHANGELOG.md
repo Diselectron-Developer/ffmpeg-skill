@@ -4,7 +4,16 @@
 
 ## Unreleased
 
-(nothing yet)
+### Added
+
+- **Refusals say why in fields, not only in prose.** A refusal's `error` now carries `reason`, a stable code (`output_exists`, `output_is_input`, `output_is_directory`, `output_dir_missing`, `output_dir_not_writable`, `output_locked`, and `render.py`'s `plan_inputs_changed`, `plan_version_unsupported`, `plan_unknown_tool`, `plan_cwd_missing`, `plan_argv_invalid`), and `details`, the facts the message is written from. `contract --json` lists the codes under `json_output.error_reasons`. `render.py` forwards a stage's or a plan's tool's `reason` and `details` in its own `error`. Additive: `kind`, `message`, `code` and `hint` are unchanged.
+- **`diagnostics`: what a run decided on its own.** Success and failure documents carry `diagnostics: {warnings, fallbacks, skipped}` (each entry `{code, message, ...facts}`) when the run recorded any, beside the stderr line it always printed. `render.py` carries its stages' entries, tagged with `stage`.
+- **A refused plan is explained and logged.** `render.py PLAN` refusing a plan whose inputs changed lists every input as `{path, status, expected: {size, sha256_head_tail}, actual}` (`actual: "missing"` for a file that is gone) with `plan_sha256` and `checked_at` in `error.details`, and appends one JSON line to `<plan>.audit.jsonl` next to the plan, or to the new `render.py --audit-log FILE`. A log that cannot be written is a `diagnostics.warnings` entry, never the failure; a `--dry-run` writes none.
+- **Plans name the inputs they could not bind.** `--plan` writes `unbound_inputs`, the inputs that did not exist yet (an earlier step's output) and so carry no fingerprint; executing the plan reports them as `unbound_inputs` and a `plan_unbound_inputs` warning. `plan_version` stays 1.
+
+### Changed
+
+- **A live run keeps its output lock until its own time limit has passed.** A lock older than an hour was taken over even while its pid was running, so an encode longer than an hour could lose its lock to a second writer. The writer now dates its lock to its deadline (4x `--timeout` + 60 s; never with `--timeout 0`), and a live holder's lock is taken over only after that; a dead pid's lock is still taken over at once. A lock written by an earlier version is read as before (an hour). A takeover is recorded (`diagnostics.fallbacks`, `stale_lock_taken_over`, and a `lock_takeover` line in the hidden `.<output>.ffskill-audit.jsonl` or `--audit-log`), and so is running without a lock where none can be created (`output_unlocked`). A lock refusal names the holder's pid and the lock file in `error.details`.
 
 ## 2.10.11
 

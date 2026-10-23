@@ -72,7 +72,7 @@ from export import PRESETS, PLATFORM_OF
 from _platforms import PLATFORMS, caption_defaults, resolve as resolve_platform
 from _common import STATE, add_common, aspect_ratio, brand_caption_style, load_brand, apply_common, child_args, die, emit, info, probe, require_tool, run, run_tool, place_output, refuse_output_is_input, _check_existing_output, _check_output_path, fingerprint, PLAN_VERSION, ffmpeg_version, ffmpeg_exe
 from _common.runner import HW_ENV, HW_FORCED_ENV, add_hw_orchestrator_args
-from _common.emit import absorb_stage_hw
+from _common.emit import absorb_stage, audit, refuse, warn
 import subprocess
 from _contract import CONTRACT_VERSION
 from batch import file_key
@@ -364,7 +364,7 @@ def render_pack(names: List[str], args) -> int:
             if line.startswith("$ ") or line.startswith("[dry-run]"):
                 STATE.commands.append(line[2:] if line.startswith("$ ") else line)
         STATE.commands.extend(str(c) for c in (doc.get("commands") or []))
-        absorb_stage_hw(name, doc)
+        absorb_stage(name, doc)
         out = doc.get("output") or dest_out
         chk = doc.get("check") or {}
         ok = proc.returncode == 0 and doc.get("status") == "completed"
@@ -580,26 +580,26 @@ def sh(script: str, *argv: Any, extra: List[str] = None, stage: str = None) -> s
         # needs (a timeout inside audio.py is a timeout, not an "input" error of render.py).
         err = doc.get("error") or {}
         extra_fields = {"hint": err["hint"]} if err.get("hint") else {}
-        extra_fields.update(_stage_failure_hw(Path(script).stem, doc))
+        error_extra = absorb_stage(Path(script).stem, doc)  # the stage's reason/details and records ride along
+        extra_fields.update(_stage_failure_hw(doc))
         die(f"{script} failed: {err.get('message') or (proc.stderr.strip().splitlines() or ['?'])[-1][:300]}",
-            code=int(doc.get("exit_code") or 1), kind=err.get("kind") or "input", stage=script, **extra_fields)
+            code=int(doc.get("exit_code") or 1), kind=err.get("kind") or "input", stage=script, error_extra=error_extra, **extra_fields)
     _LAST_DOC.clear()
     _LAST_DOC.update(doc if isinstance(doc, dict) else {})
-    absorb_stage_hw(Path(script).stem, doc)  # a stage's GPU facts (ran on VideoToolbox, fell back and why) reach this result
+    absorb_stage(Path(script).stem, doc)  # a stage's GPU facts (ran on VideoToolbox, fell back and why) and its diagnostics reach this result
     out_path = str(doc.get("output") or "")
     if key:
         cache_store(stage, key, out_path or (dest or ""), time.time() - started)
     return out_path
 
 
-def _stage_failure_hw(stage: str, doc: Any) -> Dict[str, Any]:
-    """A failed stage's GPU facts, for render's own failure document: the stage's `hw` joins the
-    earlier stages' (a fallback before the failure is not lost), and its `encoder` -- the command
-    that failed -- is forwarded. die() then adds `hw` for a kind: ffmpeg failure, as a tool's own
+def _stage_failure_hw(doc: Any) -> Dict[str, Any]:
+    """A failed stage's `encoder` -- the command that failed -- for render's own failure document
+    (absorb_stage() has already joined the stage's `hw` to the earlier stages'; a fallback before
+    the failure is not lost). die() then adds `hw` for a kind: ffmpeg failure, as a tool's own
     run() failure carries it."""
     if not isinstance(doc, dict):
         return {}
-    absorb_stage_hw(stage, doc)
     return {"encoder": doc["encoder"]} if doc.get("encoder") else {}
 
 
@@ -731,40 +731,94 @@ def cache_store(stage: str, key: str, produced: str, seconds: float) -> None:
         info(f"cache: could not store the {stage} artifact ({exc}); the run is unaffected")
 
 
+def _utc_now() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _plan_sha256(path: str) -> Optional[str]:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _reject_plan(path: str, plan_sha256: Optional[str], reason: str, msg: str, *, hint: Optional[str] = None,
+                 **details: Any) -> None:
+    """Refuse a plan: one audit record (the plan's `<plan>.audit.jsonl`, or --audit-log), then
+    the failure document with `error.reason` and `error.details` -- the plan, its sha256, when it
+    was checked, the facts below, and where the audit record went."""
+    details = dict({"plan": path, "plan_sha256": plan_sha256, "checked_at": _utc_now()}, **details)
+    details["audit_log"] = audit("plan_rejected", dict(details, reason=reason), default_path=path + ".audit.jsonl",
+                                 plan_sha256=plan_sha256)
+    refuse("input", reason, msg, hint=hint, extra={"plan": path}, **details)
+
+
+def plan_input_status(inputs: Sequence[Any]) -> List[Dict[str, Any]]:
+    """Each fingerprinted plan input against the file as it is now: {path, status: unchanged |
+    changed | missing, expected: {size, sha256_head_tail}, actual: {size, sha256_head_tail} or
+    "missing"}."""
+    rows: List[Dict[str, Any]] = []
+    for inp in inputs:
+        inp = inp if isinstance(inp, dict) else {"path": inp}
+        p = inp.get("path")
+        expected = {"size": inp.get("size"), "sha256_head_tail": inp.get("sha256_head_tail")}
+        if not p or not os.path.isfile(str(p)):
+            rows.append({"path": p, "status": "missing", "expected": expected, "actual": "missing"})
+            continue
+        try:
+            now = fingerprint(str(p))
+        except OSError:
+            rows.append({"path": p, "status": "missing", "expected": expected, "actual": "missing"})
+            continue
+        actual = {"size": now["size"], "sha256_head_tail": now["sha256_head_tail"]}
+        rows.append({"path": p, "status": "unchanged" if actual == expected else "changed", "expected": expected, "actual": actual})
+    return rows
+
+
 def execute_plan(plan: Dict[str, Any], path: str) -> int:
     """Run a plan written by `<tool> --plan FILE`: refuse if any fingerprinted input changed since
     the plan was made (the plan's commands would then describe a different edit), run the tool
-    with the planned argv, then the plan's verify steps. --dry-run prints the planned commands."""
+    with the planned argv, then the plan's verify steps. --dry-run prints the planned commands.
+
+    Every refusal is `kind: input` with `error.reason` and `error.details` and appends one audit
+    record (docs/design-decisions.md, "Nothing happens silently")."""
+    digest = _plan_sha256(path)
     if plan.get("plan_version") != PLAN_VERSION:
-        die(f"{path}: plan_version {plan.get('plan_version')!r} is not {PLAN_VERSION}")
+        _reject_plan(path, digest, "plan_version_unsupported",
+                     f"{path}: plan_version {plan.get('plan_version')!r} is not {PLAN_VERSION}",
+                     plan_version=plan.get("plan_version"), supported=[PLAN_VERSION])
     tool = str(plan.get("tool") or "")
     script = HERE / f"{tool}.py"
     if not re.fullmatch(r"[a-z][a-z0-9_]*", tool) or not script.exists() or tool == "render":
-        die(f"{path}: unknown tool {tool!r}")
-    changed = []
-    for inp in plan.get("inputs") or []:
-        p = inp.get("path")
-        if not p or not os.path.isfile(p):
-            changed.append(f"{p}: missing")
-            continue
-        now = fingerprint(p)
-        if now["size"] != inp.get("size") or now["sha256_head_tail"] != inp.get("sha256_head_tail"):
-            changed.append(f"{p}: content changed since the plan was made")
-    if changed:
-        die("plan inputs differ from what was planned; re-run the tool with --plan to make a new plan:\n  " + "\n  ".join(changed),
-            hint="plans are bound to the exact input files they were made from")
+        _reject_plan(path, digest, "plan_unknown_tool", f"{path}: unknown tool {tool!r}", tool=tool)
+    unbound = [str(u) for u in (plan.get("unbound_inputs") or [])]
+    rows = plan_input_status(plan.get("inputs") or [])
+    bad = [r for r in rows if r["status"] != "unchanged"]
+    if bad:
+        lines = [f"{r['path']}: missing" if r["status"] == "missing" else f"{r['path']}: content changed since the plan was made"
+                 for r in bad]
+        _reject_plan(path, digest, "plan_inputs_changed",
+                     "plan inputs differ from what was planned; re-run the tool with --plan to make a new plan:\n  " + "\n  ".join(lines),
+                     hint="plans are bound to the exact input files they were made from",
+                     inputs=rows, unbound_inputs=unbound)
+    if unbound:
+        warn(f"{len(unbound)} plan input(s) did not exist when the plan was made, so nothing checks that they are the files "
+             "it was made for: " + ", ".join(unbound), "plan_unbound_inputs", paths=unbound)
     if plan.get("cwd"):
         if not os.path.isdir(plan["cwd"]):
-            die(f"plan cwd {plan['cwd']} no longer exists; relative paths in the plan would resolve elsewhere -- re-plan")
+            _reject_plan(path, digest, "plan_cwd_missing",
+                         f"plan cwd {plan['cwd']} no longer exists; relative paths in the plan would resolve elsewhere -- re-plan",
+                         cwd=plan["cwd"])
         os.chdir(plan["cwd"])
     if not isinstance(plan.get("argv"), list):
-        die(f"{path}: argv must be a list")
+        _reject_plan(path, digest, "plan_argv_invalid", f"{path}: argv must be a list", argv_type=type(plan.get("argv")).__name__)
     argv = [str(a) for a in plan["argv"]]
     if STATE.dry_run:
         for c in plan.get("commands") or []:
             STATE.commands.append(c)
             info("[dry-run] " + c)
-        emit(plan.get("output"), plan=path, tool=tool, stages=[tool], check=None)
+        emit(plan.get("output"), plan=path, plan_sha256=digest, tool=tool, stages=[tool], check=None, unbound_inputs=unbound)
         return 0
     info(f"executing plan {path}: {tool} " + " ".join(argv))
     proc = run_tool([str(script)] + argv + child_args() + ["--json"])
@@ -779,9 +833,10 @@ def execute_plan(plan: Dict[str, Any], path: str) -> int:
         doc = {}
     if proc.returncode != 0 or doc.get("status") != "completed":
         err = doc.get("error") or {}
+        error_extra = absorb_stage(tool, doc)  # the tool's reason/details and records ride along
         die(f"{tool} failed while executing the plan: {err.get('message') or proc.stderr.strip()[-300:]}",
-            kind=err.get("kind", "ffmpeg"), plan=path, tool=tool, **_stage_failure_hw(tool, doc))
-    absorb_stage_hw(tool, doc)  # the tool's GPU facts (fell back and why, ran on VideoToolbox) reach this result
+            kind=err.get("kind", "ffmpeg"), plan=path, tool=tool, error_extra=error_extra, **_stage_failure_hw(doc))
+    absorb_stage(tool, doc)  # the tool's GPU facts (fell back and why, ran on VideoToolbox) and diagnostics reach this result
     output = doc.get("output") or plan.get("output")
     check_result = None
     exit_code = 0
@@ -805,7 +860,7 @@ def execute_plan(plan: Dict[str, Any], path: str) -> int:
         info(f"plan done: {output}, but the {check_result.get('platform') or 'content'} check failed" + (f": {', '.join(failed_rows)}" if failed_rows else ""))
     else:
         info(f"plan done: {output}")
-    emit(output, plan=path, tool=tool, stages=[tool] + (["check"] if check_result else []), check=check_result, tool_result=doc,
+    emit(output, plan=path, plan_sha256=digest, unbound_inputs=unbound, tool=tool, stages=[tool] + (["check"] if check_result else []), check=check_result, tool_result=doc,
          verification=([{"step": "check", "ok": not exit_code, "platform": check_result.get("platform")}] if check_result else [])
          + [s for s in (doc.get("verification") or []) if s.get("step") != "probe"])
     return 0
@@ -902,6 +957,10 @@ def main() -> int:
                     help="write the project's cut as an editor timeline instead of rendering it: .fcpxml (Final Cut, "
                          "Resolve), .edl (CMX 3600: Premiere, Resolve, Avid) or .otio (OpenTimelineIO); clips, speed, "
                          "transitions, the music bed and chapter markers carry over, everything else is listed as not exported")
+    ap.add_argument("--audit-log", metavar="FILE",
+                    help="append the audit records of this run (a refused plan, a lock taken over, ...) to FILE as JSON lines; "
+                         "default for a refused plan: <plan>.audit.jsonl next to it. A record that cannot be written is a "
+                         "warning, never a failure")
     ap.add_argument("--stop-after", choices=["clips", "join", "silence", "fit", "captions", "graphics", "overlays", "audio", "loudness", "export"], help="stop after this stage (for iterating)")
     tpl = ap.add_argument_group("delivery templates (one command per destination)")
     tpl.add_argument("--template", metavar="NAME", help="render INPUT with a shipped template: " + ", ".join(template_names())
@@ -923,6 +982,7 @@ def main() -> int:
     add_hw_orchestrator_args(ap)
     args = ap.parse_args()
     apply_common(args)
+    STATE.audit_log = os.path.abspath(args.audit_log) if args.audit_log else None
 
     if args.list_templates:
         list_templates()

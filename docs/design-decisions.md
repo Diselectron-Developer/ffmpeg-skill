@@ -1756,3 +1756,68 @@ not a new file format this tool would have to maintain.
   `doctor --json` describes, so it has a key (`ffmpeg_security.warnings`). The 3.9 floor and CI's
   3.9 job stay until 3.0. Tests: `test_python_3_9_is_deprecated_on_every_surface`,
   `test_doctor_prints_the_python_3_9_warning_on_stderr_only`, `test_installer_warns_once_on_python_3_9`.
+
+## Unreleased — nothing happens silently
+
+The principle: every refusal, rejection, skip, fallback or swallowed error leaves a structured
+record a caller can read -- fields in the `--json` document, not only prose in `error.message` --
+plus its stderr line. The entries below are the infrastructure and the first decisions taken
+under it; the rest of the silent paths are converted onto the same infrastructure in later PRs.
+
+- **A refusal is `refuse(kind, reason, message, **details)`: `error.reason` is a stable code and
+  `error.details` the facts.** `kind` keeps its meaning (the failure class, mapped 1:1 to `code`);
+  `reason` says *why* within it, from a closed list the contract publishes
+  (`json_output.error_reasons`), and `details` carries the values the message is written from
+  (paths, expected and actual). Both are absent on a failure that is not a refusal, the way `hint`
+  is, so the failure example in `docs/contract.md` keeps its four keys. `reason` lives inside
+  `error` because the top-level `reason` is already taken by `caption.py`'s `no_speech` refusal.
+  Code: `_common.emit.refuse()`, the runner's output guards. Tests:
+  `test_refusals_at_the_runner_choke_points_carry_a_reason_and_details`,
+  `test_every_refusal_reason_is_in_the_contract_and_the_runner_guards_use_refuse` (a source
+  check: every `refuse()` reason literal is in the contract and the guards never `die()` in prose).
+- **The collector's records are under `diagnostics`, not top-level `warnings`/`skipped`.**
+  `check.py`'s `warnings` is a count and `join.py`'s `skipped` its left-out inputs, so top-level
+  keys of those names would mean two things. `diagnostics: {warnings, fallbacks, skipped}` holds
+  `{code, message, ...facts}` entries recorded by `warn()`/`record_fallback()`/`record_skip()`
+  (each also prints its line), merged by `emit()` and `die()` as `hw_notes` becomes `hw.notes`,
+  present only when an entry exists. `render.py` takes a stage's entries with `absorb_stage()`,
+  adding `stage`. Code: `_common.emit._merge_collector()`, `absorb_stage()`. Test:
+  `test_a_stale_lock_taken_over_is_recorded_in_the_document_and_the_audit_log`.
+- **The audit log is appended only where an event names a place, and never fails the run.**
+  JSON lines `{ts, tool, event, pid, plan_sha256, details}`. A refused plan goes to
+  `<plan>.audit.jsonl` (the plan is what the reader will look at); a lock event to the hidden
+  `.<output>.ffskill-audit.jsonl` beside the lock it concerns; `render.py --audit-log FILE`
+  replaces both. An event with neither (an output-is-input refusal without `--audit-log`) is in
+  the document only: a log appearing next to arbitrary outputs unasked would contradict "a plan
+  leaves nothing behind". A failed write is a `diagnostics.warnings` entry
+  (`audit_log_unwritable`), and the refusal's `details.audit_log` says `{path, written}`. Nothing
+  is appended under `--dry-run`, even for a refusal the dry run predicts: a dry run writes
+  nothing, and `details.audit_log` then says `reason: "dry_run"`. Code: `_common.emit.audit()`,
+  `render._reject_plan()`. Tests: `test_a_refused_plan_says_what_changed_and_leaves_an_audit_record`,
+  `test_a_failed_audit_write_is_a_warning_not_a_failure`.
+- **A refused plan lists every input, not only the bad ones.** `details.inputs` is
+  `[{path, status: unchanged|changed|missing, expected, actual}]` so a caller sees the whole
+  binding at once; `actual` is the string `"missing"` for a file that is gone. The message keeps
+  the per-file prose and the word "changed". Inputs that did not exist when the plan was made are
+  recorded in the plan as `unbound_inputs` (additive: `plan_version` stays 1) and reported on
+  execution as a warning, not refused: a plan over an earlier step's output is the use case
+  `join.py`'s pending inputs exist for. Code: `render.execute_plan()`, `_common.emit._plan_unbound_inputs()`.
+  Test: `test_a_plan_names_the_inputs_it_could_not_bind_and_render_reports_them`.
+- **A live holder's output lock is taken over only after its own time limit.** Through 2.10 a lock
+  older than an hour was taken over even while its pid ran, so a legitimate encode longer than an
+  hour (an `--timeout 0` master, a slow AV1 pass) lost its lock to a second writer: the F1 bug the
+  lock exists for. A live pid is not proof of a live writer (a pid can be reused), so the takeover
+  is kept, but bounded by the holder's own deadline: `child_limit()` from the lock's creation
+  (4x `--timeout` + 60 s, which covers every retry `run()` makes under one lock); with
+  `--timeout 0`, never. The writer stores the deadline as the lock's mtime minus an hour, so the
+  rule every version applies ("older than an hour") means "past the deadline" in both directions
+  and the lock file still holds only the pid. A dead pid's lock is taken over at once, as before.
+  The cost: a pid reused by an unrelated long-lived process blocks the output until the
+  deadline (about two hours by default, forever under `--timeout 0`); the refusal names the pid
+  and the lock file to delete. A takeover is a `stale_lock_taken_over` fallback plus a
+  `lock_takeover` audit line; running without a lock where none can be created is an
+  `output_unlocked` warning plus an audit line. Code: `_common.runner._OutputLock`. Tests:
+  `test_a_live_holder_keeps_its_lock_past_an_hour_while_inside_its_own_limit`,
+  `test_with_no_time_limit_a_live_holders_lock_is_never_taken_over`,
+  `test_a_lock_an_older_version_wrote_is_taken_over_after_an_hour_as_before`,
+  `test_running_without_a_lock_is_a_recorded_warning`.

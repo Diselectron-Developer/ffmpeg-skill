@@ -217,7 +217,8 @@ class Context:
     """
 
     __slots__ = ("dry_run", "json", "json_brief", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written", "preexisting", "plan", "plan_written", "plan_inputs", "codec",
-                 "hw", "hw_source", "hw_notes", "hw_swaps", "hw_fallback", "hw_env_ignored", "hw_stages", "hw_auto")
+                 "hw", "hw_source", "hw_notes", "hw_swaps", "hw_fallback", "hw_env_ignored", "hw_stages", "hw_auto",
+                 "notes", "warnings", "fallbacks", "skipped", "audit_log")
 
     def __init__(self) -> None:
         self.reset()
@@ -246,6 +247,15 @@ class Context:
         self.hw_env_ignored = False                  # $FFMPEG_SKILL_HW=1 was set but this tool's delivery preset does not take it (export.py)
         self.hw_stages: List[Dict[str, Any]] = []    # render.py: the `hw` facts each stage (a child process) reported
         self.hw_auto: List[str] = []                 # CPU encoders (libx264/libx265) this ffmpeg build lacks, whose encodes ran on VideoToolbox without --hw
+        # The collector (docs/design-decisions.md, "Nothing happens silently"): what this run
+        # decided on its own -- a warning, a fallback, a step it skipped -- recorded as it happens
+        # by warn()/record_fallback()/record_skip() (stderr too) and merged by emit()/die() into
+        # the document: `notes` (strings) and `diagnostics: {warnings, fallbacks, skipped}`.
+        self.notes: List[str] = []
+        self.warnings: List[Dict[str, Any]] = []
+        self.fallbacks: List[Dict[str, Any]] = []
+        self.skipped: List[Dict[str, Any]] = []
+        self.audit_log: Optional[str] = None         # render.py --audit-log FILE: where audit() appends; None = the event's own default
 
 
 STATE = Context()
@@ -531,12 +541,21 @@ def _check_no_overwrite_input(cmd: Sequence[str]) -> None:
         if a == "-i" and i + 1 < len(cmd):
             inp = cmd[i + 1]
             try:
-                if os.path.realpath(inp) == out_real:
-                    die(f"refusing to run: output {output!r} is the same file as input {inp!r} "
-                        f"(would overwrite it while ffmpeg is still reading it) -- choose a different --output/-o path",
-                        kind="input")
+                same = os.path.realpath(inp) == out_real
             except OSError:
                 continue
+            if same:
+                _refuse_output_is_input(output, inp, out_real, "would overwrite it while ffmpeg is still reading it")
+
+
+def _refuse_output_is_input(output: str, inp: str, real: str, why: str) -> None:
+    """The one refusal both output-is-input guards end in: structured, and in the audit log when
+    one is configured (render.py --audit-log)."""
+    details = {"output": output, "input": inp, "resolved": real}
+    audit("output_is_input_refused", details)
+    refuse("input", "output_is_input",
+           f"refusing to run: output {output!r} is the same file as input {inp!r} ({why}) -- choose a different --output/-o path",
+           **details)
 
 
 def refuse_output_is_input(output: str, *inputs: str) -> None:
@@ -555,8 +574,7 @@ def refuse_output_is_input(output: str, *inputs: str) -> None:
         except OSError:
             continue
         if same:
-            die(f"refusing to run: output {output!r} is the same file as input {inp!r} "
-                f"(the result would replace the source) -- choose a different --output/-o path", kind="input")
+            _refuse_output_is_input(output, inp, out_real, "the result would replace the source")
 
 
 def _check_output_path(cmd: Sequence[str]) -> None:
@@ -567,12 +585,15 @@ def _check_output_path(cmd: Sequence[str]) -> None:
     if output == "-" or output.startswith("pipe:") or output.startswith("-"):
         return
     if os.path.isdir(output):
-        die(f"output {output!r} is a directory; pass a file path (e.g. {os.path.join(output, 'result.mp4')!r})")
+        refuse("input", "output_is_directory",
+               f"output {output!r} is a directory; pass a file path (e.g. {os.path.join(output, 'result.mp4')!r})", output=output)
     parent = os.path.dirname(os.path.abspath(output))
     if not os.path.isdir(parent):
-        die(f"output directory {parent!r} does not exist; create it first (this tool never creates directories)")
+        refuse("input", "output_dir_missing",
+               f"output directory {parent!r} does not exist; create it first (this tool never creates directories)",
+               output=output, directory=parent)
     if not os.access(parent, os.W_OK):
-        die(f"output directory {parent!r} is not writable")
+        refuse("input", "output_dir_not_writable", f"output directory {parent!r} is not writable", output=output, directory=parent)
 
 
 EVEN_SCALE = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
@@ -602,14 +623,29 @@ def _pid_dead(pid: int) -> bool:
         return False
 
 
+LOCK_HOUR = 3600.0
+LOCK_UNLIMITED = 10 * 365 * 86400.0  # --timeout 0: the deadline is pushed past any run (and kept short of 2038)
+
+
 class _OutputLock:
     """Two runs writing the same output at once used to both report `completed` while one of
     them described the other's file (sweep F1). A lock file next to the output, created with
-    O_EXCL and holding the writer's pid, makes the second run refuse as `kind: input`. A lock
-    whose pid is dead (POSIX) or older than an hour is stale and taken over."""
+    O_EXCL and holding the writer's pid, makes the second run refuse (`kind: input`,
+    `reason: output_locked`, the holder in `details`).
+
+    Stale locks: a lock whose pid is dead is taken over. A lock whose pid is alive is taken over
+    only once its holder's own time limit has passed: the writer sets the lock's mtime to that
+    deadline minus an hour, so "older than an hour" -- the rule every version since 1.x applies,
+    which this keeps compatible in both directions -- means "past the deadline". The deadline is
+    child_limit() from now (4x --timeout + 60 s, the ceiling on everything one run() does under
+    the lock); with --timeout 0 there is none and a live holder is never taken over. Through 2.10
+    the hour ran from the lock's creation, so a legitimate run longer than an hour lost its lock
+    to a second writer. A takeover is recorded (`diagnostics.fallbacks`, stderr, and the audit
+    log); so is running without a lock where none can be created (`diagnostics.warnings`)."""
     def __init__(self, output: str) -> None:
         self.path: Optional[str] = None
         self.fd: Optional[int] = None
+        self.output = output
         if output == "-" or output.startswith("pipe:") or output.startswith("-"):
             return
         d, base = os.path.split(os.path.abspath(output))
@@ -618,33 +654,90 @@ class _OutputLock:
     def __enter__(self) -> "_OutputLock":
         if not self.path:
             return self
+        taken: Optional[Dict[str, Any]] = None
         for attempt in (0, 1):
             try:
                 self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
                 os.write(self.fd, str(os.getpid()).encode())
+                self._set_deadline()
+                if taken is not None:
+                    self._record_takeover(taken)
                 return self
             except FileExistsError:
-                if attempt == 0 and self._stale():
+                holder = self._holder()
+                if attempt == 0 and holder["stale"]:
                     try:
                         os.remove(self.path)
                     except OSError:
                         pass
+                    taken = holder
                     continue
-                die(f"another run is writing {os.path.basename(self.path)[1:-len('.ffskill-lock')]!r} right now "
-                    f"(lock {self.path}); wait for it or choose a different --output/-o path")
-            except OSError:
-                return self  # unlockable location (read-only dir surfaces elsewhere): proceed without a lock
+                name = os.path.basename(self.path)[1:-len(".ffskill-lock")]
+                refuse("input", "output_locked",
+                       f"another run is writing {name!r} right now (lock {self.path}"
+                       + (f", pid {holder['pid']}" if holder.get("pid") else "") + "); wait for it or choose a different --output/-o path",
+                       hint=("wait for that run, or choose another -o path; if pid "
+                             f"{holder.get('pid')} is not an ffmpeg-skill run, delete {self.path}"),
+                       lock=self.path, output=os.path.abspath(self.output), **{k: v for k, v in holder.items() if k != "stale"})
+            except OSError as exc:
+                # an unlockable location (a read-only directory surfaces elsewhere): the run goes
+                # on without a lock, and says so -- two runs could now both write this output
+                details = {"lock": self.path, "output": os.path.abspath(self.output), "error": str(exc)}
+                warn(f"could not create the output lock {self.path} ({exc}); running without one, so a second run "
+                     "writing the same output at the same time would not be refused", "output_unlocked", **details)
+                audit("output_unlocked", details, default_path=self._audit_default())
+                return self
         return self
 
-    def _stale(self) -> bool:
+    def _audit_default(self) -> Optional[str]:
+        if not self.path:
+            return None
+        d, base = os.path.split(os.path.abspath(self.output))
+        return os.path.join(d, f".{base}.ffskill-audit.jsonl")
+
+    def _set_deadline(self) -> None:
+        import time
+        limit = child_limit()
+        deadline = time.time() + (limit if limit else LOCK_UNLIMITED)
         try:
-            pid = int(open(self.path).read().strip() or "0")
-            if pid > 0 and _pid_dead(pid):
-                return True
-            import time
-            return time.time() - os.path.getmtime(self.path) > 3600
+            os.utime(self.path, (deadline - LOCK_HOUR, deadline - LOCK_HOUR))
+        except (OSError, OverflowError, ValueError) as exc:
+            warn(f"could not date the output lock {self.path} ({exc}); another run may take it over an hour from now",
+                 "lock_deadline_unset", lock=self.path, error=str(exc))
+
+    def _holder(self) -> Dict[str, Any]:
+        """Who holds the lock and whether it is stale: {pid, pid_alive, deadline (UTC, the
+        mtime plus an hour), why: pid_dead | past_deadline | unreadable | held, stale}."""
+        import datetime
+        import time
+        out: Dict[str, Any] = {"pid": None, "pid_alive": None, "deadline": None, "why": "unreadable", "stale": True}
+        try:
+            with open(self.path, encoding="utf-8", errors="replace") as f:
+                text = f.read().strip()
+            deadline = os.path.getmtime(self.path) + LOCK_HOUR
+            pid = int(text or "0")
         except (OSError, ValueError):
-            return True
+            return out
+        out["deadline"] = datetime.datetime.fromtimestamp(deadline, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out["pid"] = pid if pid > 0 else None
+        if pid > 0 and _pid_dead(pid):
+            out.update(pid_alive=False, why="pid_dead")
+            return out
+        out["pid_alive"] = pid > 0 or None
+        if time.time() > deadline:
+            out["why"] = "past_deadline"
+            return out
+        out.update(why="held", stale=False)
+        return out
+
+    def _record_takeover(self, holder: Dict[str, Any]) -> None:
+        details = {"lock": self.path, "output": os.path.abspath(self.output),
+                   **{k: v for k, v in holder.items() if k != "stale"}}
+        why = {"pid_dead": f"its pid {holder.get('pid')} no longer runs",
+               "past_deadline": f"its holder (pid {holder.get('pid')}, still running) is past its own time limit",
+               }.get(holder.get("why") or "", "it could not be read")
+        details["audit_log"] = audit("lock_takeover", details, default_path=self._audit_default())
+        record_fallback(f"took over the stale output lock {self.path}: {why}", "stale_lock_taken_over", **details)
 
     def __exit__(self, *exc: Any) -> None:
         if self.fd is not None:
@@ -698,6 +791,7 @@ def refuse_existing_outputs(paths: Sequence[str]) -> None:
     .srt/.ass sidecars) calls this up front so a hand-edited sidecar is refused like the video
     is, and a dry run predicts the same refusal."""
     existing: List[str] = []
+    facts: List[Dict[str, Any]] = []
     for output in paths:
         if not output:
             continue
@@ -708,21 +802,25 @@ def refuse_existing_outputs(paths: Sequence[str]) -> None:
             continue
         if not exists or real in STATE.written:
             continue
+        size = mtime_ns = None
         try:
             st = os.stat(output)
             STATE.preexisting[real] = (st.st_size, st.st_mtime_ns)
+            size, mtime_ns = st.st_size, st.st_mtime_ns
         except OSError:
             pass
         if output not in existing:
             existing.append(output)
+            facts.append({"path": output, "resolved": real, "size": size, "mtime_ns": mtime_ns})
     if not existing or STATE.overwrite:
         return
+    hint = "pass --overwrite, or choose another -o path"
     if len(existing) == 1:
-        die(f"refusing to overwrite existing output {existing[0]!r}: pass --overwrite to replace it, or choose another -o path",
-            kind="input", hint="pass --overwrite, or choose another -o path")
-    die("refusing to overwrite existing outputs " + ", ".join(repr(p) for p in existing)
-        + ": pass --overwrite to replace them, or choose another -o path",
-        kind="input", hint="pass --overwrite, or choose another -o path")
+        refuse("input", "output_exists",
+               f"refusing to overwrite existing output {existing[0]!r}: pass --overwrite to replace it, or choose another -o path",
+               hint=hint, outputs=facts)
+    refuse("input", "output_exists", "refusing to overwrite existing outputs " + ", ".join(repr(p) for p in existing)
+           + ": pass --overwrite to replace them, or choose another -o path", hint=hint, outputs=facts)
 
 
 def _remember_output(cmd: Sequence[str]) -> None:
@@ -1415,4 +1513,4 @@ def read_text_or_die(path: str, flag: str) -> str:
 # emit needs runner's Context/STATE/ERROR_CODE, so the two form a cycle that has to be cut
 # somewhere: by the time this line runs every name emit reads from runner above is defined, and
 # every name runner reads from emit is only ever read inside a function body, never at import.
-from _common.emit import _plan_at_exit, die, hw_report, info  # noqa: E402
+from _common.emit import _plan_at_exit, audit, die, hw_report, info, record_fallback, refuse, warn  # noqa: E402

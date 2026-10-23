@@ -63,8 +63,9 @@ from _common.runner import (
     STATE, _timed_out, _unwatch, _watch, X264_PRESETS
 )
 from _common.emit import (
-    _brief, _BRIEF_DROP, _brief_summary, _CURRENT_CTX, die, emit, info, _plan_at_exit, _plan_inputs, _PLAN_STRIP,
-    PLAN_VERSION, print_json, _set_current_ctx, write_plan
+    absorb_stage, audit, _brief, _BRIEF_DROP, _brief_summary, _CURRENT_CTX, die, emit, info, note, _plan_at_exit, _plan_inputs,
+    _plan_unbound_inputs, _PLAN_STRIP, PLAN_VERSION, print_json, record_fallback, record_skip, refuse, _set_current_ctx, warn,
+    write_plan
 )
 from _common.probe import (
     analyze_levels, _aspect_string, _bit_depth, decode_pcm_mono, detect_scenes, detect_silences, fingerprint,
@@ -216,6 +217,7 @@ __all__ = [
     "time_arg", "_timed_out", "_to_float", "_to_int", "_unwatch", "validate_color", "verify_output",
     "source_codec_video_args", "drawn_chain", "draws_chroma", "drawn_stream_format", "is_neutral_color", "rgb_island", "label_chain", "matrix_chain", "rgb_chain_to_bt709", "bt709_label_filter", "rgb_to_bt709_filter", "is_rgb", "video_args", "_VS15", "_VS16", "_watch", "WINDOWS_FONTS", "write_plan", "x264_args", "X264_PRESETS",
     "_x264_raw", "_ZWJ",
+    "absorb_stage", "audit", "note", "_plan_unbound_inputs", "record_fallback", "record_skip", "refuse", "warn",
     "ASR_ENGINES", "ASR_INSTALL_HINT", "_asr_run", "die_no_engine", "parse_srt", "transcribe",
     "_transcribe_in", "transcribe_words", "_words_from_openai_whisper_json",
     "_words_from_whisper_cpp_json", "whisper_word_timings", "write_srt",

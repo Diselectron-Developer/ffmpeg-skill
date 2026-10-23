@@ -259,16 +259,23 @@ asks for the CPU and gets what ffmpeg says about it. What ran is in the result's
 
 `--plan FILE` (1.6) is a dry run that also writes a plan document: `{"plan_version": 1,
 "tool", "argv", "cwd", "inputs": [{"path", "size", "sha256_head_tail"}], "commands",
-"output", "verify": [{"tool": "probe"}, {"tool": "check", "platform"}], "notes"}`. It
+"unbound_inputs", "output", "verify": [{"tool": "probe"}, {"tool": "check", "platform"}], "notes"}`. It
 implies `--dry-run`, so the same execution rules apply; `inputs` covers the `-i` files of the
 planned commands, every existing file named in argv (a recipe, a still, an SRT) and the
-subtitle/LUT/font files a filter reads. Tools that print their document without `--json`
+subtitle/LUT/font files a filter reads; `unbound_inputs` (absolute paths, additive to version 1)
+names the inputs that did not exist yet when the plan was made (an earlier step's output), which
+therefore carry no fingerprint. Tools that print their document without `--json`
 (`probe`, the analysis tools) still write the plan at exit; `verify.py` and `render.py`
 refuse `--plan` (their steps run for real; a project file is already a plan). `render.py FILE` executes a plan:
-it refuses (`kind: input`) when an input's size or head/tail hash differs from the plan,
+it refuses (`kind: input`, `error.reason: plan_inputs_changed`) when an input's size or head/tail
+hash differs from the plan, with every input's `{path, status, expected, actual}` in
+`error.details.inputs` (`actual` is `"missing"` for a file that is gone) beside `plan_sha256` and
+`checked_at`, and appends one record to the audit log (below); a wrong `plan_version`, an unknown
+tool, a vanished `cwd` or a malformed `argv` is refused the same way under its own reason. It then
 runs the tool with the planned `argv`, then the verify steps (a `check` step may also carry
-`"content": true`, added by hand, for `check.py --content`), and reports `plan`, `tool`,
-`tool_result` and `check`. `plan_version` is bumped when the document's shape changes.
+`"content": true`, added by hand, for `check.py --content`), and reports `plan`, `plan_sha256`,
+`tool`, `tool_result`, `check` and `unbound_inputs` (each one also a `diagnostics.warnings` entry:
+nothing checked that file). `plan_version` is bumped when the document's shape changes.
 
 ### Repeatability
 
@@ -731,6 +738,39 @@ doesn't already make) for a caller that wants a stable enum instead of matching 
 strings. `retryable` is currently always `false`: none of the kinds are distinguishable
 today from a deterministic failure that would fail identically on a blind retry, so nothing
 here claims otherwise until real exit-code/stderr sniffing exists to back that up.
+
+A refusal also carries `error.reason`, a stable snake_case code for *why*
+(`contract --json` → `json_output.error_reasons` lists them: `output_exists`, `output_is_input`,
+`output_is_directory`, `output_dir_missing`, `output_dir_not_writable`, `output_locked`, and
+`render.py`'s `plan_*` reasons), and `error.details`, the facts the message is written from, so a
+caller never parses the prose:
+
+```
+"error": {"kind": "input", "message": "refusing to overwrite existing output 'out.mp4': ...",
+          "code": "INPUT_INVALID", "retryable": false, "hint": "pass --overwrite, or choose another -o path",
+          "reason": "output_exists",
+          "details": {"outputs": [{"path": "out.mp4", "resolved": "/abs/out.mp4", "size": 48213, "mtime_ns": 1729660000000000000}]}}
+```
+
+A tool that runs another (`render.py` stages and plans) forwards the child's `reason` and
+`details` in its own `error`. Both are absent on a failure that is not a refusal, like `hint`.
+
+**Diagnostics.** What a run decided on its own -- a warning, a fallback it took, a step it
+skipped -- is recorded as it happens (a stderr line too) and lands in the document as
+`diagnostics: {warnings, fallbacks, skipped}`, each entry `{code, message, ...facts}`; it is
+present on success and failure documents alike, only when one list is not empty, and an entry a
+`render.py` stage reported carries `stage`. Codes today: `stale_lock_taken_over` (fallbacks),
+`output_unlocked`, `lock_deadline_unset`, `audit_log_unwritable` and `plan_unbound_inputs`
+(warnings).
+
+**Audit log.** Events a later reader must be able to reconstruct are appended as JSON lines,
+`{ts, tool, event, pid, plan_sha256, details}` (`plan_sha256` on plan events): `plan_rejected`,
+`lock_takeover`, `output_unlocked`, and `output_is_input_refused` when a log was named. The file
+is `render.py --audit-log FILE` when given; otherwise a refused plan's `<plan>.audit.jsonl` next
+to the plan, and a lock event's hidden `.<output>.ffskill-audit.jsonl` beside the output. Nothing
+is appended under `--dry-run`. A record that cannot be written is a `diagnostics.warnings` entry
+(`audit_log_unwritable`) and never fails or blocks the run; the refusal's `details.audit_log`
+says `{path, written}` either way.
 
 ## MCP relationship
 

@@ -397,6 +397,37 @@ def input_schema(parser: argparse.ArgumentParser) -> Dict[str, Any]:
     return schema
 
 
+# The collector's records (docs/design-decisions.md, "Nothing happens silently"): on success and
+# failure documents alike, present only when one list is not empty.
+DIAGNOSTICS_SCHEMA = {
+    "type": "object",
+    "description": "what the run decided on its own, recorded as it happened (each also a stderr line): warnings (something went "
+                   "other than asked), fallbacks (another route was taken and the run went on), skipped (a step that would "
+                   "normally run did not). Each entry is {code, message, ...facts}; an entry a render.py stage reported carries "
+                   "`stage`. Absent when all three are empty",
+    "properties": {k: {"type": "array", "items": {"type": "object", "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}}
+                   for k in ("warnings", "fallbacks", "skipped")},
+}
+
+# error.reason: a stable code for why a refusal happened, beside `kind` (which says what class of
+# failure it is). Every refuse() call in scripts/ names one of these (a test reads the sources).
+ERROR_REASONS = {
+    "output_exists": "an output already exists and --overwrite was not given; details.outputs: [{path, resolved, size, mtime_ns}]",
+    "output_is_input": "the output resolves to the same file as an input; details: {output, input, resolved}",
+    "output_is_directory": "the output path is a directory; details: {output}",
+    "output_dir_missing": "the output's directory does not exist; details: {output, directory}",
+    "output_dir_not_writable": "the output's directory is not writable; details: {output, directory}",
+    "output_locked": "another run holds the output's lock; details: {lock, output, pid, pid_alive, deadline, why}",
+    "plan_inputs_changed": "render.py PLAN: a fingerprinted input is missing or changed; details: {plan, plan_sha256, checked_at, "
+                           "inputs: [{path, status: unchanged|changed|missing, expected: {size, sha256_head_tail}, actual: {size, "
+                           "sha256_head_tail} | \"missing\"}], unbound_inputs, audit_log}",
+    "plan_version_unsupported": "render.py PLAN: plan_version is not one this version executes; details: {plan, plan_sha256, checked_at, plan_version, supported, audit_log}",
+    "plan_unknown_tool": "render.py PLAN: the plan names no tool render.py can run; details: {plan, plan_sha256, checked_at, tool, audit_log}",
+    "plan_cwd_missing": "render.py PLAN: the directory the plan was made in is gone; details: {plan, plan_sha256, checked_at, cwd, audit_log}",
+    "plan_argv_invalid": "render.py PLAN: argv is not a list; details: {plan, plan_sha256, checked_at, argv_type, audit_log}",
+}
+
+
 def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str, Any]:
     """What the tool prints on stdout with --json (keys observed in the implementation). `hw`: the
     tool takes --hw, so its `notes` can also carry a VideoToolbox encode's quality line."""
@@ -411,7 +442,8 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
             "hw": {"type": "object", "description": "present when VideoToolbox was asked for (--hw, $FFMPEG_SKILL_HW, a render.py stage, a batch.py item), on export.py when $FFMPEG_SKILL_HW=1 is set but its delivery preset does not take it, and when this ffmpeg build has no libx264/libx265 and an encode ran on VideoToolbox instead: {requested: whether this run's encodes were asked onto VideoToolbox (false for that export, and for the build without libx264/libx265), source: flag|env|auto (auto: nobody asked, the build has no libx264/libx265 and this Apple Silicon machine ran VideoToolbox in its place), used: true|false whether the encoder that ran last is VideoToolbox, null under --dry-run (nothing ran) and when this process ran no encode itself (batch.py: its stages are child processes; its top-level hw gathers the items' requested/source/fallback/notes and each results row carries its item's encoder and hw), fallback: a job VideoToolbox refused (encoder open or compression session failure; nothing else is retried) was re-encoded on the CPU, notes: why an encode stayed on or fell back to the CPU, and, when $FFMPEG_SKILL_HW chose the GPU and it ran, what that costs and that --no-hw opts out}. A VideoToolbox encode also adds a top-level notes line: its quality is not CRF-equivalent. A kind: ffmpeg failure under --hw / $FFMPEG_SKILL_HW carries encoder and hw too"},
             "plan": {"type": "string", "description": "with --plan FILE: the plan document written (the run itself is a dry run)"},
             "verified": {"type": "boolean", "description": "true only when the artifact was written, probed, and every self-check the tool ran (verification) met its target; false under --dry-run"},
-            "verification": {"type": "array", "items": {"type": "object", "properties": {"step": {"type": "string"}, "ok": {"type": "boolean"}}}, "description": "what the tool itself verified: probe, plus loudness (loudness.py, export platform presets) or check (render)"}}
+            "verification": {"type": "array", "items": {"type": "object", "properties": {"step": {"type": "string"}, "ok": {"type": "boolean"}}}, "description": "what the tool itself verified: probe, plus loudness (loudness.py, export platform presets) or check (render)"},
+            "diagnostics": DIAGNOSTICS_SCHEMA}
     extra: Dict[str, Any] = {}
     if name == "check":
         extra = {"platform": {"type": "string"}, "ok": {"type": "boolean"}, "failed": {"type": "integer"}, "warnings": {"type": "integer"},
@@ -451,6 +483,8 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
     elif name == "render":
         extra = {"stages": {"type": "array", "items": {"type": "string"}}, "check": {"type": ["object", "null"]},
                  "plan": {"type": "string", "description": "when the argument was a plan.json (written by <tool> --plan): its path"},
+                 "plan_sha256": {"type": ["string", "null"], "description": "plan execution: sha256 of the plan file as executed"},
+                 "unbound_inputs": {"type": "array", "items": {"type": "string"}, "description": "plan execution: inputs that did not exist when the plan was made, so carry no fingerprint and were not checked (also a diagnostics.warnings entry, code plan_unbound_inputs)"},
                  "tool": {"type": "string", "description": "plan execution: the tool the plan ran"},
                  "tool_result": {"type": "object", "description": "plan execution: the tool's own --json document"},
                  "timeline": {"type": "object", "description": "--export-timeline: format, rate, duration, frames, clips, transition, "
@@ -1692,7 +1726,21 @@ def build(detect: bool = True) -> Dict[str, Any]:
         },
         "json_output": {
             "success": {"status": "completed", "exit_code": 0, "stdout": "one JSON document (output_schema)"},
-            "failure": {"status": "failed", "exit_code": "non-zero (127 when ffmpeg/ffprobe is missing)", "stdout": "{\"status\": \"failed\", \"exit_code\": N, \"error\": {\"kind\": ..., \"message\": ...}, \"commands\": [...]} when --json was given", "stderr": "human-readable message"},
+            "failure": {"status": "failed", "exit_code": "non-zero (127 when ffmpeg/ffprobe is missing)", "stdout": "{\"status\": \"failed\", \"exit_code\": N, \"error\": {\"kind\": ..., \"message\": ..., \"code\": ..., \"retryable\": false}, \"commands\": [...]} when --json was given; a refusal adds error.reason (error_reasons) and error.details (the facts the message is written from), and a run that recorded warnings, fallbacks or skipped steps before failing carries diagnostics", "stderr": "human-readable message",
+                        "error": {"kind": "error_kinds", "message": "the reason in prose", "code": "a static relabelling of kind", "retryable": "always false",
+                                  "hint": "optional: the flag change that would make a retry meaningful",
+                                  "reason": "optional, on refusals: a stable code from error_reasons",
+                                  "details": "optional, with reason: an object of the facts behind the refusal (paths, expected and actual values)"},
+                        "diagnostics": DIAGNOSTICS_SCHEMA["description"]},
+            "error_reasons": ERROR_REASONS,
+            "audit_log": {"format": "JSON lines, appended: {ts, tool, event, pid, plan_sha256 (plan events), details}",
+                          "events": {"plan_rejected": "render.py refused a plan (details: the refusal's error.details plus reason)",
+                                     "lock_takeover": "a stale output lock was taken over (details: lock, output, pid, pid_alive, deadline, why)",
+                                     "output_unlocked": "no output lock could be created and the run went on without one",
+                                     "output_is_input_refused": "the output-is-input refusal (only when an audit log was named)"},
+                          "location": "render.py --audit-log FILE when given; otherwise a refused plan's <plan>.audit.jsonl, and a lock event's "
+                                      "hidden .<output>.ffskill-audit.jsonl beside the output. Never written under --dry-run; a write that "
+                                      "fails is a diagnostics.warnings entry (audit_log_unwritable), never a failure"},
             "error_kinds": {"input": "missing or unsuitable input, bad arguments", "ffmpeg": "ffmpeg/ffprobe returned an error (message carries the last stderr lines)", "output": "ffmpeg exited 0 but the artifact is missing, empty or unreadable (an empty file is removed)", "missing_tool": "ffmpeg or ffprobe not on PATH", "timeout": "one ffmpeg/ffprobe run exceeded --timeout (default 1800 s, FFMPEG_SKILL_TIMEOUT) and was killed; partial output removed; exit 124", "verification": "the tool ran but its result failed the requested check: check.py platform rows (checks attached), render.py's check stage (output written, check attached), batch.py items (results attached), verify.py steps (files attached), color.py --retag (output written, but ffprobe does not read the requested colour tags on it); exit 1", "interrupted": "the tool received SIGINT or SIGTERM: the running ffmpeg (or sibling script) was stopped and its partial output removed; exit 130 or 143"},
             "success_criterion": "exit 0 AND the output exists AND is non-empty AND ffprobe reads a stream from it; only then is status completed printed and the output probe attached",
         },
