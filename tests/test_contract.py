@@ -3982,7 +3982,9 @@ class SilentResultTests(unittest.TestCase):
         doc = run()
         self.assertEqual(doc["diagnostics"]["warnings"][0]["code"], "batch_cache_reset")
         rec = json.loads((folder / "out" / ".ffskill-audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-        self.assertEqual((rec["event"], rec["details"]["path"]), ("batch_cache_reset", str(cache)))
+        self.assertEqual(rec["event"], "batch_cache_reset")
+        # the same file, not the same spelling: Windows' temp dir comes back as RUNNER~1 or runneradmin
+        self.assertTrue(os.path.samefile(rec["details"]["path"], cache), rec["details"]["path"])
 
     def run_batch_in_process(self, folder, recipe, process):
         """batch.main() with process() replaced; returns (exit code, document)."""
