@@ -668,10 +668,15 @@ class _OutputLock:
                 if attempt == 0 and holder["stale"]:
                     try:
                         os.remove(self.path)
-                    except OSError:
-                        pass
-                    taken = holder
-                    continue
+                    except OSError as exc:
+                        # Windows will not delete a file another process holds open, and a live
+                        # holder keeps its lock open until it finishes: the takeover fails and
+                        # the run is refused below, with the reason, instead of passing silently
+                        holder["takeover_error"] = str(exc)
+                        holder["stale"] = False
+                    else:
+                        taken = holder
+                        continue
                 name = os.path.basename(self.path)[1:-len(".ffskill-lock")]
                 refuse("input", "output_locked",
                        f"another run is writing {name!r} right now (lock {self.path}"

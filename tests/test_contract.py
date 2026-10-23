@@ -3647,10 +3647,34 @@ class SilentPathTests(unittest.TestCase):
             self.assertEqual((refused["reason"], refused["pid"], refused["pid_alive"], refused["why"]),
                              ("output_locked", os.getpid(), True, "held"))
             self.assertEqual(refused["lock"], str(self.lock))
-            self.assertIsNone(self.enter(at=time.time() + 7400), "past its limit, a live pid is taken over")
+            late = self.enter(at=time.time() + 7400)
+            if platform.system() == "Windows":
+                # Windows cannot delete a lock file its holder still has open: the takeover fails,
+                # and the refusal says why rather than the failure passing silently
+                self.assertIsNotNone(late, "an open lock cannot be deleted on Windows")
+                self.assertEqual((late["reason"], late["why"]), ("output_locked", "past_deadline"))
+                self.assertIn("takeover_error", late)
+                return
+            self.assertIsNone(late, "past its limit, a live pid is taken over")
             fb = _common.STATE.fallbacks[-1]
             self.assertEqual((fb["code"], fb["why"], fb["pid_alive"]), ("stale_lock_taken_over", "past_deadline", True))
             self.assertEqual(json.loads(self.audit.read_text(encoding="utf-8"))["event"], "lock_takeover")
+        finally:
+            lk.__exit__()
+
+    def test_a_takeover_that_cannot_delete_the_lock_is_refused_with_the_reason(self):
+        """On Windows a lock its live holder still has open cannot be deleted; that failure used to
+        be swallowed (`except OSError: pass`). It now refuses with `takeover_error`."""
+        from unittest import mock
+        _common.STATE.timeout = 1800.0
+        lk = _common._OutputLock(self.out)
+        lk.__enter__()
+        try:
+            with mock.patch("os.remove", side_effect=PermissionError("in use by another process")):
+                late = self.enter(at=time.time() + 7400)
+            self.assertIsNotNone(late)
+            self.assertEqual((late["reason"], late["why"]), ("output_locked", "past_deadline"))
+            self.assertIn("in use by another process", late["takeover_error"])
         finally:
             lk.__exit__()
 
