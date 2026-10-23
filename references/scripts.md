@@ -754,6 +754,15 @@ step for the black/frozen/silence rows), and reports `plan`, `plan_sha256`, `too
 `tool_result`, `check` and `unbound_inputs` (each also a `diagnostics.warnings`
 entry: nothing checked those files). Show the plan to the user, get the yes, execute:
 one round trip instead of re-deriving the command.
+Render's `verified` is every stage's: each stage's own verification steps (beyond
+its intermediate's probe) are in the result's `verification`, tagged with `stage`,
+and each stage's notes are in `notes`, prefixed with its tool -- an export that
+misses its platform loudness leaves the render `completed` with `verified: false`
+and the note naming the fix. `"check": {"platform": ...}`, `{"content": true}` or
+both run `check.py` after the last stage (content alone: the black/frozen/silence
+rows, youtube's spec assumed, as `check.py --content` without `--platform`); under
+`--dry-run` the check is a `check_dry_run` entry in `diagnostics.skipped`.
+
 `"export": {"preset": "reels", "normalize": true}` forwards `export.py --normalize`
 so the rendered file meets the platform's loudness without a separate pass. Since
 1.9.0 it is on by default when the preset is a platform (`youtube|youtube4k|reels|x`)
@@ -814,7 +823,14 @@ artifact the old one produced. Each entry is `DIR/<key><ext>` plus a
 `DIR/<key>.json` sidecar (stage, versions, creation time, size, seconds). A hit
 hardlinks the artifact into the work directory, or copies it where the
 filesystem will not link — never moves it, since the cache has to outlive the
-run's own cleanup. Any mismatch is a silent miss.
+run's own cleanup. A miss is work to do, not an error, but never a silent one:
+`cache.miss_reasons` says why each stage missed (`not_cached`, `sidecar_missing`,
+`artifact_missing`, `sidecar_corrupt`, `artifact_truncated`, `no_output_path`), and a
+damaged entry (the last two of those that name a file this tool wrote) is also a
+`cache_entry_damaged` warning and a line in `DIR/.ffskill-audit.jsonl`. A sidecar keeps
+the stage's `verified`, `verification`, `notes` and `diagnostics`, and a hit replays
+them, so a cached stage counts toward the render's `verified` as a live one does. A
+store that fails is a `cache_store_failed` warning (the run is unaffected).
 
 A stage whose flags changed misses the cache, so editing the captions block (for
 example to `"fit_size": "off"`) re-runs captions and everything after it and
@@ -823,7 +839,7 @@ serves the earlier stages from the cache.
 `stages_done` is unchanged: a cached stage is still a stage that happened.
 Nothing is written under `--dry-run`, which instead reports `cache.would_hit`.
 Result: `cache.dir`, `cache.ffmpeg`, `cache.hits`, `cache.misses`,
-`cache.saved_seconds`, `cache.entries`. `--from STAGE` starts at that stage and
+`cache.miss_reasons`, `cache.saved_seconds`, `cache.entries`. `--from STAGE` starts at that stage and
 takes every earlier one from the cache; without `--cache`, or when an earlier
 stage is not there, it refuses (`kind: input`) rather than quietly re-encoding
 what it promised to skip. An unwritable cache directory is `kind: output`.
@@ -1053,10 +1069,28 @@ above the cap is clamped with a note, not refused, and both `jobs` and
   the table in file order when the cache is only partially warm — and each item's
   log lines are buffered and flushed in file order, so the per-item table and the
   log read exactly as a serial run's whatever order the encodes finish in.
-- **A failed item is a row, not a dead run**: a worker that raises becomes
-  `ok: false` with its reason, and the summary and the table are still printed.
-  Ctrl-C cancels what has not started, keeps what finished, and exits 130
-  `kind: interrupted` with the partial table.
+- **A failed item is a row, not a dead run**: a step that fails makes its row
+  `ok: false` with `error: {step, tool, kind, message, code, reason, details,
+  hint, exit_code}` taken from that step's own JSON document (a worker that raised:
+  `exception` and its message), and the summary and the table are still printed.
+  A recipe error that is the same for every item (a step script outside
+  `scripts/`, no steps) is refused before any item runs.
+- **`ok` is "every step completed"; `verified` is beside it**: a step that
+  completed with `verified: false` (an export's loudness miss) leaves the row
+  `ok: true`, `verified: false`, with `unverified: [{step, tool, failed}]`; the
+  batch's own `verification` has one `item` step per row and a note names the
+  unverified items. A row also carries its steps' `diagnostics` (tagged with `step`).
+- **Ctrl-C** (or SIGTERM) stops the running steps and exits 130 (143)
+  `kind: interrupted` with a row for every input: finished, `interrupted: true`
+  (stopped while running) or `"skipped": "interrupted"` (not started), so `total`
+  is the folder's count.
+- **The cache serves an output only while it is the file the batch wrote**: an
+  entry keeps the output's size and mtime, and an output replaced or edited since
+  is processed again (`cache_miss: {reason: output_changed, expected, actual}` on
+  the row, a `batch_cache_output_changed` warning; an entry from 2.10.11 or
+  earlier has no such record and is processed again once, `entry_unverifiable`).
+  A `.ffskill_cache.json` that does not parse is started empty with a
+  `batch_cache_reset` warning and a line in `output_dir/.ffskill-audit.jsonl`.
 - With `--jobs > 1` each item gets its own work subdirectory
   `<workdir>/<index>-<stem>/`, because step file names are stem-derived and two
   sources sharing a stem would otherwise write over each other. `--jobs 1` (the
@@ -1188,7 +1222,12 @@ report.py --after FINAL [--before SOURCE] [--platform youtube] [--commands cmds.
 ```
 One self-contained HTML: before/after facts and contact sheets, loudness,
 compliance table with fixes, commands. Produce it for any multi-step job and
-hand the path to the user together with the numbers.
+hand the path to the user together with the numbers. Each section it builds is a
+`verification` step (`loudness` per file with audio, `compliance` for
+`--platform` with `passed` saying what the table found, `contact_sheet` per
+file); a section that could not be built is `ok: false` with the child's
+`reason` and `message` and a `report_section_missing` warning, so the report is
+`verified: false` rather than silently shorter.
 
 ### multicam.py — align several cameras and switch between them
 ```
@@ -1201,7 +1240,10 @@ All inputs are aligned to the first one by audio (same engine as `sync.py`,
 each range of the reference timeline (gaps fall back to camera 0), `--auto N`
 simply alternates every N seconds. Audio comes from the reference unless
 `--audio` picks another input, e.g. an external recorder that has no video.
-`--offsets-only` reports offsets and confidence without rendering.
+`--offsets-only` reports offsets and confidence without rendering. `cuts` names
+the camera actually rendered: a range whose camera has not started yet plays
+camera 0, and a `camera_not_started` entry in `diagnostics.fallbacks` names the
+camera that was asked for.
 
 **`--switch energy` (1.18)** auto-switches to whichever camera (of those with
 a video stream) measures the loudest audio at each 0.25 s window on the
@@ -1228,6 +1270,11 @@ Runs the toolchain on the user's own files (phone HDR, GoPro, OBS, Log, Zoom)
 and prints a PASS/FAIL table per step (probe, copy cut, accurate cut, fit,
 caption, overlay, look, export, loudness, silence, plus `color --to-sdr` for
 HDR and `audio --downmix` for >2 channels). Exit code 1 if anything fails.
+Each step runs with `--json`, and a failed one keeps its tool's own `kind`,
+`reason`, `message` and `exit_code` (`error` is the one-line table cell); a
+completed one carries the tool's `verified`. Steps that do not apply are listed
+under the file's `skipped` (`quick`, `no_video`, `no_audio`, `not_hdr`,
+`not_multichannel`, `input_unreadable`) and as SKIP rows in the report.
 Run this first when a user hands over footage from a device you have not
 seen before, and fix or report what fails.
 
@@ -1689,13 +1736,18 @@ export.py INPUT --preset youtube|youtube4k|reels|tiktok|shorts|linkedin|facebook
 export.py --list
 ```
 Scales into the preset frame (pad by default), tags BT.709 (a BT.601-matrix or RGB source is converted to it, as by every re-encode), sets `+faststart`,
-trims to platform maximums (Reels 90 s, X 140 s) unless `--allow-long`. It
+trims to platform maximums (Reels 90 s, X 140 s) unless `--allow-long`, and says
+so: `trimmed: {from, to}` and a `notes` line. It
 does not touch levels: for youtube / youtube4k / reels / x the written file is
 measured and the result's `loudness` (and a `notes` line) says when it is
 outside the platform's LUFS / true-peak spec, naming the `loudness.py` call
 that fixes it -- or pass `--normalize`, which runs that call on the written
 file itself (audio re-encoded, video copied; `loudness.normalized: true`) so a
-platform export is one command instead of export, loudness, export again.
+platform export is one command instead of export, loudness, export again. A
+measurement that cannot be read is `loudness.measured: false` (values null) with
+a failing `{step: loudness, ok: false, reason: not_measured}` and a
+`loudness_not_measured` warning, so the export is `verified: false` rather than
+unchecked.
 
 Since 1.14 each social destination is its own preset rather than an alias: `tiktok`
 (1080x1920, max 600 s), `shorts` (1080x1920, max 180 s), `reels` (1080x1920, max 90 s),

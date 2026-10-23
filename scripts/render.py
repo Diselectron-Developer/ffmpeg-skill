@@ -48,7 +48,11 @@ is "font_size", and "scale" on a text entry is refused.
 itself failing to run) exits 1, same as running check.py directly would --
 the render is not silently reported as successful just because every stage
 up to it completed. The output file is still written and `--json`'s
-`check` field still carries the full row-by-row result either way.
+`check` field still carries the full row-by-row result either way. A check
+stage with only "content": true runs check.py --content without a platform.
+`verified` is every stage's: a stage that completed unverified (an export that
+missed its loudness) leaves the render verified false, its steps and notes in
+the result.
 
 Examples:
   python3 render.py --init project.json          # write a commented starter project
@@ -72,7 +76,7 @@ from export import PRESETS, PLATFORM_OF
 from _platforms import PLATFORMS, caption_defaults, resolve as resolve_platform
 from _common import STATE, add_common, aspect_ratio, brand_caption_style, load_brand, apply_common, child_args, die, emit, info, probe, require_tool, run, run_tool, place_output, refuse_output_is_input, _check_existing_output, _check_output_path, fingerprint, PLAN_VERSION, ffmpeg_version, ffmpeg_exe
 from _common.runner import HW_ENV, HW_FORCED_ENV, add_hw_orchestrator_args
-from _common.emit import absorb_stage, audit, refuse, warn
+from _common.emit import absorb_stage, audit, record_fallback, record_skip, refuse, warn
 import subprocess
 from _contract import CONTRACT_VERSION
 from batch import file_key
@@ -550,7 +554,7 @@ def sh(script: str, *argv: Any, extra: List[str] = None, stage: str = None) -> s
         # would make a second run with the first run's output already on disk miss every time.
         key_args = ["<out>" if a == dest else a for a in full]
         key = cache_key(stage, script, key_args, inputs, dest)
-        if cache_lookup(stage, key, dest):
+        if cache_lookup(stage, key, dest, Path(script).stem):
             CACHE["hits"].append(stage)
             info(f"→ {script} {stage}: served from --cache")
             # No child ran, so there is no document: say so rather than leaving the PREVIOUS
@@ -562,6 +566,7 @@ def sh(script: str, *argv: Any, extra: List[str] = None, stage: str = None) -> s
         _refuse_uncached_earlier_stage(stage)
     elif stage and CACHE.get("dir"):
         CACHE["misses"].append(stage)
+        _cache_miss(stage, "no_output_path")  # nothing names where the artifact goes, so there is nothing to keep
     started = time.time()
     cmd = [str(HERE / script)] + [str(a) for a in argv] + (extra or []) + child_args() + ["--json"]
     info("→ " + " ".join(os.path.basename(c) if i < 1 else c for i, c in enumerate(cmd[:-1])))
@@ -589,7 +594,7 @@ def sh(script: str, *argv: Any, extra: List[str] = None, stage: str = None) -> s
     absorb_stage(Path(script).stem, doc)  # a stage's GPU facts (ran on VideoToolbox, fell back and why) and its diagnostics reach this result
     out_path = str(doc.get("output") or "")
     if key:
-        cache_store(stage, key, out_path or (dest or ""), time.time() - started)
+        cache_store(stage, key, out_path or (dest or ""), time.time() - started, doc)
     return out_path
 
 
@@ -613,7 +618,7 @@ STAGE_ORDER = ("clips", "audiogram", "join", "silence", "fit", "captions", "grap
                "overlays", "audio", "loudness", "export", "chapters")
 
 def _fresh_cache() -> "Dict[str, Any]":
-    return {"dir": None, "ffmpeg": None, "hits": [], "misses": [], "saved_seconds": 0.0,
+    return {"dir": None, "ffmpeg": None, "hits": [], "misses": [], "miss_reasons": [], "saved_seconds": 0.0,
             "entries": 0, "would_hit": [], "from": None}
 
 
@@ -625,10 +630,16 @@ CACHE: Dict[str, Any] = _fresh_cache()
 
 def _content_hash(path: str) -> str:
     """The same cheap content fingerprint batch.py caches on: name, size, mtime, first and last
-    MB. Reused rather than reinvented so one file has one identity across the skill."""
+    MB. Reused rather than reinvented so one file has one identity across the skill. A file that
+    cannot be read keys as "missing" -- recorded (cache_input_unreadable), since two unreadable
+    files then share that part of the key."""
     try:
         return file_key(Path(path))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        entry = {"code": "cache_input_unreadable", "path": str(path)}
+        if not any(all(w.get(k) == v for k, v in entry.items()) for w in STATE.warnings):
+            warn(f"cache: could not fingerprint {path} ({exc}); it is keyed as \"missing\"", "cache_input_unreadable",
+                 path=str(path), error=str(exc))
         return "missing"
 
 
@@ -646,9 +657,14 @@ def ffmpeg_banner() -> str:
         first = (out or "").strip().splitlines()
         if first:
             return first[0].strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return ".".join(str(n) for n in ffmpeg_version())
+        why = "ffprobe -version printed nothing"
+    except (OSError, subprocess.SubprocessError) as exc:
+        why = str(exc)
+    pair = ".".join(str(n) for n in ffmpeg_version())
+    # two builds of one major.minor now share cache entries: say so
+    record_fallback(f"cache: the ffmpeg build banner could not be read ({why}); keying on ffmpeg {pair} instead, so builds "
+                    "of the same major.minor share entries", "cache_ffmpeg_banner_unreadable", used=pair, error=why)
+    return pair
 
 
 def cache_key(stage: str, script: str, argv: "Sequence[Any]", inputs: "Sequence[str]",
@@ -684,22 +700,46 @@ def cache_key(stage: str, script: str, argv: "Sequence[Any]", inputs: "Sequence[
     return hashlib.sha1(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def cache_lookup(stage: str, key: str, dest: str) -> bool:
+def _cache_miss(stage: str, reason: str, **facts: Any) -> bool:
+    """Record why `stage` was not served from the cache (`cache.miss_reasons`); a damaged entry
+    (unreadable sidecar, artifact of the wrong size) is also a warning and an audit line in the
+    cache directory, because something rewrote or truncated a file this tool wrote."""
+    CACHE["miss_reasons"].append(dict({"stage": stage, "reason": reason}, **facts))
+    if reason in ("sidecar_corrupt", "artifact_truncated"):
+        msg = f"cache: the {stage} entry is damaged ({reason.replace('_', ' ')}); the stage runs again"
+        warn(msg, "cache_entry_damaged", stage=stage, reason=reason, **facts)
+        audit("cache_entry_damaged", dict({"stage": stage, "reason": reason}, **facts),
+              default_path=str(Path(CACHE["dir"]) / ".ffskill-audit.jsonl"))
+    return False
+
+
+def cache_lookup(stage: str, key: str, dest: str, tool: Optional[str] = None) -> bool:
     """Put the cached artifact for `key` at `dest` and return True, or return False on any
-    mismatch -- silently, because a miss is not an error, it is just work to do."""
+    mismatch. A miss is not an error, it is work to do, but it is not silent either: why each
+    stage missed is in `cache.miss_reasons` (not_cached, sidecar_missing, artifact_missing,
+    sidecar_corrupt, artifact_truncated). A hit replays the stage's recorded result (its
+    verification, notes and diagnostics) into this run, as a stage that ran would have."""
     cdir = CACHE.get("dir")
     if not cdir:
         return False
     side = Path(cdir) / f"{key}.json"
     art = Path(cdir) / f"{key}{Path(dest).suffix or '.bin'}"
-    if not (side.exists() and art.exists()):
-        return False
+    if not side.exists() and not art.exists():
+        return _cache_miss(stage, "not_cached", key=key)
+    if not side.exists():
+        return _cache_miss(stage, "sidecar_missing", key=key, artifact=str(art))
+    if not art.exists():
+        return _cache_miss(stage, "artifact_missing", key=key, sidecar=str(side))
     try:
         meta = json.loads(side.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    if int(meta.get("size") or -1) != art.stat().st_size:
-        return False
+        if not isinstance(meta, dict):
+            raise ValueError("not a JSON object")
+        expected = int(meta.get("size") or -1)
+    except (OSError, ValueError, TypeError) as exc:
+        return _cache_miss(stage, "sidecar_corrupt", key=key, sidecar=str(side), error=str(exc))
+    actual = art.stat().st_size
+    if expected != actual:
+        return _cache_miss(stage, "artifact_truncated", key=key, artifact=str(art), expected_size=expected, actual_size=actual)
     if STATE.dry_run:
         CACHE["would_hit"].append(stage)
         return True
@@ -711,11 +751,26 @@ def cache_lookup(stage: str, key: str, dest: str) -> bool:
     except OSError:
         shutil.copy2(art, dest)     # ... and a copy where it does not. Never a move: the cache
     CACHE["saved_seconds"] += float(meta.get("seconds") or 0.0)
+    result = meta.get("result")
+    if isinstance(result, dict):
+        absorb_stage(tool or stage, dict(result, status="completed", dry_run=False))  # tagged as the stage's tool, as a live run is
+    else:
+        # an entry written before the stage's result was kept: what the stage verified is unknown
+        record_skip(f"cache: the {stage} entry predates recorded results, so what that stage verified is not "
+                    "known; rerun without --cache to see it", "cache_result_unrecorded", stage=stage)
     return True
 
 
-def cache_store(stage: str, key: str, produced: str, seconds: float) -> None:
-    """Keep `produced` for the next run. Never under --dry-run: a plan writes nothing."""
+def _stage_result(doc: Any) -> Dict[str, Any]:
+    """What a cache entry keeps of the stage's own --json document, replayed on a hit."""
+    if not isinstance(doc, dict):
+        return {}
+    return {k: doc[k] for k in ("verified", "verification", "notes", "diagnostics") if k in doc}
+
+
+def cache_store(stage: str, key: str, produced: str, seconds: float, doc: Any = None) -> None:
+    """Keep `produced` for the next run. Never under --dry-run: a plan writes nothing. A store
+    that fails is a warning (cache_store_failed), never a failure of the run."""
     cdir = CACHE.get("dir")
     if not cdir or STATE.dry_run or not produced or not os.path.exists(produced):
         return
@@ -725,10 +780,11 @@ def cache_store(stage: str, key: str, produced: str, seconds: float) -> None:
         Path(cdir, f"{key}.json").write_text(json.dumps({
             "stage": stage, "ffmpeg": CACHE.get("ffmpeg"), "skill": SKILL_VERSION,
             "created": time.time(), "size": art.stat().st_size, "seconds": round(seconds, 2),
-            "artifact": art.name}, indent=2), encoding="utf-8")
+            "artifact": art.name, "result": _stage_result(doc)}, indent=2), encoding="utf-8")
         CACHE["entries"] += 1
     except OSError as exc:
-        info(f"cache: could not store the {stage} artifact ({exc}); the run is unaffected")
+        warn(f"cache: could not store the {stage} artifact ({exc}); the run is unaffected", "cache_store_failed",
+             stage=stage, error=str(exc))
 
 
 def _utc_now() -> str:
@@ -776,6 +832,28 @@ def plan_input_status(inputs: Sequence[Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def run_check(output: str, platform: Optional[str], content: bool) -> Dict[str, Any]:
+    """check.py on `output` for a project's "check" stage or a plan's check step: `platform`
+    (or none: check.py's youtube assumption, judgement rows WARN) and `content` (--content).
+    Returns check.py's own document; when check.py printed none that parses, a failure document
+    in its shape -- status failed, error {kind, reason: check_output_unparsed, message,
+    exit_code, stderr_tail} -- so a caller never reads a bare string."""
+    cp = run_tool([str(HERE / "check.py"), output] + (["--platform", str(platform)] if platform else [])
+                  + (["--content"] if content else []) + ["--json"] + child_args())
+    try:
+        doc = json.loads(cp.stdout)
+    except ValueError:
+        doc = None
+    if isinstance(doc, dict):
+        return doc
+    tail = cp.stderr.strip()[-300:]
+    msg = "check.py printed no JSON document" + (f": {tail.splitlines()[-1]}" if tail else "")
+    warn(f"check: {msg}", "check_output_unparsed", exit_code=cp.returncode)
+    return {"status": "failed", "platform": platform, "ok": False,
+            "error": {"kind": "timeout" if cp.returncode == 124 else "verification", "reason": "check_output_unparsed",
+                      "message": msg, "exit_code": cp.returncode, "stderr_tail": tail}}
+
+
 def execute_plan(plan: Dict[str, Any], path: str) -> int:
     """Run a plan written by `<tool> --plan FILE`: refuse if any fingerprinted input changed since
     the plan was made (the plan's commands would then describe a different edit), run the tool
@@ -818,6 +896,10 @@ def execute_plan(plan: Dict[str, Any], path: str) -> int:
         for c in plan.get("commands") or []:
             STATE.commands.append(c)
             info("[dry-run] " + c)
+        for step in plan.get("verify") or []:
+            if step.get("tool") == "check" and (step.get("platform") or step.get("content") is True):
+                record_skip("[dry-run] the plan's check step is not run: there is no output to check yet",
+                            "check_dry_run", platform=step.get("platform"), content=step.get("content") is True)
         emit(plan.get("output"), plan=path, plan_sha256=digest, tool=tool, stages=[tool], check=None, unbound_inputs=unbound)
         return 0
     info(f"executing plan {path}: {tool} " + " ".join(argv))
@@ -844,14 +926,12 @@ def execute_plan(plan: Dict[str, Any], path: str) -> int:
         # a check step names a platform, asks for check.py --content's black/frozen/silence rows
         # ("content": true), or both -- the same keys a project's "check" stage takes
         if step.get("tool") == "check" and (step.get("platform") or step.get("content") is True) and output:
-            cp = run_tool([str(HERE / "check.py"), output] + (["--platform", str(step["platform"])] if step.get("platform") else [])
-                          + (["--content"] if step.get("content") is True else []) + ["--json"] + child_args())
-            try:
-                check_result = json.loads(cp.stdout)
-            except ValueError:
-                check_result = {"error": cp.stderr.strip()[-300:]}
+            check_result = run_check(output, step.get("platform"), step.get("content") is True)
             if check_result.get("failed") or check_result.get("status") == "failed" or check_result.get("error"):
                 exit_code = 1
+        elif step.get("tool") == "check" and not output:
+            record_skip("the plan's check step is not run: the tool reported no output", "check_no_output",
+                        platform=step.get("platform"))
     # a failed platform check is reported the way the direct path reports it: the tool completed,
     # verified is false, the rows say what to fix (review 6: a plan must not fail harder than the
     # same command run by hand)
@@ -860,9 +940,10 @@ def execute_plan(plan: Dict[str, Any], path: str) -> int:
         info(f"plan done: {output}, but the {check_result.get('platform') or 'content'} check failed" + (f": {', '.join(failed_rows)}" if failed_rows else ""))
     else:
         info(f"plan done: {output}")
+    # the tool's own steps (export's loudness, ...) come in through absorb_stage() above, tagged
+    # with `stage`, so `verified` is theirs and the check's together
     emit(output, plan=path, plan_sha256=digest, unbound_inputs=unbound, tool=tool, stages=[tool] + (["check"] if check_result else []), check=check_result, tool_result=doc,
-         verification=([{"step": "check", "ok": not exit_code, "platform": check_result.get("platform")}] if check_result else [])
-         + [s for s in (doc.get("verification") or []) if s.get("step") != "probe"])
+         verification=([{"step": "check", "ok": not exit_code, "platform": check_result.get("platform")}] if check_result else []))
     return 0
 
 
@@ -1476,22 +1557,28 @@ def main() -> int:
     ck = proj.get("check")
     check_result = None
     exit_code = 0
-    if ck and ck.get("platform") and not STATE.dry_run:
-        proc = run_tool([str(HERE / "check.py"), output, "--platform", ck["platform"], "--json"]
-                        + (["--content"] if ck.get("content") is True else []) + child_args())
-        try:
-            check_result = json.loads(proc.stdout)
-        except ValueError:
-            check_result = {"error": proc.stderr.strip()[-300:]}
+    # a platform, --content's rows, or both: the same rule a plan's check step follows (a
+    # {"content": true} stage without a platform used to be skipped without a word)
+    wants_check = bool(ck) and (bool(ck.get("platform")) or ck.get("content") is True)
+    check_label = ck.get("platform") if ck and ck.get("platform") else "content"
+    if wants_check and STATE.dry_run:
+        record_skip("[dry-run] the check stage is not run: a dry run writes no output to check",
+                    "check_dry_run", platform=ck.get("platform"), content=ck.get("content") is True)
+    elif wants_check:
+        check_result = run_check(output, ck.get("platform"), ck.get("content") is True)
         if check_result.get("failed"):
             info(f"check: {check_result['failed']} FAIL — " + "; ".join(f"{r['check']}={r['value']} ({r['fix']})" for r in check_result["checks"] if r["status"] == "FAIL"))
             exit_code = 1
         elif check_result.get("error") or check_result.get("status") == "failed":
-            info(f"check: could not run check.py — {check_result.get('error')}")
+            err = check_result.get("error")
+            info(f"check: could not run check.py — {err.get('message') if isinstance(err, dict) else err}")
             exit_code = 1
         else:
-            info(f"check: OK for {ck['platform']}")
+            info(f"check: OK for {check_label}")
         stages_done.append("check")
+    elif "check" in proj:
+        record_skip('the check stage names neither "platform" nor "content": true, so nothing was checked',
+                    "check_nothing_to_check", keys=sorted(ck or {}))
 
     if not args.keep and not args.work:
         # Also clean up on --dry-run: a dry run still creates this directory (and some steps,
@@ -1504,14 +1591,14 @@ def main() -> int:
         # The deliverable is written and verified, but it does not meet the requested platform
         # spec (or the check itself could not run): a failed delivery, reported as one.
         failed_rows = [r["check"] for r in (check_result or {}).get("checks", []) if r.get("status") == "FAIL"]
-        die(f"rendered {output} but the {ck['platform']} check failed" + (f": {', '.join(failed_rows)}" if failed_rows else ""),
+        die(f"rendered {output} but the {check_label} check failed" + (f": {', '.join(failed_rows)}" if failed_rows else ""),
             kind="verification", output=output, dry_run=STATE.dry_run, stages=stages_done, check=check_result,
             probe=probe(output, role="output"))
     info(f"rendered {output} via {' → '.join(stages_done)}")
     cache_report = None
     if args.cache:
         cache_report = {"dir": CACHE["dir"], "ffmpeg": CACHE["ffmpeg"],
-                        "hits": CACHE["hits"], "misses": CACHE["misses"],
+                        "hits": CACHE["hits"], "misses": CACHE["misses"], "miss_reasons": CACHE["miss_reasons"],
                         "saved_seconds": round(CACHE["saved_seconds"], 1),
                         "entries": CACHE["entries"]}
         if STATE.dry_run:
@@ -1526,7 +1613,7 @@ def main() -> int:
         snap_report["clips"] = snap_reports
     emit(output, stages=stages_done, check=check_result, snap=snap_report, cache=cache_report,
          caption=caption_report,
-         verification=[{"step": "check", "ok": True, "platform": ck["platform"]}] if check_result else [])
+         verification=[{"step": "check", "ok": True, "platform": ck.get("platform")}] if check_result else [])
     return 0
 
 

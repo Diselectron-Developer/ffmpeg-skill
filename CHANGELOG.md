@@ -4,7 +4,18 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **A degraded or partial result is no longer reported as the asked-for one** (nothing happens silently, part 2). Additive fields, plus the `batch.py` row `error` noted below:
+  - `render.py`'s `verified` is the conjunction of every stage's. A stage's own verification steps (beyond its intermediate's probe) are in the result's `verification`, tagged with `stage`, and its notes in `notes`, prefixed with its tool: an export that missed its platform loudness used to leave the render `verified: true`. An executed plan and a pack carry their children's the same way, and a `--cache` hit replays what the cached stage verified.
+  - `render.py`'s `"check": {"content": true}` without a platform runs `check.py --content` (it was skipped without a word; a plan's check step already ran it). A check not run under `--dry-run` is a `check_dry_run` skip, and check.py output that does not parse is a failure document (`error.reason: check_output_unparsed`) instead of a bare string.
+  - `render.py --cache` says why each stage missed (`cache.miss_reasons`: `not_cached`, `sidecar_missing`, `artifact_missing`, `sidecar_corrupt`, `artifact_truncated`, `no_output_path`); a damaged entry is a `cache_entry_damaged` warning and an audit line in the cache directory; a failed store, an input that cannot be fingerprinted and an unreadable ffprobe banner are recorded.
+  - `export.py` reports `trimmed: {from, to}` (and a note) when a platform maximum cut the clip. A loudness measurement that cannot be read is `loudness.measured: false` with a failing `{step: loudness, ok: false, reason: not_measured}` and a `loudness_not_measured` warning, instead of no loudness block and `verified: true`; after `--normalize`, the measurement from before the pass is no longer reused.
+  - `multicam.py`'s `cuts` name the camera actually rendered (camera 0 where the asked-for camera had not started), with a `camera_not_started` fallback naming the one asked for.
+  - `report.py` lists each section it built as a verification step (`loudness`, `compliance` with `passed`, `contact_sheet`); one it could not build is `ok: false` with the child's reason and a `report_section_missing` warning, so the report is no longer `verified: true` with a section missing.
+  - `batch.py`: a failed row's `error` is the failing step's own `{step, tool, kind, message, code, reason, details, hint, exit_code}` (it was absent, or a string such as `"1"` for a worker that exited); rows add `verified` and `unverified` (a completed but unverified step stays `ok`, as design-decisions decides), and the batch's `verification` has one `item` step per row. Ctrl-C reports a row for every input (`interrupted: true`, or `skipped: "interrupted"`) and a `total` that counts them all. A cache hit is served only while its output's size and mtime are the ones the batch wrote (`cache_miss` on the row, a warning), so an entry written by 2.10.11 or earlier runs once more; a cache file that does not parse is a `batch_cache_reset` warning and an audit line. A recipe error that is the same for every item is refused before any item runs.
+  - `verify.py` runs each step with `--json` and keeps the tool's own `kind`, `reason`, `message` and `exit_code` instead of the last stderr line or a fixed string; steps that do not apply are listed under each file's `skipped` with a reason.
+  - `export.py`'s and `multicam.py`'s last stderr-only `warning:` lines are records too (`colour_not_converted`, `output_audio_silent`, `loudness_outside_spec`, `sync_low_confidence`), so no tool prints a warning that `--json` does not carry.
 
 ## 2.11.0
 

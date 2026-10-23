@@ -636,7 +636,7 @@ Per-tool keys added in 1.17, all additive:
 | `filler`, `removed_seconds_total` | `silence.py --filler` | `{lang, source, engine, words, removed, removed_count, removed_seconds, removed_words, word_timings, list, warnings}`. The existing `removed_seconds` is unchanged in name and meaning — the seconds of *silence* removed, which is what it has always held — and `removed_seconds_total` is the additive sibling covering silence plus filler |
 | `jobs`, `jobs_requested`, `wall_seconds`, `item_seconds_total`, `timed_out` | `batch.py` | the parallelism actually applied and the number asked for, the batch's wall clock, the sum of the per-item times (so the speed-up can be quoted), and whether the shared timeout budget ran out. A timed-out item carries `"skipped": "timeout"` in its result row |
 | `timeline` | `render.py --export-timeline FILE` | `{format, rate, duration, frames, clips, transition, transition_frames, music, markers, notes, not_exported}`: the written timeline's own numbers (`rate` is exact, `"30000/1001"` for 29.97) and what the project asked for that an editor timeline cannot carry. Nothing is encoded (`commands: []`); `verified` means the file was written and reads back as its format (`verification` step `parse`) -- not that an editor opened it |
-| `cache` | `render.py --cache` | `{dir, ffmpeg, hits, misses, saved_seconds, entries}`, plus `would_hit` under `--dry-run`. The ffmpeg build banner, the skill version, the contract version, the forwarded flags (`--fast`, `--codec`, …), the GPU setting (`FFMPEG_SKILL_HW` and whether `--hw`/`--no-hw` made it explicit) and the output's extension are all part of every key, so a cache is never reused across any of them — a `--fast` draft is never served to a run that did not ask for one |
+| `cache` | `render.py --cache` | `{dir, ffmpeg, hits, misses, miss_reasons, saved_seconds, entries}`, plus `would_hit` under `--dry-run`. `miss_reasons` (unreleased, additive): `[{stage, reason, ...}]`, `reason` one of `not_cached`, `sidecar_missing`, `artifact_missing`, `sidecar_corrupt`, `artifact_truncated`, `no_output_path`. The ffmpeg build banner, the skill version, the contract version, the forwarded flags (`--fast`, `--codec`, …), the GPU setting (`FFMPEG_SKILL_HW` and whether `--hw`/`--no-hw` made it explicit) and the output's extension are all part of every key, so a cache is never reused across any of them — a `--fast` draft is never served to a run that did not ask for one |
 
 Per-tool keys added in 1.17.1, all additive:
 
@@ -785,13 +785,40 @@ dry-run measurement of an earlier stage's output), `ffmpeg_list_unreadable` (`ff
 `ass_lines_unshifted` / `ass_lines_malformed`; `timeline_parse_failed`; and every `warning:` line a
 tool used to print to stderr only (emoji fallbacks, silent or short inputs, memory-heavy jobs,
 `--strip-dovi` without Dolby Vision, `render.py`'s frame-from-preset and `--normalize` defaults).
-Every one of them still prints its stderr line; the record is additive.
+`render.py`'s plan, check and cache records (`check_dry_run`, `check_output_unparsed`, `cache_entry_damaged`, ...),
+`export.py`'s `loudness_not_measured`, `loudness_outside_spec` and `colour_not_converted`, `multicam.py`'s
+`camera_not_started`, `report.py`'s `report_section_missing` and `batch.py`'s cache records
+(`batch_cache_reset`, `batch_cache_output_changed`, ...) are listed there too. Every one of them
+still prints its stderr line; the record is additive.
+
+**A result that is not the one asked for says so.** `verified` is the conjunction of every
+`verification` step, and a tool that runs others counts theirs: `render.py` lists each stage's own
+steps beyond its intermediate's probe, tagged with `stage` (a cached stage's as the cache recorded
+them), and its `notes` carry each stage's notes prefixed with the stage's tool, so an export that
+missed its platform loudness leaves the render `verified: false`. A step that could not be
+measured is a failing step with a `reason`, never an absent one: `export.py`'s unreadable loudness
+is `{step: loudness, ok: false, reason: not_measured}` with `loudness.measured: false`, and
+`report.py` lists each section it built (`loudness`, `compliance` with `passed`,
+`contact_sheet`), one it could not with `ok: false` and the child's `reason`/`message`. A
+deliberate change of result is a field: `export.py`'s `trimmed: {from, to}` when a platform
+maximum cut the clip, `multicam.py`'s `cuts` naming the camera rendered (camera 0 where the one
+asked for had not started, with a `camera_not_started` fallback). `batch.py` keeps `ok` as "every
+step completed" (a spec miss is `completed` + `verified: false`, not a failure) and adds `verified`
+and `unverified: [{step, tool, failed}]` to each row, one `item` verification step per row, a
+failed row's `error: {step, tool, kind, message, code, reason, details, hint, exit_code}` from the
+failing step's own document, and `cache_miss` when a cache entry was not served because its output
+changed or could not be checked; an interrupted batch has a row for every input
+(`interrupted: true`, or `skipped: "interrupted"` when it had not started) and `total` counts them
+all. `verify.py`'s steps keep the tool's `kind`, `reason`, `message` and `exit_code`, and the steps
+that do not apply are listed under each file's `skipped` with a reason.
 
 **Audit log.** Events a later reader must be able to reconstruct are appended as JSON lines,
 `{ts, tool, event, pid, plan_sha256, details}` (`plan_sha256` on plan events): `plan_rejected`,
-`lock_takeover`, `output_unlocked`, and `output_is_input_refused` when a log was named. The file
+`lock_takeover`, `output_unlocked`, `output_is_input_refused` when a log was named,
+`cache_entry_damaged` (`render.py --cache`) and `batch_cache_reset`. The file
 is `render.py --audit-log FILE` when given; otherwise a refused plan's `<plan>.audit.jsonl` next
-to the plan, and a lock event's hidden `.<output>.ffskill-audit.jsonl` beside the output. Nothing
+to the plan, a lock event's hidden `.<output>.ffskill-audit.jsonl` beside the output, and a cache
+event's `.ffskill-audit.jsonl` in the cache directory or the batch's `output_dir`. Nothing
 is appended under `--dry-run`. A record that cannot be written is a `diagnostics.warnings` entry
 (`audit_log_unwritable`) and never fails or blocks the run; the refusal's `details.audit_log`
 says `{path, written}` either way.

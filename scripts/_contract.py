@@ -466,7 +466,7 @@ DIAGNOSTIC_CODES = {
     "asr_language_assumed": ("warnings", "--transcribe: the language was assumed (English) and the transcript is wrong if it is not"),
     # analysis
     "drift_correction_skipped": ("skipped", "sync.py --fix-drift not applied for a source (drift_skipped_reason); {path, reason: too_short | low_confidence, ...}"),
-    "sync_low_confidence": ("warnings", "sync.py: a source's offset has a correlation confidence below 0.1; {path, confidence}"),
+    "sync_low_confidence": ("warnings", "sync.py / multicam.py: a source's offset has a correlation confidence below 0.1; {path, confidence}"),
     "cropdetect_windows_failed": ("warnings", "cropdetect.py: sampled windows ffmpeg could not decode (windows_failed); {failed, windows, starts}"),
     "filler_words_untimed": ("warnings", "silence.py --filler: listed words in the transcript with no usable timing were not removed (filler.matched_untimed); {count}"),
     "filler_removal_caution": ("warnings", "silence.py --filler: a removed word that is often an ordinary word, or a discourse marker added with --filler-extra (also in filler.warnings)"),
@@ -481,6 +481,28 @@ DIAGNOSTIC_CODES = {
     "dovi_not_detected": ("warnings", "color.py --strip-dovi on a stream with no Dolby Vision metadata: unregistered SEI removed anyway"),
     "frame_from_export_preset": ("warnings", "render.py: frame.width/height taken from the export preset for a frame given only an aspect; {preset, width, height}"),
     "normalize_on_by_default": ("warnings", "render.py: a platform export preset with no loudness stage got export.py --normalize by default; {preset}"),
+    # degraded or partial results (part 2)
+    "colour_not_converted": ("warnings", "export.py: an HDR or wide-gamut source written by a preset that tags SDR BT.709 without converting it; {preset, hdr_format}"),
+    "output_audio_silent": ("warnings", "export.py: the written audio is silent (-inf LUFS), so no gain meets the platform's loudness; {platform}"),
+    "loudness_outside_spec": ("warnings", "export.py: the written file's loudness is outside the platform's spec (normalized: after --normalize too); {platform, lufs, tp, normalized}"),
+    "camera_not_started": ("fallbacks", "multicam.py: a range asked for a camera that had not started; camera 0 played it ({start, end, requested_camera, camera, starts_at}); `cuts` names the camera rendered"),
+    "loudness_not_measured": ("warnings", "export.py: the written file's loudness could not be read, so the platform's loudness was not verified (loudness.ok null, a failing loudness verification step)"),
+    "loudness_no_audio": ("skipped", "export.py: a platform preset's loudness check, on a source with no audio"),
+    "report_section_missing": ("warnings", "report.py: a loudness, compliance or contact-sheet section could not be built (also a failing verification step naming the section)"),
+    "report_section_dry_run": ("skipped", "report.py --dry-run draws no contact sheet"),
+    "check_dry_run": ("skipped", "render.py --dry-run does not run a check stage or a plan's check step"),
+    "check_no_output": ("skipped", "render.py PLAN: the tool reported no output for the plan's check step"),
+    "check_nothing_to_check": ("skipped", "render.py: a \"check\" stage with neither \"platform\" nor \"content\": true"),
+    "check_output_unparsed": ("warnings", "render.py: check.py printed no JSON document; `check` is a failure document (error.reason check_output_unparsed)"),
+    "cache_entry_damaged": ("warnings", "render.py --cache: a sidecar that does not parse or an artifact of the wrong size (also an audit line in the cache directory); the stage runs again"),
+    "cache_store_failed": ("warnings", "render.py --cache: a stage's artifact could not be stored; the run is unaffected"),
+    "cache_input_unreadable": ("warnings", "render.py --cache: an input could not be fingerprinted and is keyed as \"missing\""),
+    "cache_ffmpeg_banner_unreadable": ("fallbacks", "render.py --cache: the ffprobe banner could not be read; keyed on major.minor, so builds of one release share entries"),
+    "cache_result_unrecorded": ("skipped", "render.py --cache: a hit from an entry that recorded no stage result, so what that stage verified is unknown"),
+    "recipe_project_unreadable": ("warnings", "batch.py: recipe.project could not be read; the cache key covers the recipe only"),
+    "batch_cache_reset": ("warnings", "batch.py: .ffskill_cache.json did not parse and was started empty (also an audit line)"),
+    "batch_cache_output_changed": ("warnings", "batch.py: a cached item's output was replaced or edited since the batch wrote it; the item runs again"),
+    "batch_cache_entry_unverifiable": ("warnings", "batch.py: a cache entry from before output identities; the item runs again"),
 }
 
 
@@ -512,7 +534,7 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
             "hw": {"type": "object", "description": "present when VideoToolbox was asked for (--hw, $FFMPEG_SKILL_HW, a render.py stage, a batch.py item), on export.py when $FFMPEG_SKILL_HW=1 is set but its delivery preset does not take it, and when this ffmpeg build has no libx264/libx265 and an encode ran on VideoToolbox instead: {requested: whether this run's encodes were asked onto VideoToolbox (false for that export, and for the build without libx264/libx265), source: flag|env|auto (auto: nobody asked, the build has no libx264/libx265 and this Apple Silicon machine ran VideoToolbox in its place), used: true|false whether the encoder that ran last is VideoToolbox, null under --dry-run (nothing ran) and when this process ran no encode itself (batch.py: its stages are child processes; its top-level hw gathers the items' requested/source/fallback/notes and each results row carries its item's encoder and hw), fallback: a job VideoToolbox refused (encoder open or compression session failure; nothing else is retried) was re-encoded on the CPU, notes: why an encode stayed on or fell back to the CPU, and, when $FFMPEG_SKILL_HW chose the GPU and it ran, what that costs and that --no-hw opts out}. A VideoToolbox encode also adds a top-level notes line: its quality is not CRF-equivalent. A kind: ffmpeg failure under --hw / $FFMPEG_SKILL_HW carries encoder and hw too"},
             "plan": {"type": "string", "description": "with --plan FILE: the plan document written (the run itself is a dry run)"},
             "verified": {"type": "boolean", "description": "true only when the artifact was written, probed, and every self-check the tool ran (verification) met its target; false under --dry-run"},
-            "verification": {"type": "array", "items": {"type": "object", "properties": {"step": {"type": "string"}, "ok": {"type": "boolean"}}}, "description": "what the tool itself verified: probe, plus loudness (loudness.py, export platform presets) or check (render)"},
+            "verification": {"type": "array", "items": {"type": "object", "properties": {"step": {"type": "string"}, "ok": {"type": "boolean"}, "stage": {"type": "string"}}}, "description": "what the tool itself verified: probe, plus loudness (loudness.py, export platform presets; ok false with reason not_measured when it could not be read), check (render), report.py's sections (loudness, compliance, contact_sheet) and batch.py's items (item). render.py also lists every stage's own steps beyond its artifact probe, tagged with `stage` (a cached stage's as recorded), so its `verified` is the conjunction of every stage's"},
             "diagnostics": DIAGNOSTICS_SCHEMA}
     extra: Dict[str, Any] = {}
     if name == "check":
@@ -552,7 +574,9 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
     elif name == "look":
         extra = {"outputs": {"type": "array", "items": {"type": "string"}}}
     elif name == "render":
-        extra = {"stages": {"type": "array", "items": {"type": "string"}}, "check": {"type": ["object", "null"]},
+        extra = {"stages": {"type": "array", "items": {"type": "string"}}, "check": {"type": ["object", "null"], "description": "check.py's document for a \"check\" stage with a platform, \"content\": true, or both; when check.py printed none, a failure document with error.reason check_output_unparsed"},
+                 "cache": {"type": ["object", "null"], "description": "--cache: {dir, ffmpeg, hits, misses, miss_reasons: [{stage, reason: not_cached|sidecar_missing|artifact_missing|sidecar_corrupt|artifact_truncated|no_output_path, ...}], saved_seconds, entries, would_hit (--dry-run)}"},
+                 "notes": {"type": "array", "items": {"type": "string"}, "description": "each stage's own notes, prefixed with its tool (\"export: loudness ... is outside x's ...\")"},
                  "plan": {"type": "string", "description": "when the argument was a plan.json (written by <tool> --plan): its path"},
                  "plan_sha256": {"type": ["string", "null"], "description": "plan execution: sha256 of the plan file as executed"},
                  "unbound_inputs": {"type": "array", "items": {"type": "string"}, "description": "plan execution: inputs that did not exist when the plan was made, so carry no fingerprint and were not checked (also a diagnostics.warnings entry, code plan_unbound_inputs)"},
@@ -562,16 +586,19 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
                               "transition_frames, music, markers, notes, and not_exported (what the project asks for that an "
                               "editor timeline cannot carry)"}}
     elif name == "verify":
-        extra = {"report": {"type": ["string", "null"]}, "files": {"type": "array"}, "failed": {"type": "integer"}, "total": {"type": "integer"}}
+        extra = {"report": {"type": ["string", "null"]},
+                 "files": {"type": "array", "description": "one entry per file: {file, probe, steps, skipped}. A step is {step, ok, seconds, error (one line, for the table)}, plus the tool's verified when it completed, and on a failure its own kind, reason, message, details and exit_code (reason step_timeout or step_output_unparsed when the tool printed no failure document); skipped lists the steps that do not apply as {step, reason: quick|no_video|no_audio|not_hdr|not_multichannel|input_unreadable, message}"},
+                 "failed": {"type": "integer"}, "total": {"type": "integer"}}
     elif name == "batch":
-        extra = {"results": {"type": "array", "description": "one row per input; a row whose recipe ran cut.py carries cut_reencoded (each cut.py call's reencoded) and cut_reencode_reasons (each reason those calls named, once per call)"},
+        extra = {"results": {"type": "array", "description": "one row per input, every input (an interrupted batch included): ok (every step completed), verified (every step also verified what it wrote; false under --dry-run) and unverified ([{step, tool, failed}] naming the steps that did not); a failed row's error {step, tool, kind, message, code, reason, details, hint, exit_code} from the failing step's own document; diagnostics from its steps (tagged with step); cache_miss {reason: output_missing|output_changed|entry_unverifiable, ...} when a cache entry was not served; skipped \"timeout\" or \"interrupted\" for an item that never started and interrupted true for one stopped while running. A row whose recipe ran cut.py carries cut_reencoded (each cut.py call's reencoded) and cut_reencode_reasons (each reason those calls named, once per call)"},
                  "processed": {"type": "integer"}, "total": {"type": "integer"},
                  "cut_stream_copy": {"type": ["object", "null"], "description": "cut.py calls across the folder: {calls, stream_copy, reencoded, stream_copy_rate}; null when no cut.py step ran"},
                  "cut_reencode_reasons": {"type": ["object", "null"], "description": "how many cut.py calls named each reencode_reason ({} when none re-encoded); a re-encoded call whose row came from a cache an earlier 2.x batch wrote, which recorded no reasons, counts as unknown; null when no cut.py step ran"}}
     elif name == "report":
-        extra = {"report": {"type": "string"}, "check": {"type": ["object", "null"]}}
+        extra = {"report": {"type": "string"}, "check": {"type": ["object", "null"], "description": "check.py's document for --platform; null when it was not asked for or could not run (a failing compliance verification step then says why)"}}
     elif name == "export":
-        extra = {"loudness": {"type": "object", "description": "platform presets with audio: the written file's lufs/tp against the platform's target_lufs/target_tp, ok true when inside the spec; normalized true when --normalize ran loudness.py on the file; silent true (lufs \"-inf\", ok false, no normalize) when the written audio is silent"},
+        extra = {"loudness": {"type": "object", "description": "platform presets with audio: the written file's lufs/tp against the platform's target_lufs/target_tp, ok true when inside the spec; normalized true when --normalize ran loudness.py on the file; silent true (lufs \"-inf\", ok false, no normalize) when the written audio is silent; measured false (lufs, tp and ok null, reason not_measured) when the measurement could not be read"},
+                 "trimmed": {"type": "object", "description": "present when the source was longer than the preset's platform maximum and the export was cut to it (no --allow-long): {from, to} in seconds; notes says so too"},
                  "notes": {"type": "array", "items": {"type": "string"}}}
     elif name == "loudness":
         extra = {"measured": {"type": "object", "description": "the loudnorm measurement of the input (input_i, input_tp, input_lra, input_thresh, target_offset); with --measure-only it is the whole result"},
@@ -608,6 +635,9 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
                  "lossless_alternative": {"type": ["string", "null"], "description": "when a lossless cut re-encoded because of the keyframe snap: the --start that would stream-copy instead, and how far it is from the request"},
                  "join_check": {"type": ["object", "null"], "description": "--segments video stream-copy join: the written file measured by demuxing, {packets, expected_packets, max_step_seconds, audio_offset_ms, audio_parts_checked, ok}. expected_packets counts the source's video packets from each part's start keyframe to its end (or the end of the video); max_step_seconds is the largest presentation step (null when vfr_check measured anything but sampled_cfr, e.g. a --vfr-guard off join of variable timing, which checks the count only), and each step at a join must be the step its parts predict within 1 ms; audio_offset_ms is, per part, its sound's shift minus its picture's (+ = sound late) from audio packets matched by CRC32 to the source stream shaped like the joined audio (FFmpeg's default selection may copy one other than a:0; an MPEG-TS source's AAC is hashed without its ADTS headers) (null for a part with no unique match, e.g. digital silence; null as a whole when the source has no audio or the video check failed), and audio_parts_checked counts the measured parts; ok is the conjunction (counts, steps, every measured part within 5 ms), and false means the join was re-cut from the source (concat_fallback) and this is the failed measurement. null for a single segment, audio, --dry-run, --accurate/--codec/a forced re-encode, a segment that re-encoded, or a join that fell back before a copy join was attempted (open GOPs, a later B-frame segment starting between keyframes, parts that differ, a concat error)"},
                  "segment_end_snap_seconds": {"type": ["array", "null"], "items": {"type": ["number", "null"]}, "description": "--segments stream-copy join: per segment, the signed seconds its end moved to the keyframe the copied part stops at (the first keyframe at or after the requested end, never an earlier one; null for a part that runs to the end of the video, a part of a source with no B-frames, which is cut to its requested end as in every 2.x release, or a Matroska/MPEG-TS part, which is not snapped). null as a whole unless the output is those copied parts: a single segment, audio, --dry-run, or any re-encode or fallback"}}
+    elif name == "multicam":
+        extra = {"cuts": {"type": "array", "description": "[[start, end, camera], ...] on the reference timeline: the camera actually rendered. A range whose camera had not started yet plays camera 0, and diagnostics.fallbacks names the camera asked for (code camera_not_started)"},
+                 "offsets_seconds": {"type": "array"}, "confidence": {"type": "array"}}
     elif name == "join":
         extra = {"mode": {"enum": ["video", "audio"]}, "clips": {"type": "integer"}, "transition": {"type": "string"},
                  "expected_duration": {"type": ["number", "null"], "description": "clip lengths minus the transitions; null under --dry-run while an input is pending (its length is unknown)"},
@@ -1814,9 +1844,12 @@ def build(detect: bool = True) -> Dict[str, Any]:
                           "events": {"plan_rejected": "render.py refused a plan (details: the refusal's error.details plus reason)",
                                      "lock_takeover": "a stale output lock was taken over (details: lock, output, pid, pid_alive, deadline, why)",
                                      "output_unlocked": "no output lock could be created and the run went on without one",
-                                     "output_is_input_refused": "the output-is-input refusal (only when an audit log was named)"},
-                          "location": "render.py --audit-log FILE when given; otherwise a refused plan's <plan>.audit.jsonl, and a lock event's "
-                                      "hidden .<output>.ffskill-audit.jsonl beside the output. Never written under --dry-run; a write that "
+                                     "output_is_input_refused": "the output-is-input refusal (only when an audit log was named)",
+                                     "cache_entry_damaged": "render.py --cache: a damaged entry (details: stage, reason, key, sidecar or artifact, sizes)",
+                                     "batch_cache_reset": "batch.py: .ffskill_cache.json did not parse and was started empty (details: path, size, error)"},
+                          "location": "render.py --audit-log FILE when given; otherwise a refused plan's <plan>.audit.jsonl, a lock event's "
+                                      "hidden .<output>.ffskill-audit.jsonl beside the output, and a cache event's .ffskill-audit.jsonl in the "
+                                      "cache directory (render.py --cache DIR) or the batch's output_dir. Never written under --dry-run; a write that "
                                       "fails is a diagnostics.warnings entry (audit_log_unwritable), never a failure"},
             "error_kinds": {"input": "missing or unsuitable input, bad arguments", "ffmpeg": "ffmpeg/ffprobe returned an error (message carries the last stderr lines)", "output": "ffmpeg exited 0 but the artifact is missing, empty or unreadable (an empty file is removed)", "missing_tool": "ffmpeg or ffprobe not on PATH", "timeout": "one ffmpeg/ffprobe run exceeded --timeout (default 1800 s, FFMPEG_SKILL_TIMEOUT) and was killed; partial output removed; exit 124", "verification": "the tool ran but its result failed the requested check: check.py platform rows (checks attached), render.py's check stage (output written, check attached), batch.py items (results attached), verify.py steps (files attached), color.py --retag (output written, but ffprobe does not read the requested colour tags on it); exit 1", "interrupted": "the tool received SIGINT or SIGTERM: the running ffmpeg (or sibling script) was stopped and its partial output removed; exit 130 or 143"},
             "success_criterion": "exit 0 AND the output exists AND is non-empty AND ffprobe reads a stream from it; only then is status completed printed and the output probe attached",

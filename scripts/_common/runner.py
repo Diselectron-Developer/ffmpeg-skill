@@ -234,7 +234,7 @@ class Context:
 
     __slots__ = ("dry_run", "json", "json_brief", "progress", "fast", "duration_hint", "commands", "timeout", "overwrite", "written", "preexisting", "plan", "plan_written", "plan_inputs", "codec",
                  "hw", "hw_source", "hw_notes", "hw_swaps", "hw_fallback", "hw_env_ignored", "hw_stages", "hw_auto",
-                 "notes", "warnings", "fallbacks", "skipped", "audit_log")
+                 "notes", "warnings", "fallbacks", "skipped", "audit_log", "stage_verification")
 
     def __init__(self) -> None:
         self.reset()
@@ -272,6 +272,10 @@ class Context:
         self.fallbacks: List[Dict[str, Any]] = []
         self.skipped: List[Dict[str, Any]] = []
         self.audit_log: Optional[str] = None         # render.py --audit-log FILE: where audit() appends; None = the event's own default
+        # render.py (stages, an executed plan, a pack's renders): the verification steps each child
+        # tool reported, tagged with `stage`, which emit() adds to this result's own so that
+        # `verified` is the conjunction of every stage's (absorb_stage())
+        self.stage_verification: List[Dict[str, Any]] = []
 
 
 STATE = Context()
@@ -407,9 +411,10 @@ _CHILDREN: List[Tuple[subprocess.Popen, Sequence[str]]] = []
 _SIGNALS_INSTALLED = False
 
 
-def _on_signal(signum: int, frame: Any) -> None:
-    import signal as _signal
-    name = {getattr(_signal, "SIGINT", None): "SIGINT", getattr(_signal, "SIGTERM", None): "SIGTERM"}.get(signum, str(signum))
+def stop_children() -> None:
+    """Stop every child this tool is waiting on and remove each one's partial output: what the
+    signal handler does before it exits, for a tool that reports more than "interrupted" after a
+    signal (batch.py's partial table)."""
     for proc, cmd in list(_CHILDREN):
         try:
             proc.terminate()  # ffmpeg exits promptly on SIGTERM; a sibling script runs this same handler
@@ -423,6 +428,12 @@ def _on_signal(signum: int, frame: Any) -> None:
         if cmd:
             _cleanup_partial_output(cmd)
     _CHILDREN.clear()
+
+
+def _on_signal(signum: int, frame: Any) -> None:
+    import signal as _signal
+    name = {getattr(_signal, "SIGINT", None): "SIGINT", getattr(_signal, "SIGTERM", None): "SIGTERM"}.get(signum, str(signum))
+    stop_children()
     die(f"interrupted by {name}: the running command was stopped and its partial output removed; nothing was written",
         code=128 + signum, kind="interrupted")
 

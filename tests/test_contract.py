@@ -5,6 +5,8 @@ verification policy) holds when the tool actually runs.
 
     python3 tests/test_contract.py
 """
+import contextlib
+import io
 import json
 import os
 import platform
@@ -2913,7 +2915,10 @@ class ContractTests(unittest.TestCase):
         doc = json.loads(tool("cut", self.src, "--start", "0", "--end", "1", "-o", self.out("vf_dry.mp4"), "--dry-run", "--json").stdout)
         self.assertEqual((doc["verified"], doc["verification"]), (False, []))
         doc = json.loads(tool("report", "--after", self.src, "-o", self.out("vf_rep.html"), "--json").stdout)
-        self.assertTrue(doc["verified"]); self.assertEqual(doc["verification"], [{"step": "exists", "ok": True}])
+        # the report file exists, and (since part 2 of "nothing happens silently") each section it
+        # built is a step too, so a section that could not be built cannot hide behind verified
+        self.assertTrue(doc["verified"]); self.assertEqual(doc["verification"][0], {"step": "exists", "ok": True})
+        self.assertEqual([s["step"] for s in doc["verification"][1:]], ["loudness", "contact_sheet"])
         doc = json.loads(tool("look", self.src, "-o", self.out("vf_look.png"), "--json").stdout)
         self.assertEqual((doc["verified"], doc["verification"]), (True, [{"step": "probe", "ok": True}]))
 
@@ -3744,6 +3749,327 @@ class SilentPathTests(unittest.TestCase):
             self.assertNotRegex(src, r"(?<![\w.])die\(", f"{fn.__qualname__} refuses in prose only (use refuse())")
 
 
+class SilentResultTests(unittest.TestCase):
+    """docs/design-decisions.md, "Nothing happens silently" (part 2): a degraded or partial result
+    is never reported as the asked-for one. Each test fails on 2.10.11's code."""
+
+    @classmethod
+    def setUpClass(cls):
+        require_ffmpeg_or_skip("ffmpeg", "ffprobe")
+        cls.work = Path(tempfile.mkdtemp(prefix="ffskill_silent2_"))
+        cls.src = cls.work / "src.mp4"
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=160x90:rate=25", "-f", "lavfi", "-i", "sine=f=440:r=48000",
+               "-t", "4", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", cls.src)
+        cls.late = cls.work / "late.mp4"   # the same scene, starting 0.8 s later on the reference timeline
+        ffmpeg("-ss", "0.8", "-i", cls.src, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", cls.late)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.work, ignore_errors=True)
+
+    def out(self, name):
+        return self.work / name
+
+    def patched(self, module, patch, *argv):
+        """Run scripts/<module>.py's main() in a child Python with `patch` (source) applied to the
+        imported module first: the narrowest way to make one measurement fail, on every OS."""
+        code = ("import sys; sys.path.insert(0, %r); import %s as m\n%s\nsys.argv = [%r] + %r\nsys.exit(m.main())"
+                % (str(SCRIPTS), module, patch, module + ".py", [str(a) for a in argv]))
+        return subprocess.run([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, encoding="utf-8", errors="replace")
+
+    def project(self, name, **proj):
+        p = self.out(name + ".json")
+        p.write_text(json.dumps(dict({"output": str(self.out(name + ".mp4")), "clips": [{"src": str(self.src)}]}, **proj)),
+                     encoding="utf-8")
+        return p
+
+    # ---------------------------------------------------------------- multicam
+    def test_multicam_names_the_camera_it_rendered_not_the_one_asked_for(self):
+        """A range whose camera had not started played camera 0, but `cuts` still named the camera
+        asked for. `cuts` is now what was rendered, and the fallback is recorded."""
+        doc = json.loads(tool("multicam", self.src, self.late, "--switch", "0-2:1,2-4:0", "--dry-run", "--json",
+                              "-o", self.out("mc.mp4")).stdout)
+        self.assertEqual(doc["cuts"][0][2], 0, doc["cuts"])
+        fb = doc["diagnostics"]["fallbacks"][0]
+        self.assertEqual((fb["code"], fb["requested_camera"], fb["camera"], fb["start"]), ("camera_not_started", 1, 0, 0.0))
+
+    # ---------------------------------------------------------------- export
+    def test_export_says_it_trimmed_to_the_platform_maximum(self):
+        """A clip over the preset's maximum was cut with only a stderr line."""
+        long_src = self.out("long.mp4")
+        ffmpeg("-f", "lavfi", "-i", "color=c=gray:s=32x32:r=2", "-t", "92", "-c:v", "libx264", "-preset", "ultrafast", long_src)
+        doc = json.loads(tool("export", long_src, "--preset", "reels", "--dry-run", "--json", "-o", self.out("long_reels.mp4")).stdout)
+        self.assertEqual(doc["trimmed"], {"from": 92.0, "to": 90.0})
+        self.assertTrue(any("trimmed from 92.000s" in n for n in doc["notes"]), doc.get("notes"))
+        doc = json.loads(tool("export", long_src, "--preset", "reels", "--allow-long", "--dry-run", "--json",
+                              "-o", self.out("long_reels2.mp4")).stdout)
+        self.assertNotIn("trimmed", doc)
+
+    def test_export_an_unmeasured_loudness_is_a_failing_step_not_an_absence(self):
+        """When loudnorm's JSON did not parse, the loudness block and step were left out and the
+        export read verified: true against a platform it never measured."""
+        proc = self.patched("export", "m.measure_loudness = lambda path: {}", self.src, "--preset", "x", "--fast",
+                            "-o", self.out("x_unmeasured.mp4"), "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-500:])
+        doc = json.loads(proc.stdout)
+        self.assertEqual((doc["status"], doc["verified"]), ("completed", False))
+        self.assertEqual({k: doc["loudness"][k] for k in ("lufs", "ok", "measured", "reason")},
+                         {"lufs": None, "ok": None, "measured": False, "reason": "not_measured"})
+        self.assertIn({"step": "loudness", "ok": False, "platform": "x", "reason": "not_measured"}, doc["verification"])
+        self.assertEqual(doc["diagnostics"]["warnings"][0]["code"], "loudness_not_measured")
+
+    # ---------------------------------------------------------------- report
+    def test_report_records_a_section_it_could_not_build(self):
+        """A contact sheet, loudness or --platform check that failed was left out of the report and
+        the document said verified: true."""
+        patch = ("import subprocess\nreal = m.run_tool\n"
+                 "def fake(argv, **k):\n"
+                 "    if str(argv[0]).endswith(('look.py', 'loudness.py', 'check.py')):\n"
+                 "        return subprocess.CompletedProcess(argv, 1, 'not json', 'error: injected failure\\n')\n"
+                 "    return real(argv, **k)\n"
+                 "m.run_tool = fake")
+        proc = self.patched("report", patch, "--after", self.src, "--platform", "x", "-o", self.out("rep.html"), "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr[-500:])
+        doc = json.loads(proc.stdout)
+        self.assertFalse(doc["verified"])
+        self.assertIsNone(doc["check"])
+        failed = {s["step"]: s for s in doc["verification"] if not s["ok"]}
+        self.assertEqual(sorted(failed), ["compliance", "contact_sheet", "loudness"])
+        self.assertEqual(failed["loudness"]["message"], "error: injected failure")
+        self.assertEqual({w["section"] for w in doc["diagnostics"]["warnings"]}, {"compliance", "contact_sheet", "loudness"})
+        # every section built: each is a passing step, and the compliance step says what the table found
+        doc = json.loads(tool("report", "--after", self.src, "--platform", "x", "-o", self.out("rep_ok.html"), "--json").stdout)
+        self.assertTrue(doc["verified"], doc["verification"])
+        self.assertEqual([s["step"] for s in doc["verification"]], ["exists", "loudness", "compliance", "contact_sheet"])
+        self.assertIn("passed", doc["verification"][2])
+
+    # ---------------------------------------------------------------- render
+    def test_render_verified_is_every_stages_and_carries_their_notes(self):
+        """export's loudness miss (completed, verified: false) became render's verified: true, and
+        the stage's note naming the fix was dropped."""
+        proj = self.project("rv", export={"preset": "x", "normalize": False})
+        doc = json.loads(tool("render", proj, "--fast", "--json").stdout)
+        self.assertEqual((doc["status"], doc["verified"]), ("completed", False))
+        self.assertIn({"step": "loudness", "ok": False, "platform": "x", "stage": "export"}, doc["verification"])
+        self.assertTrue(any(n.startswith("export: loudness ") for n in doc["notes"]), doc.get("notes"))
+
+    def test_render_runs_a_content_only_check_and_records_a_dry_run_skip(self):
+        """"check": {"content": true} without a platform was skipped without a word (a plan's
+        check step honoured it); a check skipped by --dry-run left no record."""
+        proj = self.project("rc", check={"content": True})
+        doc = json.loads(tool("render", proj, "--fast", "--json").stdout)
+        self.assertIn("check", doc["stages"])
+        self.assertTrue({"black", "frozen", "silence"} <= {r["check"] for r in doc["check"]["checks"]})
+        self.assertIn({"step": "check", "ok": True, "platform": None}, doc["verification"])
+        dry = json.loads(tool("render", proj, "--dry-run", "--overwrite", "--json").stdout)
+        self.assertEqual([s["code"] for s in dry["diagnostics"]["skipped"]], ["check_dry_run"])
+        proj = self.project("rc_empty", check={})
+        doc = json.loads(tool("render", proj, "--fast", "--json").stdout)
+        self.assertEqual([s["code"] for s in doc["diagnostics"]["skipped"]], ["check_nothing_to_check"])
+
+    def test_check_output_that_does_not_parse_is_a_structured_failure(self):
+        """execute_plan and the check stage stored check.py's unparsed stderr as a bare string."""
+        import render
+        from unittest import mock
+        fake = subprocess.CompletedProcess(["check.py"], 1, "garbage", "Traceback ...\nValueError: boom\n")
+        with mock.patch.object(render, "run_tool", return_value=fake), contextlib.redirect_stderr(io.StringIO()):
+            saved = list(_common.STATE.warnings)
+            try:
+                doc = render.run_check(str(self.src), "x", False)
+            finally:
+                _common.STATE.warnings[:] = saved
+        self.assertEqual((doc["status"], doc["ok"]), ("failed", False))
+        self.assertEqual((doc["error"]["reason"], doc["error"]["exit_code"]), ("check_output_unparsed", 1))
+        self.assertIn("ValueError: boom", doc["error"]["message"])
+
+    def test_render_cache_says_why_a_stage_missed_and_replays_what_a_hit_verified(self):
+        """--cache missed silently (no sidecar, a corrupt one, a truncated artifact), stored
+        silently on failure, and a hit carried none of the stage's verification."""
+        cdir = self.out("rcache")
+        proj = self.project("rcache", clips=[{"src": str(self.src), "in": 0, "out": 3}], export={"preset": "x", "normalize": False})
+
+        def entry(stage):
+            """The newest sidecar the cache holds for `stage`."""
+            side = [p for p in Path(cdir).glob("*.json") if json.loads(p.read_text(encoding="utf-8") or "{}").get("stage") == stage]
+            return max(side, key=lambda p: p.stat().st_mtime_ns)
+        render = lambda: json.loads(tool("render", proj, "--fast", "--json", "--overwrite", "--cache", cdir).stdout)  # noqa: E731
+        first = render()
+        self.assertEqual({m["reason"] for m in first["cache"]["miss_reasons"]}, {"not_cached"})
+        again = render()
+        self.assertEqual(again["cache"]["hits"], ["clips", "export"])
+        self.assertFalse(again["verified"], "a cached export that missed its loudness is still unverified")
+        self.assertIn({"step": "loudness", "ok": False, "platform": "x", "stage": "export"}, again["verification"])
+        entry("export").write_text("{not json", encoding="utf-8")
+        doc = render()
+        self.assertEqual([(m["stage"], m["reason"]) for m in doc["cache"]["miss_reasons"]], [("export", "sidecar_corrupt")])
+        self.assertEqual(doc["diagnostics"]["warnings"][0]["code"], "cache_entry_damaged")
+        self.assertEqual(json.loads((Path(cdir) / ".ffskill-audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])["event"],
+                         "cache_entry_damaged")
+        with open(entry("export").with_suffix(".mp4"), "r+b") as fh:
+            fh.truncate(100)
+        doc = render()
+        self.assertEqual([(m["stage"], m["reason"]) for m in doc["cache"]["miss_reasons"]], [("export", "artifact_truncated")])
+
+    def test_render_cache_store_failure_banner_fallback_and_unreadable_input_are_recorded(self):
+        import render
+        from unittest import mock
+        saved = {b: list(getattr(_common.STATE, b)) for b in ("warnings", "fallbacks")}
+        saved_cache = dict(render.CACHE)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                render.CACHE.update(dir=str(self.out("no_such_cache_dir")), ffmpeg="x")
+                render.cache_store("export", "k" * 40, str(self.src), 1.0, {"verified": True})
+                self.assertEqual(_common.STATE.warnings[-1]["code"], "cache_store_failed")
+                with mock.patch.object(render.subprocess, "run", side_effect=OSError("no ffprobe")):
+                    pair = render.ffmpeg_banner()
+                self.assertEqual((_common.STATE.fallbacks[-1]["code"], _common.STATE.fallbacks[-1]["used"]),
+                                 ("cache_ffmpeg_banner_unreadable", pair))
+                with mock.patch.object(render, "file_key", side_effect=PermissionError(13, "denied")):
+                    self.assertEqual(render._content_hash(str(self.src)), "missing")
+                self.assertEqual(_common.STATE.warnings[-1]["code"], "cache_input_unreadable")
+        finally:
+            for b, v in saved.items():
+                setattr(_common.STATE, b, v)
+            render.CACHE.clear()
+            render.CACHE.update(saved_cache)
+
+    # ---------------------------------------------------------------- batch
+    def batch_folder(self, name, steps):
+        folder = self.out(name)
+        folder.mkdir()
+        shutil.copy(self.src, folder / "a.mp4")
+        recipe = folder / "batch.json"
+        recipe.write_text(json.dumps({"glob": "*.mp4", "output_dir": "out", "suffix": "_b", "steps": steps}), encoding="utf-8")
+        return folder, recipe
+
+    def test_batch_a_failed_item_says_which_step_failed_and_why(self):
+        """A failed item was {"ok": false} with no step, kind or message."""
+        folder, recipe = self.batch_folder("bfail", [["cut.py", "{in}", "--start", "0", "--end", "1", "--quality", "99", "-o", "{out}"]])
+        doc = json.loads(tool("batch", folder, "--recipe", recipe, "--json", check=False).stdout)
+        err = doc["results"][0]["error"]
+        self.assertEqual((err["step"], err["tool"], err["kind"]), (0, "cut.py", "input"))
+        self.assertIn("--quality", err["message"])
+
+    def test_batch_counts_a_completed_but_unverified_step_as_ok_and_says_it_is_unverified(self):
+        """design-decisions: a spec miss is completed + verified false, not a failure. The row
+        said ok and nothing more; it now says verified: false and which step's check failed, and
+        the batch's own verified is the conjunction of its items'."""
+        folder, recipe = self.batch_folder("bunver", [["export.py", "{in}", "--preset", "x", "-o", "{out}"]])
+        doc = json.loads(tool("batch", folder, "--recipe", recipe, "--fast", "--json").stdout)
+        row = doc["results"][0]
+        self.assertEqual((row["ok"], row["verified"]), (True, False))
+        self.assertEqual(row["unverified"], [{"step": 0, "tool": "export", "failed": ["loudness"]}])
+        self.assertEqual((doc["processed"], doc["verified"]), (1, False))
+        self.assertEqual(doc["verification"], [{"step": "item", "file": row["file"], "ok": False}])
+
+    def test_batch_serves_a_cached_output_only_while_it_is_unchanged_and_records_a_reset_cache(self):
+        """A cache hit checked only that the output existed, so a replaced output was served as
+        "cached ok"; a corrupt cache file was reset without a word."""
+        folder, recipe = self.batch_folder("bcache", [["fit.py", "{in}", "--height", "64", "-o", "{out}"]])
+        run = lambda: json.loads(tool("batch", folder, "--recipe", recipe, "--fast", "--overwrite", "--json").stdout)  # noqa: E731
+        run()
+        self.assertTrue(run()["results"][0]["cached"])
+        out = Path(run()["results"][0]["output"])
+        shutil.copy(self.src, out)                       # someone replaced the delivered file
+        doc = run()
+        row = doc["results"][0]
+        self.assertFalse(row.get("cached"))
+        self.assertEqual(row["cache_miss"]["reason"], "output_changed")
+        self.assertEqual(doc["diagnostics"]["warnings"][0]["code"], "batch_cache_output_changed")
+        cache = folder / "out" / ".ffskill_cache.json"
+        cache.write_text("{truncated", encoding="utf-8")
+        doc = run()
+        self.assertEqual(doc["diagnostics"]["warnings"][0]["code"], "batch_cache_reset")
+        rec = json.loads((folder / "out" / ".ffskill-audit.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual((rec["event"], rec["details"]["path"]), ("batch_cache_reset", str(cache)))
+
+    def run_batch_in_process(self, folder, recipe, process):
+        """batch.main() with process() replaced; returns (exit code, document)."""
+        import batch
+        import signal
+        from unittest import mock
+        out = io.StringIO()
+        handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, getattr(signal, "SIGTERM", signal.SIGINT))}
+        code = 0
+        try:
+            with mock.patch.object(batch, "process", process), \
+                    mock.patch.object(sys, "argv", ["batch.py", str(folder), "--recipe", str(recipe), "--force", "--json"]), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                _common.STATE.reset()
+                try:
+                    batch.main()
+                except SystemExit as exc:
+                    code = exc.code
+        finally:
+            for s, h in handlers.items():
+                signal.signal(s, h)
+            _common.STATE.reset()
+        return code, json.loads(out.getvalue())
+
+    def test_batch_interrupted_reports_every_item_and_the_right_total(self):
+        """Ctrl-C dropped the running and the not-started items: `total` counted only what had
+        finished."""
+        folder, recipe = self.batch_folder("bint", [["fit.py", "{in}", "--height", "64", "-o", "{out}"]])
+        for name in ("b.mp4", "c.mp4"):
+            shutil.copy(self.src, folder / name)
+        calls = []
+
+        def process(src, recipe, outdir, work, deadline=None):
+            calls.append(src.name)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            return {"file": str(src), "output": str(outdir / src.name), "ok": True, "verified": True, "seconds": 0.0}
+        code, doc = self.run_batch_in_process(folder, recipe, process)
+        self.assertEqual((code, doc["error"]["kind"], doc["total"], doc["processed"]), (130, "interrupted", 3, 1))
+        rows = doc["results"]
+        self.assertEqual([r["ok"] for r in rows], [True, False, False])
+        self.assertTrue(rows[1]["interrupted"])
+        self.assertEqual(rows[2]["skipped"], "interrupted")
+
+    def test_batch_a_worker_that_raised_names_its_error_not_its_exit_code(self):
+        """failed_row stored str(SystemExit), which is the exit code: "1"."""
+        folder, recipe = self.batch_folder("bexit", [["fit.py", "{in}", "--height", "64", "-o", "{out}"]])
+
+        def process(src, recipe, outdir, work, deadline=None):
+            raise SystemExit(1)
+        code, doc = self.run_batch_in_process(folder, recipe, process)
+        err = doc["results"][0]["error"]
+        self.assertIsInstance(err, dict)
+        self.assertEqual((err["exception"], err["exit_code"]), ("SystemExit", 1))
+        self.assertNotEqual(err["message"], "1")
+
+    def test_batch_recipe_key_records_an_unreadable_project(self):
+        import batch
+        saved = list(_common.STATE.warnings)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                batch.recipe_key({"project": str(self.out("no_such_project.json"))})
+            self.assertEqual(_common.STATE.warnings[-1]["code"], "recipe_project_unreadable")
+        finally:
+            _common.STATE.warnings[:] = saved
+
+    # ---------------------------------------------------------------- verify
+    def test_verify_keeps_the_tools_own_failure_and_lists_the_steps_it_skipped(self):
+        """A step's error was its last stderr line or a fixed string ("ffprobe failed"), its kind was
+        lost, and steps that did not apply were dropped."""
+        garbage = self.out("garbage.mp4")
+        garbage.write_bytes(b"\0not media" * 100)
+        wav = self.out("tone.wav")
+        ffmpeg("-i", self.src, "-vn", "-c:a", "pcm_s16le", wav)
+        proc = tool("verify", garbage, wav, "--quick", "--out", self.out("verify_out"), "--json", check=False)
+        doc = json.loads(proc.stdout)
+        bad, audio = doc["files"]
+        self.assertEqual(bad["steps"][0]["kind"], "input")
+        self.assertNotEqual(bad["steps"][0]["error"], "ffprobe failed")
+        self.assertEqual(bad["skipped"][0]["reason"], "input_unreadable")
+        self.assertIn(("export x", "no_video"), [(s["step"], s["reason"]) for s in audio["skipped"]])
+        import verify
+        r = verify.step("cut", ["cut.py", str(self.out("missing.mp4")), "--start", "0", "--end", "1", "-o", str(self.out("v.mp4"))], 120)
+        self.assertEqual((r["ok"], r["kind"]), (False, "input"))
+        self.assertIn("missing.mp4", r["message"])
+
+
 class SilentFallbackTests(unittest.TestCase):
     """docs/design-decisions.md, "Nothing happens silently" (part 3): the fallbacks, skips and
     stderr-only warnings that remained, each now a `diagnostics` record or a structured field.
@@ -4067,12 +4393,9 @@ class SilentFallbackTests(unittest.TestCase):
         self.assertIn("drawtext_newline_glyph", [w["code"] for w in doc["diagnostics"]["warnings"]])
 
     # ------------------------------------------------------------------ source checks
-    PENDING_PART_2 = {"export.py": 4, "multicam.py": 2}  # converted with those tools' own records in part 2
-
     def test_no_stderr_only_warning_is_left_in_the_sources(self):
         """A `warning:` line printed with info() reaches stderr and no document. Every one goes
-        through warn() (stderr AND diagnostics.warnings); the only ones left are the export.py and
-        multicam.py lines the second part of this work restructures (at most as many as today)."""
+        through warn() (stderr AND diagnostics.warnings), with no exception left."""
         pattern = re.compile(r"""\b(?:info|print)\(\s*f?["']warning\b|sys\.stderr\.write\(\s*f?["']warning\b""", re.I)
         left = {}
         for path in script_sources() + [ROOT / "mcp" / "server.py"]:
@@ -4080,8 +4403,7 @@ class SilentFallbackTests(unittest.TestCase):
                 code = line.split("#", 1)[0]
                 if pattern.search(code) and not code.strip().startswith(("(", '"', "'")):
                     left[path.name] = left.get(path.name, 0) + 1
-        over = {name: n for name, n in left.items() if n > self.PENDING_PART_2.get(name, 0)}
-        self.assertEqual(over, {}, "stderr-only warnings: use warn(msg, code, ...) so the line reaches --json too")
+        self.assertEqual(left, {}, "stderr-only warnings: use warn(msg, code, ...) so the line reaches --json too")
 
     def test_every_diagnostic_code_is_in_the_contract_under_its_bucket(self):
         """json_output.diagnostic_codes is the list a caller switches on: every warn() /

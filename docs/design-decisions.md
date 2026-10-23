@@ -1829,6 +1829,113 @@ under it; the rest of the silent paths are converted onto the same infrastructur
   `test_a_lock_an_older_version_wrote_is_taken_over_after_an_hour_as_before`,
   `test_running_without_a_lock_is_a_recorded_warning`.
 
+### Part 2: a degraded or partial result is never reported as the asked-for one
+
+- **A stage's verdict is the parent's.** `absorb_stage()` now also carries a stage's `notes`
+  (prefixed with its tool: `export: loudness ... is outside x's ...`) and, for a stage that
+  completed in a real run, its verification steps tagged with `stage`; `emit()` adds them to the
+  parent's own, so `render.py`'s `verified` is the conjunction of every stage's. Through 2.10 an
+  export that missed its loudness (`completed`, `verified: false`) made a render that said
+  `verified: true`. Carried: every step except a passing `probe`/`exists` of the stage's
+  intermediate (a completed stage passed them by definition, and they would only lengthen the
+  list); a stage that said `verified: false` without a failing step adds `{step: verified, stage,
+  ok: false}`. The same carry applies to an executed plan (its tool's steps used to be copied by
+  hand, untagged) and to a pack's renders. The entry "`verified` is what the tool measured itself"
+  above still holds: render's stages *are* what it ran. Code: `_common.emit.absorb_stage()`,
+  `emit()`. Test: `test_render_verified_is_every_stages_and_carries_their_notes`.
+- **A cache hit replays what the stage verified.** A `render.py --cache` sidecar keeps the stage's
+  `verified`, `verification`, `notes` and `diagnostics`; a hit feeds them through
+  `absorb_stage()` as a live stage would, so a cached unverified export stays unverified.
+  `references/scripts.md` said "Any mismatch is a silent miss" (and `cache_lookup()` returned
+  False "silently, because a miss is not an error"); a miss is still not an error, but every
+  miss is now in `cache.miss_reasons` (`not_cached`, `sidecar_missing`, `artifact_missing`,
+  `sidecar_corrupt`, `artifact_truncated`, `no_output_path`); the two that mean something damaged
+  a file this tool wrote are also a `cache_entry_damaged` warning and an audit line in the cache
+  directory's `.ffskill-audit.jsonl` (the cache directory is the place the event names). A store
+  that fails is a `cache_store_failed` warning, an input that cannot be fingerprinted a
+  `cache_input_unreadable` warning (it keys as `"missing"`), and an unreadable ffprobe banner a
+  `cache_ffmpeg_banner_unreadable` fallback: the sentence "Unreadable falls back to the parsed
+  pair" in "The ffmpeg version is inside the render cache key" still describes the key, and the
+  fallback is now said. Code: `render.cache_lookup()`, `cache_store()`. Tests:
+  `test_render_cache_says_why_a_stage_missed_and_replays_what_a_hit_verified`,
+  `test_render_cache_store_failure_banner_fallback_and_unreadable_input_are_recorded`.
+- **`"check": {"content": true}` without a platform runs.** A plan's check step already honoured
+  `content` alone (`render.execute_plan()`), and `check.py --content` without `--platform` is a
+  valid call (youtube assumed, judgement rows WARN), so the project stage now follows the same rule
+  rather than refusing a key the schema accepts; a failure is reported as a platform check's is
+  (`kind: verification`, "the content check failed"). A check stage the run does not perform is
+  recorded: `check_dry_run` under `--dry-run` (a plan's check steps too), `check_nothing_to_check`
+  for a stage with neither key. check.py output that does not parse is a failure document
+  (`status: failed`, `error.reason: check_output_unparsed`, `exit_code`, `stderr_tail`) where a
+  bare string stood. Code: `render.run_check()`, `render.main()`. Tests:
+  `test_render_runs_a_content_only_check_and_records_a_dry_run_skip`,
+  `test_check_output_that_does_not_parse_is_a_structured_failure`.
+- **`export.py` says what it cut and what it could not measure.** A trim to the platform maximum
+  is `trimmed: {from, to}` and a `notes` line (it is the preset's promise, so not a warning). A
+  loudness measurement that did not parse is `loudness: {lufs: null, tp: null, ok: null,
+  measured: false, reason: not_measured, target_*}`, a failing `{step: loudness, ok: false,
+  reason: not_measured}` and a `loudness_not_measured` warning -- check.py's WARN row for the same
+  case is the model; leaving the block out read as "nothing to check" and kept `verified: true`.
+  After `--normalize` a re-measurement that fails is the same record: the earlier measurement no
+  longer describes the file, and reusing it (2.10) reported the old level as the new one. A
+  platform preset on a source without audio records a `loudness_no_audio` skip. Code:
+  `export._loudness_unmeasured()`. Tests: `test_export_says_it_trimmed_to_the_platform_maximum`,
+  `test_export_an_unmeasured_loudness_is_a_failing_step_not_an_absence`.
+- **`multicam.py`'s `cuts` name the camera on screen.** A range whose camera has not started plays
+  camera 0 (unchanged); `cuts` now says 0 for it, as `--write-project` already did, and a
+  `camera_not_started` fallback names the camera asked for. Code: `multicam.main()`. Test:
+  `test_multicam_names_the_camera_it_rendered_not_the_one_asked_for`.
+- **`report.py` accounts for every section.** Each section it tries to build -- loudness of each
+  file with audio, the `--platform` compliance table, each contact sheet -- is a verification step;
+  one that could not be built is `ok: false` with the child's `reason`/`kind`/`message` and a
+  `report_section_missing` warning, so `verified` is false and `check: null` no longer sits beside
+  `verified: true`. The compliance step's `ok` means "the table is in the report"; what the table
+  says about the file is `passed`. Under `--dry-run` a contact sheet is a `report_section_dry_run`
+  skip (look.py draws nothing in a dry run). `--no-sheets` is the caller's request and is not
+  recorded. Test: `test_report_records_a_section_it_could_not_build`.
+- **`batch.py`: `ok` stays "every step completed"; `verified` is new beside it.** The entry
+  "`verified` is what the tool measured itself" decides that a spec miss is `completed` +
+  `verified: false`, not a failure, so a step that completed unverified is not counted as failed;
+  the row says `verified: false` and `unverified: [{step, tool, failed}]`, the batch's own
+  `verification` has one `item` step per row (its `verified` was always false before: it had no
+  steps), and a note names the items. A failed row's `error` is the failing step's own
+  `{step, tool, kind, message, code, reason, details, hint, exit_code}`; the old string `error`
+  (only ever a worker's exception text, or `"1"` -- `str(SystemExit)`) is replaced by that object,
+  with `exception` for a worker that raised. A recipe error that is the same for every item (a step
+  script outside `scripts/`, no steps) is refused once before any item runs. Code:
+  `batch.process()`, `step_error()`. Tests:
+  `test_batch_a_failed_item_says_which_step_failed_and_why`,
+  `test_batch_counts_a_completed_but_unverified_step_as_ok_and_says_it_is_unverified`,
+  `test_batch_a_worker_that_raised_names_its_error_not_its_exit_code`.
+- **An interrupted batch reports every item.** The shared signal handler exited with "nothing was
+  written" and, inside an item, surfaced as that item's failure while the batch went on. batch.py
+  installs its own SIGINT/SIGTERM handler: it stops the running steps (`stop_children()`, the
+  shared handler's first half) and raises KeyboardInterrupt, and the table then has one row per
+  input -- finished, `interrupted: true` (stopped while running), or `skipped: "interrupted"` (not
+  started) -- so `total` is the folder's count; exit 130 (143 for SIGTERM), `kind: interrupted`. A
+  `--watch` loop stops after an interrupted pass. Test:
+  `test_batch_interrupted_reports_every_item_and_the_right_total`.
+- **A batch cache hit is served only while its output is the file the batch wrote.** An entry now
+  keeps the output's `{size, mtime_ns}` (a stat, no read: a multi-GB delivery is not re-hashed per
+  run); a hit whose output changed is a miss (`cache_miss.reason: output_changed`, a
+  `batch_cache_output_changed` warning). An entry written by 2.10.11 or earlier has no identity and is not
+  served either (`entry_unverifiable`): one re-run per item is the cost of not serving a replaced
+  file as "cached ok". The GPU entry's "older caches still hit" is about the key and still holds; it
+  is this identity check that re-runs them once. A cache file that does not parse is a
+  `batch_cache_reset` warning plus an audit line in the output folder's `.ffskill-audit.jsonl`,
+  and an unreadable `recipe.project` (its content is in the key) a `recipe_project_unreadable`
+  warning. Code: `batch.cached_output_changed()`, `recipe_key()`. Tests:
+  `test_batch_serves_a_cached_output_only_while_it_is_unchanged_and_records_a_reset_cache`,
+  `test_batch_recipe_key_records_an_unreadable_project`.
+- **`verify.py` keeps each tool's own failure.** Steps run with `--json`; a failed step keeps the
+  tool's `kind`, `reason`, `message`, `details` and `exit_code` (`step_timeout`,
+  `step_output_unparsed` where the tool printed none), and the probe of an unreadable file keeps
+  probe's own message instead of "ffprobe failed". `error` stays the one-line table cell. A step
+  that does not apply is listed under the file's `skipped` (`quick`, `no_video`, `no_audio`,
+  `not_hdr`, `not_multichannel`, `input_unreadable`) and as a SKIP row in the report; `total` and
+  `failed` count only steps that ran, as before. Test:
+  `test_verify_keeps_the_tools_own_failure_and_lists_the_steps_it_skipped`.
+
 Part 3 converts the remaining fallbacks, skips and stderr-only warnings onto that infrastructure.
 What was decided there:
 
@@ -1840,9 +1947,9 @@ What was decided there:
   `json_output.diagnostic_codes` lists each code with its bucket (warnings / fallbacks / skipped)
   and meaning; a source test reads every `warn()`/`record_fallback()`/`record_skip()` call against
   it in both directions, and another refuses `info("warning ...")` (or `print`/`stderr.write`) under
-  `scripts/`. The exception is `export.py` (four lines) and `multicam.py` (two), whose warnings are
-  restructured with those tools' own records in part 2; the test allows at most that many and no
-  new file. Code: `_contract.DIAGNOSTIC_CODES`. Tests:
+  `scripts/`, with no exception: part 2 converted `export.py`'s four (`colour_not_converted`,
+  `output_audio_silent`, `loudness_outside_spec` twice) and `multicam.py`'s low-confidence line
+  (`sync_low_confidence`, as `sync.py` records it), and the allowance the test held for them is gone. Code: `_contract.DIAGNOSTIC_CODES`. Tests:
   `test_every_diagnostic_code_is_in_the_contract_under_its_bucket`,
   `test_no_stderr_only_warning_is_left_in_the_sources`.
 - **Which bucket.** A fallback is another route the run took and went on with, whose result

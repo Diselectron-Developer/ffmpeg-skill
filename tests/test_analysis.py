@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -531,11 +532,14 @@ class AnalysisTests(MediaFixtures):
         proc = script("verify.py", folder, "--seconds", "2", "--keep", "--out", out, "--report", report, expect_fail=True)
         text = report.read_text(encoding="utf-8")
         self.assertIn(text.strip(), proc.stdout.strip(), "without --json the report is printed to stdout")
-        self.assertIn("| probe | FAIL | 0s | ffprobe failed |", text)
+        # the probe row carries probe's own message (nothing happens silently, part 2), not a fixed "ffprobe failed"
+        probe_row = re.search(r"^\| probe \| FAIL \| 0s \| (ffprobe failed on .*broken\.mp4.*) \|$", text, re.M)
+        self.assertTrue(probe_row, text)
+        self.assertIn("| * | SKIP |", text)
         for step in ("overlay text", "look sheet", "probe analyze", "loudness measure", "silence list",
                      "color to-sdr", "hdr preserved", "audio downmix", "export x"):
             self.assertIn(f"| {step} | PASS |", text, f"{step} missing or failed:\n{text}")
-        self.assertNotIn("| FAIL |", text.replace("| probe | FAIL | 0s | ffprobe failed |", ""))
+        self.assertNotIn("| FAIL |", text.replace(probe_row.group(0), ""))
         self.assertTrue((out / f"{Path(self.hdr).stem}_sdr.mp4").exists())
         self.assertTrue((out / f"{Path(self.surround).stem}_st.mp4").exists())
         # a per-step timeout is reported per step, never raised
