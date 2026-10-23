@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.12.0
+
+_Automated release: version and notes generated from pull requests merged since 2.11.0._
+
 ### Added
 
 - **The remaining silent fallbacks, skips and warnings are recorded.** Each still prints its stderr line and is now also a `diagnostics` entry, and `contract --json` lists every code with its bucket under `json_output.diagnostic_codes`: an odd-sized frame scaled to even before encoding (`odd_dimensions_scaled_even`), subtitle/data streams dropped on a retry with the first attempt's error (`non_av_streams_dropped`, beside `dropped_non_av_streams`), a `--dry-run` measurement skipped for an input an earlier stage would write (`measurement_input_pending`), `ffmpeg -encoders`/`-bsfs` that could not be read (`ffmpeg_list_unreadable`), an invalid or negative `FFMPEG_SKILL_TIMEOUT` (`timeout_env_invalid`), the libaom fallback for a missing SVT-AV1 (`av1_encoder_libaom`), a CRF capped at the encoder's maximum (`crf_clamped`), a timeline export that does not read back (`timeline_parse_failed`, with the reason), and every tool's former stderr-only `warning:` line (emoji fallbacks, silent, short or duplicate inputs, memory-heavy jobs, `--strip-dovi` without Dolby Vision, a numbering gap in `sequence.py`, `render.py`'s frame-from-preset and default `--normalize`).
@@ -24,6 +30,7 @@
   - `batch.py`: a failed row's `error` is the failing step's own `{step, tool, kind, message, code, reason, details, hint, exit_code}` (it was absent, or a string such as `"1"` for a worker that exited); rows add `verified` and `unverified` (a completed but unverified step stays `ok`, as design-decisions decides), and the batch's `verification` has one `item` step per row. Ctrl-C reports a row for every input (`interrupted: true`, or `skipped: "interrupted"`) and a `total` that counts them all. A cache hit is served only while its output's size and mtime are the ones the batch wrote (`cache_miss` on the row, a warning), so an entry written by 2.10.11 or earlier runs once more; a cache file that does not parse is a `batch_cache_reset` warning and an audit line. A recipe error that is the same for every item is refused before any item runs.
   - `verify.py` runs each step with `--json` and keeps the tool's own `kind`, `reason`, `message` and `exit_code` instead of the last stderr line or a fixed string; steps that do not apply are listed under each file's `skipped` with a reason.
   - `export.py`'s and `multicam.py`'s last stderr-only `warning:` lines are records too (`colour_not_converted`, `output_audio_silent`, `loudness_outside_spec`, `sync_low_confidence`), so no tool prints a warning that `--json` does not carry.
+- Nothing happens silently, parts 2 and 3: degraded results, and the remaining fallbacks, skips and warnings (#350)
 
 ## 2.11.0
 
