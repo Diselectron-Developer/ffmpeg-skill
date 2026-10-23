@@ -1393,6 +1393,26 @@ class ContractTests(unittest.TestCase):
                 self.assertGreaterEqual(datetime.date.today(), earliest,
                                         f"{pkg['version']} removes {since}'s deprecations before {earliest}")
 
+    def test_design_decisions_contents_list_is_current_and_release_renames_unreleased(self):
+        """docs/design-decisions.md opens with a contents list built from its `## ` headings
+        (.github/scripts/design_decisions_index.py --write regenerates it). release.yml renames a
+        `## Unreleased — topic` section to the version that shipped it: eleven had kept saying
+        "Unreleased" from 2.3.0 to 2.12.0."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "design_decisions_index", ROOT / ".github" / "scripts" / "design_decisions_index.py")
+        idx = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(idx)
+        text = (ROOT / "docs" / "design-decisions.md").read_text(encoding="utf-8")
+        self.assertEqual(idx.apply(text), text,
+                         "the contents list is stale: python3 .github/scripts/design_decisions_index.py --write")
+        self.assertNotIn("\n## Unreleased", text, "a released section still says Unreleased")
+        draft = text.replace("\n## Time limits\n", "\n## Unreleased — a new topic\n\n## Time limits\n", 1)
+        out = idx.release_headings(idx.apply(draft), "9.9.9")
+        self.assertIn("\n## 9.9.9 — a new topic\n", out)
+        self.assertIn("- [9.9.9 — a new topic](#999--a-new-topic)", out)
+        self.assertIn("docs/design-decisions.md", (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"))
+
     def test_release_contract_md_bump_moves_only_the_current_version(self):
         """.github/scripts/bump_contract_md.py (release.yml's auto-bump): only the two
         current-version mentions in docs/contract.md move. The step it replaced was

@@ -4,7 +4,10 @@
 
 ## Unreleased
 
-(nothing yet)
+### Changed
+
+- **`docs/design-decisions.md` opens with a contents list** (by topic, then by release), built from its headings by `.github/scripts/design_decisions_index.py`; a test fails when it is stale. Eleven sections that still said "Unreleased" long after they shipped (2.3.0 to 2.12.0) carry their version, and the release workflow now renames such a heading to the version that ships it, as it does for CHANGELOG.md.
+- **`npm run test:fast`** runs the contract suite alone (a few minutes, no real encodes); CONTRIBUTING.md says how to run one test group or one case while working on a tool.
 
 ## 2.12.0
 
