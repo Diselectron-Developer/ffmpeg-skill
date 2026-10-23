@@ -169,6 +169,13 @@ jobs:
           roadmap = roadmap_path.read_text(encoding="utf-8")
           roadmap_path.write_text(bump_roadmap_md(roadmap, old, new), encoding="utf-8")
 
+          # design-decisions sections written as "## Unreleased — topic" take the shipped version,
+          # as CHANGELOG's do, and its contents list follows. Eleven such headings were left saying
+          # "Unreleased" long after they shipped (2.3.0 .. 2.12.0) before this step existed.
+          from design_decisions_index import release_headings
+          dd_path = root / "docs" / "design-decisions.md"
+          dd_path.write_text(release_headings(dd_path.read_text(encoding="utf-8"), new), encoding="utf-8")
+
           last_tag = f"v{old}" if old != "0.0.0" else None
           rev_range = f"{last_tag}..HEAD" if last_tag else "HEAD"
           log = subprocess.run(
@@ -211,7 +218,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json .claude-plugin/plugin.json docs/contract.md CHANGELOG.md docs/roadmap.md
+          git add package.json .claude-plugin/plugin.json docs/contract.md CHANGELOG.md docs/roadmap.md docs/design-decisions.md
           git commit -m "chore(release): bump version to ${NEW_VERSION} [skip ci]"
           # A merge that landed during this step would still make the push non-fast-forward;
           # replay the bump on top of it (a conflict here is real and should fail the run).

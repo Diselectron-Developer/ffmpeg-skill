@@ -9,6 +9,42 @@ be checked against the tree, not against this note.
 Three earlier review rounds (2026-09-12) re-reported several of these; that is why the file
 exists. When a decision changes, edit the entry in the same PR.
 
+<!-- contents:start -->
+**By topic:**
+
+- [Time limits](#time-limits)
+- [Dry run](#dry-run)
+- [Colour](#colour)
+- [Outputs and files](#outputs-and-files)
+- [Arguments](#arguments)
+- [Process and packaging](#process-and-packaging)
+
+**By release, review or plan** (in the order they were added):
+
+- [Decided for 2.0 (issue #189 B), recorded in 1.x so the code moved toward them](#decided-for-20-issue-189-b-recorded-in-1x-so-the-code-moved-toward-them)
+- [External review, 2026-09-14 (1.17.0)](#external-review-2026-09-14-1170)
+- [External review, 2026-09-13](#external-review-2026-09-13)
+- [1.15.0 — text people can see](#1150--text-people-can-see)
+- [1.16.0 — long-form delivery](#1160--long-form-delivery)
+- [1.17.0 — throughput](#1170--throughput)
+- [2.1.0 — handing the cut to an editor](#210--handing-the-cut-to-an-editor)
+- [2.3.0 — captions that can be seen](#230--captions-that-can-be-seen)
+- [2.2.4 — the first bad input, named](#224--the-first-bad-input-named)
+- [2.2.6 — silence is reported, not verified](#226--silence-is-reported-not-verified)
+- [2.3.0 — short, repeated and silent inputs](#230--short-repeated-and-silent-inputs)
+- [2.4.1 — a plain join keeps its picture](#241--a-plain-join-keeps-its-picture)
+- [2.6.0 — the GPU](#260--the-gpu)
+- [2.7.0 — a second speech engine](#270--a-second-speech-engine)
+- [2.8.0 — cuts that say what they did](#280--cuts-that-say-what-they-did)
+- [2.10.7 — geometry uses the displayed frame](#2107--geometry-uses-the-displayed-frame)
+- [2.10.5 — an accurate cut starts its picture at 0](#2105--an-accurate-cut-starts-its-picture-at-0)
+- [2.10.5 — a fixed logo comes off with redact.py --mode delogo](#2105--a-fixed-logo-comes-off-with-redactpy---mode-delogo)
+- [2.10.0 — a video layer in a project](#2100--a-video-layer-in-a-project)
+- [2.10.9 — FFmpeg 8.0.1 (Ubuntu 26.04)](#2109--ffmpeg-801-ubuntu-2604)
+- [2.10.9 — doctor's FFmpeg advisory and the Python 3.9 deprecation](#2109--doctors-ffmpeg-advisory-and-the-python-39-deprecation)
+- [2.11.0–2.12.0 — nothing happens silently](#21102120--nothing-happens-silently)
+<!-- contents:end -->
+
 ## Time limits
 
 - **`FFMPEG_SKILL_TIMEOUT=0` (or `--timeout 0`) means no limit anywhere**, including the outer
@@ -914,7 +950,7 @@ not a new file format this tool would have to maintain.
   checklist.
 
 
-## Unreleased — captions that can be seen
+## 2.3.0 — captions that can be seen
 
 - **A burn that draws nothing is a refusal, not a warning.** `caption.py` counts the non-blank
   cues overlapping `[0, duration]`; none (a cue file timed for a longer cut, all-blank text, an
@@ -1004,7 +1040,7 @@ not a new file format this tool would have to maintain.
   `test_join_none_holds_a_picture_shorter_than_its_sound`,
   `test_join_none_trims_a_sound_tail_under_a_frame`.
 
-## Unreleased — the GPU
+## 2.6.0 — the GPU
 
 - **`--hw` is opt-in, and a delivery preset needs it explicitly.** Measured first on an M4 Max
   (FFmpeg 9.0, three 1080p SDR clips) and re-measured with `tests/bench_vt.py` on an M3 (FFmpeg
@@ -1170,7 +1206,7 @@ not a new file format this tool would have to maintain.
   `_common.runner.apple_silicon`; `doctor`'s `hw.platform_ok` uses the same check. Test:
   `test_hw_runs_on_apple_silicon_hardware_under_a_rosetta_python`.
 
-## Unreleased — a second speech engine
+## 2.7.0 — a second speech engine
 
 - **`auto` picks Parakeet only for English.** The default Parakeet model (tdt-0.6b-v2) is
   English-only and transcribes other speech as English-shaped nonsense. A named `--language`
@@ -1265,7 +1301,7 @@ not a new file format this tool would have to maintain.
   environment values, and the result's `transcription.model` names the model that ran. Tests:
   `ModelDefaultTests`, `test_the_machine_model_reaches_caption_and_silence`.
 
-## Unreleased — cuts that say what they did
+## 2.8.0 — cuts that say what they did
 
 - **`precision`, `keyframe_snapped` and `requested_*` keep their 2.x meanings; what is measured
   per segment gets new keys.** No 2.x key changes meaning. `precision` stays `precision_of()` for
@@ -1615,7 +1651,7 @@ not a new file format this tool would have to maintain.
   `start_snapped`'s meaning (the presented start moved) and `precision` takes
   `least_exact_precision`'s (the least exact segment).
 
-## Unreleased — geometry uses the displayed frame
+## 2.10.7 — geometry uses the displayed frame
 
 - **A 90° or 270° rotation is applied before a tool measures or places a rectangle.** ffmpeg
   autorotates on decode, so the filter graph sees the picture the player shows, not the stored
@@ -1632,7 +1668,7 @@ not a new file format this tool would have to maintain.
   `test_overlay_platform_margins_use_the_displayed_frame`,
   `test_look_safe_compares_the_displayed_aspect_of_a_rotated_source`.
 
-## Unreleased — an accurate cut starts its picture at 0
+## 2.10.5 — an accurate cut starts its picture at 0
 
 - **`cut.py --accurate` on a video does not pass `-avoid_negative_ts make_zero`.** The
   flag shifts every stream so the earliest timestamp is 0. On a re-encode that timestamp
@@ -1652,7 +1688,7 @@ not a new file format this tool would have to maintain.
   (`make_zero` by default, `--edit-list` to hide the keyframe's pre-roll). Code:
   `cut.cut_one()`. Test: `test_an_accurate_reencode_starts_the_picture_at_zero`.
 
-## Unreleased — a fixed logo comes off with redact.py --mode delogo
+## 2.10.5 — a fixed logo comes off with redact.py --mode delogo
 
 - **`--mode delogo` is a mode of `redact.py`, not a 43rd script.** The operation is the one
   redact already has: a caller-supplied rectangle, applied to the whole clip, with no search
@@ -1670,7 +1706,7 @@ not a new file format this tool would have to maintain.
   are 8-bit YUV, and letting ffmpeg insert a scale would flatten the picture without saying so.
   Code: `redact.main()`. Tests: the two named above.
 
-## Unreleased — a video layer in a project
+## 2.10.0 — a video layer in a project
 
 - **`overlays[]` refuses `video` beside another layer kind, and only that combination.** A video
   layer is a fourth kind next to `logo`/`image`/`text`, as `overlay.py`'s `--logo`/`--image`/
@@ -1690,7 +1726,7 @@ not a new file format this tool would have to maintain.
   still plans it and a real run fails in the overlays stage. Code: `render.main()`. Test:
   `test_render_video_overlay_refusals_and_dry_run_plan`.
 
-## Unreleased — FFmpeg 8.0.1 (Ubuntu 26.04)
+## 2.10.9 — FFmpeg 8.0.1 (Ubuntu 26.04)
 
 - **`pad.py` builds one `-filter_complex` for a clip with sound, not a `-vf` and an `-af`.** On
   8.0.1 and conda-forge's 7.1.1 (not Debian's 7.1.5 or 8.1.3), one demuxer feeding two simple
@@ -1737,7 +1773,7 @@ not a new file format this tool would have to maintain.
   `test_overlay_multi_line_text_draws_no_box_at_the_line_break`,
   `test_multi_line_text_avoids_drawtext_on_releases_that_draw_the_line_break`.
 
-## Unreleased — doctor's FFmpeg advisory and the Python 3.9 deprecation
+## 2.10.9 — doctor's FFmpeg advisory and the Python 3.9 deprecation
 
 - **The FFmpeg CVE advisory is a warning, never a failure, and never says "vulnerable".** `doctor`
   sees only the upstream number in `ffmpeg -version`, and distributions backport fixes under it
@@ -1764,7 +1800,7 @@ not a new file format this tool would have to maintain.
   3.9 job stay until 3.0. Tests: `test_python_3_9_is_deprecated_on_every_surface`,
   `test_doctor_prints_the_python_3_9_warning_on_stderr_only`, `test_installer_warns_once_on_python_3_9`.
 
-## Unreleased — nothing happens silently
+## 2.11.0–2.12.0 — nothing happens silently
 
 The principle: every refusal, rejection, skip, fallback or swallowed error leaves a structured
 record a caller can read -- fields in the `--json` document, not only prose in `error.message` --

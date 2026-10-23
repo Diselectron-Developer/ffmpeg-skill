@@ -51,6 +51,7 @@
   ],
   "scripts": {
     "test": "python3 tests/test_all.py && python3 tests/test_contract.py",
+    "test:fast": "python3 tests/test_contract.py",
     "release-check": "bash tests/release_check.sh",
     "demo": "python3 demos/build.py",
     "demo:pipeline": "bash examples/make_demo.sh",
