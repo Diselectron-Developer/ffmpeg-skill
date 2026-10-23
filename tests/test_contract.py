@@ -1583,8 +1583,14 @@ class ContractTests(unittest.TestCase):
                                                   "params": {"name": "silence", "arguments": {"argv": [str(self.src), "--list"]}}}) + "\n",
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        resps = {r["id"]: r for r in (json.loads(l) for l in proc.stdout.strip().splitlines())}
-        self.assertEqual(sorted(resps), [1, 2, 3, 4, 5, 6], "garbage and notifications produce no response; nothing else is lost")
+        lines = [json.loads(l) for l in proc.stdout.strip().splitlines()]
+        # the line that is not JSON is answered with a JSON-RPC parse error (-32700, id null)
+        # instead of being dropped; a JSON scalar and a notification still get no response
+        parse_errors = [r for r in lines if r["id"] is None]
+        self.assertEqual([r["error"]["code"] for r in parse_errors], [-32700], "a non-JSON line is answered with -32700")
+        self.assertIn("parse error", parse_errors[0]["error"]["message"])
+        resps = {r["id"]: r for r in lines if r["id"] is not None}
+        self.assertEqual(sorted(resps), [1, 2, 3, 4, 5, 6], "scalars and notifications produce no response; nothing else is lost")
         self.assertEqual(resps[1]["result"], {})
         self.assertEqual(resps[2]["error"]["code"], -32601)
         self.assertEqual(resps[3]["error"]["code"], -32000)
@@ -3736,6 +3742,374 @@ class SilentPathTests(unittest.TestCase):
                    runner.refuse_existing_outputs, runner._OutputLock.__enter__):
             src = inspect.getsource(fn)
             self.assertNotRegex(src, r"(?<![\w.])die\(", f"{fn.__qualname__} refuses in prose only (use refuse())")
+
+
+class SilentFallbackTests(unittest.TestCase):
+    """docs/design-decisions.md, "Nothing happens silently" (part 3): the fallbacks, skips and
+    stderr-only warnings that remained, each now a `diagnostics` record or a structured field.
+    In-process where the decision is a function; one small fixture for the tools that run."""
+
+    BUCKETS = ("warnings", "fallbacks", "skipped", "notes")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="ffskill_silent3_"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def setUp(self):
+        runner = sys.modules["_common.runner"]
+        self.saved = (_common.STATE.dry_run, _common.STATE.timeout, runner._ENCODERS, runner._BSFS, dict(getattr(runner, "_LIST_ERRORS", {})))
+        _common.STATE.dry_run = False
+        for bucket in self.BUCKETS:
+            setattr(_common.STATE, bucket, [])
+
+    def tearDown(self):
+        runner = sys.modules["_common.runner"]
+        _common.STATE.dry_run, _common.STATE.timeout, runner._ENCODERS, runner._BSFS, errors = self.saved
+        if hasattr(runner, "_LIST_ERRORS"):
+            runner._LIST_ERRORS.clear()
+            runner._LIST_ERRORS.update(errors)
+        for bucket in self.BUCKETS:
+            setattr(_common.STATE, bucket, [])
+
+    def codes(self, bucket):
+        return [e["code"] for e in getattr(_common.STATE, bucket)]
+
+    def media(self):
+        """A 6 s 320x180 clip with a tone, made once per class (each test that runs a tool needs one)."""
+        src = self.tmp / "src.mp4"
+        if not src.exists():
+            require_ffmpeg_or_skip("ffmpeg", "ffprobe")
+            ffmpeg("-f", "lavfi", "-i", "testsrc2=size=320x180:rate=30", "-f", "lavfi", "-i", f"aevalsrc='{TONE}':s=48000",
+                   "-t", "6", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", src)
+        return src
+
+    class Refused(Exception):
+        pass
+
+    def refuse_raises(self):
+        def refuse(kind, reason, msg, **kw):
+            raise self.Refused(dict(kw, kind=kind, reason=reason, message=msg))
+        return refuse
+
+    # ------------------------------------------------------------------ the runner
+    def test_an_odd_sized_source_scaled_to_even_is_a_recorded_fallback(self):
+        """runner.run()'s even_retry re-ran an encode that failed on odd dimensions with an even
+        scale and said so on stderr only; the output is a pixel smaller than the source."""
+        odd = self.tmp / "odd.mp4"
+        require_ffmpeg_or_skip("ffmpeg", "ffprobe")
+        ffmpeg("-f", "lavfi", "-i", "testsrc=size=161x91:rate=25:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv444p", odd)
+        doc = json.loads(tool("denoise", odd, "-o", self.tmp / "odd_dn.mp4", "--fast", "--json").stdout)
+        fb = doc["diagnostics"]["fallbacks"]
+        self.assertEqual([f["code"] for f in fb], ["odd_dimensions_scaled_even"])
+        self.assertEqual(fb[0]["scale"], _common.EVEN_SCALE)
+        self.assertEqual((doc["probe"]["video"]["width"], doc["probe"]["video"]["height"]), (160, 90))
+
+    def test_a_measurement_skipped_for_a_pending_input_reaches_the_document(self):
+        """dry_run_input_pending(): "measurement skipped" went to stderr only, though
+        design-decisions promised a note. It is a diagnostics.skipped entry, once per path."""
+        _common.STATE.dry_run = True
+        missing = str(self.tmp / "not_yet.mp4")
+        self.assertTrue(_common.dry_run_input_pending(missing))
+        self.assertTrue(_common.dry_run_input_pending(missing))
+        self.assertEqual(self.codes("skipped"), ["measurement_input_pending"])
+        self.assertEqual(_common.STATE.skipped[0]["path"], missing)
+        _common.STATE.dry_run = False
+        self.assertFalse(_common.dry_run_input_pending(missing))
+        # end to end: a dry run of loudness.py on a file an earlier stage would write
+        doc = json.loads(tool("loudness", missing, "-o", self.tmp / "ln.mp4", "--dry-run", "--json").stdout)
+        self.assertEqual([s["code"] for s in doc["diagnostics"]["skipped"]], ["measurement_input_pending"])
+
+    def test_an_unreadable_encoder_list_is_named_not_taken_for_a_missing_encoder(self):
+        """ffmpeg_encoders()/ffmpeg_bsfs() turned a list that could not be read into an empty set,
+        and --codec av1/prores then refused with "this build has neither", --hw's note with "this
+        build has no h264_videotoolbox". The read failure is kept, recorded once, and named."""
+        from unittest import mock
+        runner = sys.modules["_common.runner"]
+        decision = sys.modules["_common.decision"]
+        runner._ENCODERS = runner._BSFS = None
+        with mock.patch.object(runner.subprocess, "run", side_effect=OSError("exec format error")):
+            self.assertEqual(_common.ffmpeg_encoders(), set())
+            self.assertEqual(_common.ffmpeg_bsfs(), set())
+        self.assertIn("exec format error", _common.ffmpeg_list_error("encoders"))
+        self.assertEqual([(w["code"], w["list"]) for w in _common.STATE.warnings],
+                         [("ffmpeg_list_unreadable", "encoders"), ("ffmpeg_list_unreadable", "bsfs")])
+        with mock.patch.object(decision, "refuse", self.refuse_raises()):
+            for codec, encoders in (("av1", ["libsvtav1", "libaom-av1"]), ("prores", ["prores_ks"])):
+                with self.assertRaises(self.Refused) as r:
+                    decision._cpu_encoder_args(codec, 23, "medium", None)
+                got = r.exception.args[0]
+                self.assertEqual((got["kind"], got["reason"], got["encoders"]), ("ffmpeg", "encoder_list_unreadable", encoders))
+                self.assertIn("exec format error", got["message"])
+                self.assertNotIn("has neither", got["message"])
+            # a list that was read and lacks the encoder is the missing_tool refusal it always was
+            runner._ENCODERS = {"libx264"}
+            with self.assertRaises(self.Refused) as r:
+                decision._cpu_encoder_args("av1", 23, "medium", None)
+            self.assertEqual((r.exception.args[0]["kind"], r.exception.args[0]["reason"]), ("missing_tool", "encoder_missing"))
+        # --hw's CPU note says the list could not be read, not that the build lacks the encoder
+        runner._ENCODERS = set()
+        saved_notes = list(_common.STATE.hw_notes)
+        try:
+            with mock.patch.object(decision, "hw_platform_reason", return_value=None):
+                self.assertIsNone(decision._vt_args("h264", 23, None, True))
+            self.assertTrue(any("could not be confirmed" in n and "exec format error" in n for n in _common.STATE.hw_notes),
+                            _common.STATE.hw_notes)
+        finally:
+            _common.STATE.hw_notes[:] = saved_notes
+
+    def test_the_libaom_fallback_and_a_clamped_crf_are_recorded(self):
+        """decision.py chose libaom-av1 when SVT-AV1 was missing, and capped the HEVC HDR line's
+        CRF+2 at 51, without a word."""
+        from unittest import mock
+        decision = sys.modules["_common.decision"]
+        with mock.patch.object(decision, "ffmpeg_encoders", return_value={"libaom-av1"}):
+            args = decision._cpu_encoder_args("av1", 30, "medium", None)
+            decision._cpu_encoder_args("av1", 30, "medium", None)
+        self.assertEqual(args[args.index("-c:v") + 1], "libaom-av1")
+        self.assertEqual(self.codes("fallbacks"), ["av1_encoder_libaom"], "recorded once however many encodes take it")
+        hdr = {"video": {"bt2020_or_hdr": True, "color_transfer": "smpte2084"}}
+        args = decision._cpu_encoder_args("hevc", 50, "medium", hdr)
+        self.assertEqual(args[args.index("-crf") + 1], "51")
+        w = _common.STATE.warnings[-1]
+        self.assertEqual((w["code"], w["requested"], w["asked"], w["used"]), ("crf_clamped", 50, 52, 51))
+        _common.STATE.warnings.clear()
+        decision._cpu_encoder_args("hevc", 20, "medium", hdr)
+        self.assertEqual(self.codes("warnings"), [], "an unclamped CRF records nothing")
+
+    def test_run_keeping_subtitles_records_the_first_attempts_error(self):
+        """A subtitle stream the container cannot hold made the first attempt fail; the retry
+        without it was reported only as dropped_non_av_streams: true, with no reason."""
+        src = self.media()
+        srt = self.tmp / "a.srt"
+        srt.write_text("1\n00:00:00,000 --> 00:00:02,000\nHello\n", encoding="utf-8")
+        subbed = self.tmp / "subbed.mkv"
+        ffmpeg("-i", src, "-i", srt, "-map", "0", "-map", "1", "-c", "copy", "-c:s", "srt", subbed)
+        doc = json.loads(tool("denoise", subbed, "-o", self.tmp / "subbed_dn.mp4", "--fast", "--json").stdout)
+        self.assertTrue(doc["dropped_non_av_streams"])
+        fb = doc["diagnostics"]["fallbacks"][0]
+        self.assertEqual(fb["code"], "non_av_streams_dropped")
+        self.assertNotEqual(fb["returncode"], 0)
+        self.assertTrue(fb["error"], "the first attempt's error is kept")
+
+    def test_an_invalid_ffmpeg_skill_timeout_is_a_recorded_warning(self):
+        """FFMPEG_SKILL_TIMEOUT=abc silently became 1800 s, and -5 silently meant no limit."""
+        src = self.media()
+        for value, limit in (("abc", 1800.0), ("nan", 1800.0), ("-5", 0.0)):
+            env = dict(os.environ, FFMPEG_SKILL_TIMEOUT=value)
+            doc = json.loads(tool("cut", src, "--start", "0", "--end", "1", "-o", self.tmp / "t.mp4", "--dry-run", "--json", env=env).stdout)
+            w = doc["diagnostics"]["warnings"]
+            self.assertEqual([(x["code"], x["value"], x["timeout"]) for x in w], [("timeout_env_invalid", value, limit)])
+        # an explicit --timeout makes the variable irrelevant, and a valid value says nothing
+        env = dict(os.environ, FFMPEG_SKILL_TIMEOUT="abc")
+        doc = json.loads(tool("cut", src, "--start", "0", "--end", "1", "-o", self.tmp / "t.mp4", "--dry-run", "--json", "--timeout", "60", env=env).stdout)
+        self.assertNotIn("diagnostics", doc)
+        doc = json.loads(tool("cut", src, "--start", "0", "--end", "1", "-o", self.tmp / "t.mp4", "--dry-run", "--json",
+                              env=dict(os.environ, FFMPEG_SKILL_TIMEOUT="90")).stdout)
+        self.assertNotIn("diagnostics", doc)
+
+    # ------------------------------------------------------------------ tools
+    def test_filler_words_with_no_timing_are_counted(self):
+        """filler_spans() skipped a listed word with no measured timing; silence.py's word reader
+        dropped it even before that. Both are counted (matched_untimed / matched_too_long)."""
+        stats = {}
+        spans = _common.filler_spans([{"word": "um", "start": 1.0, "end": 1.2}, {"word": "um"},
+                                      {"word": "uh", "start": 2.0, "end": 1.0}, {"word": "um", "start": 3.0, "end": 5.0}],
+                                     {"um", "uh"}, stats=stats)
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(stats, {"matched_untimed": 2, "matched_too_long": 1})
+        src = self.media()
+        words = self.tmp / "words.json"
+        words.write_text(json.dumps({"words": [{"word": "um", "start": 1.0, "end": 1.2}, {"word": "uh"},
+                                               {"word": "hello", "start": 2.0, "end": 2.4}]}), encoding="utf-8")
+        doc = json.loads(tool("silence", src, "--filler", "--words", words, "--filler-lang", "en", "--list", "--json").stdout)
+        self.assertEqual((doc["filler"]["matched_untimed"], doc["filler"]["matched_too_long"]), (1, 0))
+        self.assertEqual(doc["filler"]["word_timings"], 2)
+        self.assertEqual([w["code"] for w in doc["diagnostics"]["warnings"]], ["filler_words_untimed"])
+
+    def test_a_skipped_drift_correction_says_why(self):
+        """sync.py --fix-drift on a pair too short to measure skipped the correction with a
+        stderr warning only; drift_skipped_reason and a diagnostics.skipped entry now say so."""
+        src = self.media()
+        mic = self.tmp / "mic.wav"
+        ffmpeg("-ss", "1.5", "-i", src, "-vn", "-c:a", "pcm_s16le", mic)
+        doc = json.loads(tool("sync", src, mic, "--fix-drift", "--json").stdout)
+        self.assertEqual(doc["drift_skipped_reason"], "too_short")
+        self.assertEqual(doc["sources"][0]["drift_skipped_reason"], "too_short")
+        sk = doc["diagnostics"]["skipped"][0]
+        self.assertEqual((sk["code"], sk["reason"], sk["path"]), ("drift_correction_skipped", "too_short", str(mic)))
+        self.assertNotIn("drift_skipped_reason", json.loads(tool("sync", src, mic, "--json").stdout), "only with --fix-drift")
+
+    def test_cropdetect_counts_the_windows_it_could_not_decode(self):
+        """A window ffmpeg could not decode was skipped unseen; the crop then rested on fewer
+        readings than --samples said."""
+        from unittest import mock
+        import cropdetect
+        real = cropdetect.run_analysis
+        calls = []
+
+        def flaky(cmd, check=True, **kw):
+            calls.append(cmd)
+            if len(calls) == 2:
+                return subprocess.CompletedProcess(cmd, 1, "", "Invalid data found when processing input\n")
+            return real(cmd, check=check, **kw)
+        src = self.media()
+        failed = []
+        with mock.patch.object(cropdetect, "run_analysis", flaky):
+            rects = cropdetect.detect(str(src), 5.0, 5, 0.0941176, 16, 6.0, failed)
+        self.assertTrue(rects)
+        self.assertEqual(len(failed), 1)
+        self.assertIn("Invalid data", failed[0]["error"])
+        doc = json.loads(tool("cropdetect", src, "--json").stdout)
+        self.assertEqual((doc["windows"], doc["windows_failed"]), (5, 0))
+
+    def test_caption_counts_ass_lines_it_could_not_shift_or_read(self):
+        """caption.py --ass --offset copied a Dialogue line with unreadable timestamps unshifted,
+        parse_ass_cues() left it out of the visible-cue count, and the shift count went to stderr
+        only. Each count is in `caption`, and each non-zero one is a warning."""
+        src = self.media()
+        ass = self.tmp / "s.ass"
+        ass.write_text("[Script Info]\nScriptType: v4.00+\n\n[Events]\n"
+                       "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                       "Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,Hello\n"
+                       "Dialogue: 0,bad,0:00:03.00,Default,,0,0,0,,Broken\n"
+                       "Dialogue: 0,0:00:02.00,0:00:04.00,Default,,0,0,0,,World\n", encoding="utf-8")
+        doc = json.loads(tool("caption", src, "--ass", ass, "--offset", "1", "-o", self.tmp / "cap.mp4", "--dry-run", "--json").stdout)
+        cap = doc["caption"]
+        self.assertEqual((cap["ass_shifted"], cap["ass_unshifted"], cap["ass_malformed"]), (2, 1, 1))
+        self.assertEqual(sorted(w["code"] for w in doc["diagnostics"]["warnings"]), ["ass_lines_malformed", "ass_lines_unshifted"])
+        self.assertEqual(doc["font_used"]["how"], "ass_styles")
+
+    def test_a_timeline_that_does_not_parse_keeps_the_reason(self):
+        """timeline.parses() returned False and discarded the exception, so render.py's parse
+        verification step said ok: false with no reason anywhere."""
+        from _common import timeline as tlmod
+        bad = self.tmp / "bad.fcpxml"
+        bad.write_text("<fcpxml><unclosed>", encoding="utf-8")
+        self.assertFalse(tlmod.parses(str(bad), "fcpxml"))
+        w = _common.STATE.warnings[-1]
+        self.assertEqual((w["code"], w["format"]), ("timeline_parse_failed", "fcpxml"))
+        self.assertIn("ParseError", w["error"])
+        other = self.tmp / "other.otio"
+        other.write_text("[1, 2]", encoding="utf-8")
+        self.assertFalse(tlmod.parses(str(other), "otio"), "a JSON list is not a timeline (and no longer an AttributeError)")
+        good = self.tmp / "good.otio"
+        good.write_text(json.dumps({"OTIO_SCHEMA": "Timeline.1"}), encoding="utf-8")
+        self.assertTrue(tlmod.parses(str(good), "otio"))
+        self.assertEqual(len(_common.STATE.warnings), 2)
+
+    def test_the_font_drawn_with_is_reported_and_a_substitute_recorded(self):
+        """fonts.default_font_file() returned whatever fontconfig (or the Windows Fonts folder)
+        answered; a family that is not installed was drawn in another without a word."""
+        from unittest import mock
+        fonts = sys.modules["_common.fonts"]
+        face = self.tmp / "Other.ttf"
+        face.write_bytes(b"\0")
+        answer = subprocess.CompletedProcess([], 0, f"{face}\nOther Sans,Other Sans Book\n", "")
+        with mock.patch.object(fonts.platform, "system", return_value="Linux"), \
+                mock.patch.object(fonts.shutil, "which", return_value="/usr/bin/fc-match"), \
+                mock.patch.object(fonts.subprocess, "run", return_value=answer):
+            got = fonts.resolve_font("Wanted Serif")
+            same = fonts.resolve_font("Other Sans")
+            alias = fonts.resolve_font("sans-serif")
+        self.assertEqual((got["file"], got["family"], got["substituted"], got["via"]), (str(face), "Other Sans", True, "fc-match"))
+        self.assertFalse(same["substituted"])
+        self.assertFalse(alias["substituted"], "a generic alias is resolved, not substituted")
+        with mock.patch.object(fonts, "resolve_font", return_value=got):
+            choice = fonts.record_font_choice(fonts.font_choice("Wanted Serif"))
+        self.assertEqual((choice["how"], choice["file"], choice["substituted"]), ("resolved", str(face), True))
+        self.assertEqual(self.codes("fallbacks"), ["font_substituted"])
+        self.assertEqual(fonts.font_choice("X", font_file="/f.ttf")["how"], "font_file")
+        # end to end: overlay.py reports the font it handed drawtext
+        src = self.media()
+        doc = json.loads(tool("overlay", src, "--text", "Hi", "--font", "No Such Family Qx", "-o", self.tmp / "ov.mp4", "--dry-run", "--json").stdout)
+        used = doc["font_used"]
+        self.assertEqual(used["asked"], "No Such Family Qx")
+        if used["how"] == "by_name":
+            self.skipTest("no font resolves to a file on this machine (no fc-match, no Windows Arial)")
+        self.assertTrue(used["substituted"])
+        self.assertEqual([f["code"] for f in doc["diagnostics"]["fallbacks"]], ["font_substituted"])
+
+    def test_stderr_only_warnings_reach_the_document(self):
+        """overlay.py's emoji lines, color.py --strip-dovi with no Dolby Vision, and render.py's
+        frame-from-preset and --normalize defaults were stderr only."""
+        src = self.media()
+        doc = json.loads(tool("overlay", src, "--text", "Hi \U0001F600", "--emoji", "none", "-o", self.tmp / "e1.mp4", "--dry-run", "--json").stdout)
+        self.assertIn("emoji_stripped", [w["code"] for w in doc["diagnostics"]["warnings"]])
+        doc = json.loads(tool("overlay", src, "--text", "Hi \U0001F600", "-o", self.tmp / "e2.mp4", "--dry-run", "--json").stdout)
+        self.assertIn("emoji_monochrome", [w["code"] for w in doc["diagnostics"]["warnings"]])
+        hevc = self.tmp / "plain.mp4"
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=160x90:rate=30", "-t", "1", "-c:v", "libx265", "-preset", "ultrafast",
+               "-x265-params", "log-level=error", "-tag:v", "hvc1", hevc)
+        doc = json.loads(tool("color", hevc, "--strip-dovi", "-o", self.tmp / "nodv.mp4", "--dry-run", "--json").stdout)
+        self.assertEqual([w["code"] for w in doc["diagnostics"]["warnings"]], ["dovi_not_detected"])
+        proj = self.tmp / "proj.json"
+        proj.write_text(json.dumps({"output": str(self.tmp / "r.mp4"), "clips": [{"src": str(src), "in": "0:01", "out": "0:03"}],
+                                    "frame": {"aspect": "9:16"}, "export": {"preset": "reels"}}), encoding="utf-8")
+        proc = tool("render", proj, "--dry-run", "--json")
+        warned = {w["code"]: w for w in json.loads(proc.stdout)["diagnostics"]["warnings"]}
+        self.assertEqual((warned["frame_from_export_preset"]["width"], warned["frame_from_export_preset"]["height"]), (1080, 1920))
+        self.assertEqual(warned["normalize_on_by_default"]["preset"], "reels")
+        self.assertIn("frame: 1080x1920 from the reels export preset", proc.stderr, "the stderr line stays")
+
+    def test_graphics_pinned_to_drawtext_on_a_newline_glyph_build_is_a_warning(self):
+        """graphics.py --text-render drawtext with a multi-line label on FFmpeg 8.0-8.0.1/8.1.0
+        draws a box at each line break; the warning was stderr only. Runs where the build has
+        the bug (the 8.0.1 CI job, or a local 8.0.1 build first on PATH)."""
+        if not _common.drawtext_draws_newline_glyph():
+            self.skipTest("this ffmpeg's drawtext does not draw a box at a line break")
+        src = self.media()
+        doc = json.loads(tool("graphics", src, "--template", "title", "--title", "one\ntwo", "--text-render", "drawtext",
+                              "-o", self.tmp / "g.mp4", "--dry-run", "--json").stdout)
+        self.assertIn("drawtext_newline_glyph", [w["code"] for w in doc["diagnostics"]["warnings"]])
+
+    # ------------------------------------------------------------------ source checks
+    PENDING_PART_2 = {"export.py": 4, "multicam.py": 2}  # converted with those tools' own records in part 2
+
+    def test_no_stderr_only_warning_is_left_in_the_sources(self):
+        """A `warning:` line printed with info() reaches stderr and no document. Every one goes
+        through warn() (stderr AND diagnostics.warnings); the only ones left are the export.py and
+        multicam.py lines the second part of this work restructures (at most as many as today)."""
+        pattern = re.compile(r"""\b(?:info|print)\(\s*f?["']warning\b|sys\.stderr\.write\(\s*f?["']warning\b""", re.I)
+        left = {}
+        for path in script_sources() + [ROOT / "mcp" / "server.py"]:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                code = line.split("#", 1)[0]
+                if pattern.search(code) and not code.strip().startswith(("(", '"', "'")):
+                    left[path.name] = left.get(path.name, 0) + 1
+        over = {name: n for name, n in left.items() if n > self.PENDING_PART_2.get(name, 0)}
+        self.assertEqual(over, {}, "stderr-only warnings: use warn(msg, code, ...) so the line reaches --json too")
+
+    def test_every_diagnostic_code_is_in_the_contract_under_its_bucket(self):
+        """json_output.diagnostic_codes is the list a caller switches on: every warn() /
+        record_fallback() / record_skip() call under scripts/ names a code listed there under the
+        bucket the call writes to, and the contract lists no code nothing records."""
+        bucket_of = {"warn": "warnings", "record_fallback": "fallbacks", "record_skip": "skipped"}
+        used = {}
+        for path in script_sources():
+            text = path.read_text(encoding="utf-8")
+            for m in re.finditer(r"(?<![\w.])(warn|record_fallback|record_skip)\(", text):
+                if text[max(0, m.start() - 4):m.start()] == "def ":
+                    continue
+                depth, i = 1, m.end()
+                while depth and i < len(text):
+                    depth += {"(": 1, ")": -1}.get(text[i], 0)
+                    i += 1
+                body = text[m.end():i - 1]
+                literals = re.findall(r"""["']([a-z][a-z0-9_]+)["']""", body)
+                if not body.strip() or not literals:
+                    continue  # a mention in prose ("warn()"), or a call whose code is a variable
+                listed = [c for c in literals if c in _contract.DIAGNOSTIC_CODES]
+                self.assertTrue(listed, f"{path.name}: {m.group(1)}({body[:70]}...) names no code in _contract.DIAGNOSTIC_CODES")
+                code = listed[0]
+                self.assertEqual(_contract.DIAGNOSTIC_CODES[code][0], bucket_of[m.group(1)], f"{code}: recorded as {m.group(1)}")
+                used[code] = path.name
+        self.assertEqual(sorted(set(_contract.DIAGNOSTIC_CODES) - set(used)), [], "the contract lists codes nothing records")
+        published = _contract.build(detect=False)["json_output"]["diagnostic_codes"]
+        self.assertEqual(set(published), set(_contract.DIAGNOSTIC_CODES))
 
 
 class FfmpegSecurityTableTests(unittest.TestCase):

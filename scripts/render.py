@@ -886,7 +886,8 @@ def frame_from_preset(frame: Dict[str, Any], export: Dict[str, Any]) -> None:
     if abs(float(m.group(1)) / float(m.group(2)) - preset["w"] / preset["h"]) > 0.01:
         return
     frame["width"], frame["height"] = preset["w"], preset["h"]
-    info(f"frame: {preset['w']}x{preset['h']} from the {export['preset']} export preset (captions and overlays are sized for delivery)")
+    warn(f"frame: {preset['w']}x{preset['h']} from the {export['preset']} export preset (captions and overlays are sized for delivery)",
+         "frame_from_export_preset", preset=export["preset"], width=preset["w"], height=preset["h"])
 
 
 def export_timeline(proj: Dict[str, Any], rel, dest: str) -> int:
@@ -1441,7 +1442,8 @@ def main() -> int:
             # was rendered again; a platform preset with no loudness stage of its own gets the
             # one-export behaviour by default ("normalize": false opts out)
             normalize = True
-            info(f"export: --normalize on by default for the {ex['preset']} preset (set \"normalize\": false to skip)")
+            warn(f"export: --normalize on by default for the {ex['preset']} preset (set \"normalize\": false to skip)",
+                 "normalize_on_by_default", preset=ex["preset"])
         if normalize:
             argv += ["--normalize"]  # one export that meets the platform's loudness (export.py --normalize)
         sh("export.py", *argv, stage="export")

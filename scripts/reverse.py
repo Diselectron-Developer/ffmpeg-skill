@@ -15,6 +15,7 @@ import argparse
 import sys
 
 from _common import add_common, apply_common, aac_args, cfr_args, default_output, die, emit, ffmpeg_base, info, probe, run, video_args, X264_PRESETS, fmt_secs
+from _common.emit import warn
 
 
 def main() -> int:
@@ -35,8 +36,9 @@ def main() -> int:
 
     output = args.output or default_output(args.input, "reverse")
     if (meta.get("duration") or 0) > 60:
-        info(f"warning: reverse buffers every decoded frame in memory; {meta['duration']:.0f}s of "
-             f"{meta['video']['width']}x{meta['video']['height']} can exhaust RAM -- cut the part to reverse first (cut.py)")
+        warn(f"reverse buffers every decoded frame in memory; {meta['duration']:.0f}s of "
+             f"{meta['video']['width']}x{meta['video']['height']} can exhaust RAM -- cut the part to reverse first (cut.py)",
+             "memory_heavy", duration=meta["duration"])
     cmd = ffmpeg_base() + ["-i", args.input, "-vf", "reverse"]
     if has_audio:
         cmd += ["-af", "areverse"]

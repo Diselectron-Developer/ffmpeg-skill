@@ -24,6 +24,7 @@ import sys
 from typing import List, Optional
 
 from _common import STATE, add_common, analyze_levels, apply_common, emit, aac_args, cfr_args, default_output, die, escape_filter_path, ffmpeg_base, ffmpeg_bsfs, ffmpeg_exe, info, probe, run, run_analysis, run_keeping_subtitles, x264_args, X264_PRESETS, fmt_secs
+from _common.emit import warn
 
 TONEMAPS = ["hable", "mobius", "reinhard", "bt2390", "clip", "linear", "gamma"]
 
@@ -388,7 +389,7 @@ def main() -> int:
         if v.get("codec") != "hevc":
             die("--strip-dovi only applies to HEVC (Dolby Vision) streams")
         if not v.get("dolby_vision"):
-            info("note: no Dolby Vision metadata detected; removing unregistered SEI anyway")
+            warn("no Dolby Vision metadata detected; removing unregistered SEI anyway", "dovi_not_detected")
         cmd = ffmpeg_base() + ["-i", args.input, "-map", "0", "-c", "copy", "-bsf:v", "filter_units=remove_types=62", "-tag:v", "hvc1"]
         if os.path.splitext(output)[1].lower() in (".mp4", ".mov", ".m4v"):
             cmd += ["-movflags", "+faststart"]

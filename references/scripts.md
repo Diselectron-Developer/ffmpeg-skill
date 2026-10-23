@@ -1,6 +1,6 @@
 # Script reference
 
-Every script prints the same information with `--help`; this file exists so the agent can read several at once. All scripts accept `--dry-run`, `--json`, `--json-brief` (since 1.11.0: the same JSON result trimmed to `status`, `output`, `dry_run`, `verified`, a compact `summary` of the output probe -- duration_s, width, height, fps, vcodec, acodec, channels, and lufs when measured -- the tool's own keys, and the count of commands instead of the command lines; it implies `--json`, leaves `--json`'s own output untouched, and failures print the usual full failure document), `--fast`, `--progress`, `--timeout SECONDS`, `--overwrite`, `--plan FILE` (the dry run written as a plan document that `render.py FILE` executes later; see render.py), `-o OUT`; every re-encoding tool and `export.py` also take `--hw`/`--no-hw` (h264/hevc/prores on Apple VideoToolbox, Apple Silicon only, CRF mapped to `-q:v`; AV1 stays on the CPU; a job VideoToolbox itself refuses -- the encoder cannot open or its compression session fails -- is re-encoded on the CPU and reported in `hw.fallback`/`hw.notes`, any other failure is not retried; a GPU encode adds a `notes` line that its quality is not CRF-equivalent; `FFMPEG_SKILL_HW=1` makes it the default for every tool except `export.py`, whose delivery presets need `--hw` itself; `render.py`/`batch.py --hw`/`--no-hw` apply to every stage, export included; results name the `encoder` that ran); every editing tool that re-encodes (not `export.py`, whose preset decides the codec) also takes `--codec h264|hevc|av1|prores` (the encoder for the re-encode; default x264 for SDR, x265 Main10 for HDR, unchanged) and `--quality N` (CRF scale, default 18 -- 30 for `proxy.py`; up to 63 for av1; ignored by prores). 2.0 removed `--crf` from these tools (it was `--quality`'s alias); `export.py` keeps its own `--crf`, which is not an alias. Every tool refuses (`kind: input`, `error.reason: output_exists`, before anything runs) to replace an existing output unless `--overwrite` is given. Refusals carry `error.reason` and `error.details` (the facts behind the message; `contract --json` → `json_output.error_reasons`), and what a run decided on its own -- a stale output lock taken over, no lock possible, a plan input nobody fingerprinted -- is in `diagnostics: {warnings, fallbacks, skipped}` as well as on stderr. `--codec hevc` on SDR writes 8-bit BT.709 HEVC (`hvc1`), `av1` uses SVT-AV1 (libaom fallback), `prores` is 422 HQ and needs an explicit `-o NAME.mov` (or `.mkv`), `h264` refuses an HDR source (`kind: input`, run `color.py --to-sdr` first). `export.py` keeps choosing the codec from its preset and has neither `--codec` nor `--quality`; a `render.py` project cannot choose a codec either -- but `--dry-run` only guarantees nothing is written for writing tools: `probe` (read-only, `--dry-run` changes nothing) still runs ffprobe, `check`/`sync`/`multicam`/`scenes`/`cropdetect`/`report`/`silence`/`loudness`/`stabilize`/`join` still run their ffmpeg/ffprobe measurements (a dry-run plan rests on real numbers; they just don't write the final artifact), `overlay` measures a multi-line `--text`'s lines on FFmpeg 8.0, 8.0.1 and 8.1.0 (one drawtext on a generated frame), and `verify` accepts the flag but ignores it entirely. Exact per-tool semantics: `contract --json`'s `dry_run` field (or `docs/contract.md`).
+Every script prints the same information with `--help`; this file exists so the agent can read several at once. All scripts accept `--dry-run`, `--json`, `--json-brief` (since 1.11.0: the same JSON result trimmed to `status`, `output`, `dry_run`, `verified`, a compact `summary` of the output probe -- duration_s, width, height, fps, vcodec, acodec, channels, and lufs when measured -- the tool's own keys, and the count of commands instead of the command lines; it implies `--json`, leaves `--json`'s own output untouched, and failures print the usual full failure document), `--fast`, `--progress`, `--timeout SECONDS`, `--overwrite`, `--plan FILE` (the dry run written as a plan document that `render.py FILE` executes later; see render.py), `-o OUT`; every re-encoding tool and `export.py` also take `--hw`/`--no-hw` (h264/hevc/prores on Apple VideoToolbox, Apple Silicon only, CRF mapped to `-q:v`; AV1 stays on the CPU; a job VideoToolbox itself refuses -- the encoder cannot open or its compression session fails -- is re-encoded on the CPU and reported in `hw.fallback`/`hw.notes`, any other failure is not retried; a GPU encode adds a `notes` line that its quality is not CRF-equivalent; `FFMPEG_SKILL_HW=1` makes it the default for every tool except `export.py`, whose delivery presets need `--hw` itself; `render.py`/`batch.py --hw`/`--no-hw` apply to every stage, export included; results name the `encoder` that ran); every editing tool that re-encodes (not `export.py`, whose preset decides the codec) also takes `--codec h264|hevc|av1|prores` (the encoder for the re-encode; default x264 for SDR, x265 Main10 for HDR, unchanged) and `--quality N` (CRF scale, default 18 -- 30 for `proxy.py`; up to 63 for av1; ignored by prores). 2.0 removed `--crf` from these tools (it was `--quality`'s alias); `export.py` keeps its own `--crf`, which is not an alias. Every tool refuses (`kind: input`, `error.reason: output_exists`, before anything runs) to replace an existing output unless `--overwrite` is given. Refusals carry `error.reason` and `error.details` (the facts behind the message; `contract --json` → `json_output.error_reasons`), and what a run decided on its own -- a stale output lock taken over, no lock possible, a plan input nobody fingerprinted, an odd-sized frame scaled to even, subtitle streams dropped on a retry (with the first attempt's error), a font substituted, a measurement skipped under `--dry-run`, an encoder list that could not be read, an invalid `FFMPEG_SKILL_TIMEOUT`, and every `warning:` line -- is in `diagnostics: {warnings, fallbacks, skipped}` as well as on stderr (codes: `contract --json` → `json_output.diagnostic_codes`). `--codec av1`/`prores` with no encoder for it refuses `kind: missing_tool`, `error.reason: encoder_missing`; when the encoder list could not be read at all, `kind: ffmpeg`, `encoder_list_unreadable`. Tools that draw text (`overlay.py --text`, `graphics.py`, `caption.py`, `grid.py --label auto`) report `font_used: {asked, file, family, how, substituted}`. `--codec hevc` on SDR writes 8-bit BT.709 HEVC (`hvc1`), `av1` uses SVT-AV1 (libaom fallback), `prores` is 422 HQ and needs an explicit `-o NAME.mov` (or `.mkv`), `h264` refuses an HDR source (`kind: input`, run `color.py --to-sdr` first). `export.py` keeps choosing the codec from its preset and has neither `--codec` nor `--quality`; a `render.py` project cannot choose a codec either -- but `--dry-run` only guarantees nothing is written for writing tools: `probe` (read-only, `--dry-run` changes nothing) still runs ffprobe, `check`/`sync`/`multicam`/`scenes`/`cropdetect`/`report`/`silence`/`loudness`/`stabilize`/`join` still run their ffmpeg/ffprobe measurements (a dry-run plan rests on real numbers; they just don't write the final artifact), `overlay` measures a multi-line `--text`'s lines on FFmpeg 8.0, 8.0.1 and 8.1.0 (one drawtext on a generated frame), and `verify` accepts the flag but ignores it entirely. Exact per-tool semantics: `contract --json`'s `dry_run` field (or `docs/contract.md`).
 
 ## Time grammar (every time-taking flag, 1.9)
 
@@ -251,7 +251,10 @@ itself with no black-bar measurement involved. A rectangle that matches the
 full source frame means no bars were found. Does not decide whether
 removing detected bars is wanted -- genuine letterboxed content (a
 scope-ratio film in a 16:9 frame) "detects" the same way as accidental
-bars; look at the frame before cropping it away.
+bars; look at the frame before cropping it away. `windows` / `windows_failed`
+say how many windows were sampled and how many ffmpeg could not decode (those
+are skipped, with a `cropdetect_windows_failed` warning; all of them failing is
+a `kind: ffmpeg` failure).
 
 `--motion-centre` (1.18) reports the motion centroid once per second, sampled
 across the same windows: `motion_centre: [{time, x, y, x_frac, y_frac, motion}]`,
@@ -595,6 +598,9 @@ per-word `start`/`end`) or `--transcribe` (the same local engine `caption.py`
 uses, never required). There is no heuristic fallback — finding an "um" by
 looking for short quiet blips would cut real speech, so the tool refuses
 instead. `--filler-list` reports what would go and writes nothing.
+`filler.matched_untimed` counts listed words the transcript gives no usable
+timing for (not removed, and a `filler_words_untimed` warning), and
+`matched_too_long` those longer than a filler (a held vowel, kept).
 
 Built-in lists, one per language:
 
@@ -1384,7 +1390,10 @@ and says so. A cue that would need more than `--max-lines` (default 2) is split
 into consecutive cues sharing its time; a cue shorter than `--min-duration`
 (default 1.0 s) is held longer, never past the next cue's start; `--offset
 TIME` shifts every cue (seconds, `mm:ss`, `hh:mm:ss.ms` or `hh:mm:ss:ff`, a
-leading `-` for earlier) for `--text`, `--srt` and `--ass`. One `cues:` info line reports what changed. A file you passed in is
+leading `-` for earlier) for `--text`, `--srt` and `--ass`. One `cues:` info line reports what changed;
+with `--ass`, `caption.ass_shifted` / `ass_unshifted` count the Dialogue lines moved and those whose
+timestamps could not be read (copied as they were), and `ass_malformed` the lines that could not be
+read at all and are not counted as cues (each above 0 is a warning). A file you passed in is
 never edited: the adjusted copy is written next to the output
 (`<out>_adjusted.srt`, `<out>_offset.ass`) and burned instead — under `--dry-run`
 /`--plan` the planned command names that same copy and the plan says where it
@@ -1525,7 +1534,11 @@ padded with silence, never allowed to cut the picture.
 `--fix-drift` measures the offset again near the end of the overlap, reports
 the clock difference in ppm, and resamples the source file so a 60-minute
 take stays in sync (typical consumer devices drift 20-500 ppm = up to 1.8 s/h).
-Use it whenever the recording is longer than ~10 minutes. Check `confidence`
+Use it whenever the recording is longer than ~10 minutes. A correction that
+could not be measured is skipped and says why: `drift_skipped_reason` is
+`too_short` (no tail window far enough from the head) or `low_confidence`
+(top level for one source, and in each `sources` entry; null when applied).
+Check `confidence`
 (0–1, normalised correlation with a runner-up penalty); below 0.3 the match is
 doubtful. Benchmark on real dialogue/music (±30 s offsets, gain, noise, EQ):
 with the default 120 s window 40/40 within 10 ms (max 1.1 ms); with a 60 s

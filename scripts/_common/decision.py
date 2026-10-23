@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from _common.color import (bt709_label_filter, bt709_matrix_args, bt709_matrix_filter, bt709_tag_args, drawn_stream_format,
                            is_neutral_color, rgb_island, rgb_to_bt709_filter, _sdr_bt709)
-from _common.emit import die
-from _common.runner import CODECS, STATE, ffmpeg_encoders, ffmpeg_version, hw_platform_reason
+from _common.emit import die, record_fallback, refuse, warn
+from _common.runner import CODECS, STATE, ffmpeg_encoders, ffmpeg_list_error, ffmpeg_version, hw_platform_reason
 
 
 def pad_filters(out_w: int, out_h: int, fill: str, color: str, blur: int, darken: float = 0.0,
@@ -321,7 +321,11 @@ def _vt_args(codec: str, crf: int, meta: Optional[Dict[str, Any]], keep_bt709: b
     reason = None if name else f"no VideoToolbox encoder for {codec}"
     reason = reason or hw_platform_reason()
     if not reason and name not in ffmpeg_encoders():
-        reason = f"this ffmpeg build has no {name}"
+        unread = ffmpeg_list_error("encoders")
+        # an encoder list that could not be read says nothing about the build: name the read
+        # failure, not a missing encoder (the read itself is a ffmpeg_list_unreadable warning)
+        reason = (f"{name} could not be confirmed (this ffmpeg build's encoder list could not be read: {unread})" if unread
+                  else f"this ffmpeg build has no {name}")
     if reason:
         note = f"{reason}; encoded on the CPU"
         if note not in STATE.hw_notes:
@@ -471,7 +475,7 @@ def _cpu_encoder_args(codec: str, crf: int, preset: str, meta: Optional[Dict[str
     if codec == "hevc":
         if hdr:
             x265 = f"log-level=error:colorprim={prim}:transfer={trc}:colormatrix={cs}:range=limited:hdr10-opt=1" if trc == "smpte2084" else f"log-level=error:colorprim={prim}:transfer={trc}:colormatrix={cs}"
-            return ["-c:v", "libx265", "-preset", preset, "-crf", str(min(51, crf + 2)), "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1",
+            return ["-c:v", "libx265", "-preset", preset, "-crf", str(_clamped_crf("libx265", crf + 2, 51, crf)), "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1",
                     "-x265-params", x265] + hdr_tags + ["-movflags", "+faststart"]
         params, extra = _sdr_bt709("libx265") if keep_bt709 else ("", [])
         return ["-c:v", "libx265", "-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
@@ -479,25 +483,54 @@ def _cpu_encoder_args(codec: str, crf: int, preset: str, meta: Optional[Dict[str
     if codec == "av1":
         pix = "yuv420p10le" if hdr else "yuv420p"
         if "libsvtav1" in ffmpeg_encoders():
-            args = ["-c:v", "libsvtav1", "-preset", str(SVT_PRESET.get(preset, 6)), "-crf", str(min(63, crf)), "-pix_fmt", pix]
+            args = ["-c:v", "libsvtav1", "-preset", str(SVT_PRESET.get(preset, 6)), "-crf", str(_clamped_crf("libsvtav1", crf, 63, crf)), "-pix_fmt", pix]
             if hdr:
                 args += hdr_tags
             elif keep_bt709:
                 params, extra = _sdr_bt709("libsvtav1")
                 args += (["-svtav1-params", params] if params else []) + extra
         elif "libaom-av1" in ffmpeg_encoders():
-            args = ["-c:v", "libaom-av1", "-crf", str(min(63, crf)), "-b:v", "0", "-cpu-used", "6", "-row-mt", "1", "-pix_fmt", pix]
+            # recorded: libaom is the slower AV1 encoder with its own CRF scale and speed setting,
+            # so the same --quality does not give the file SVT-AV1 would have
+            record_fallback("--codec av1: this ffmpeg build has no libsvtav1 (SVT-AV1), so libaom-av1 encodes instead "
+                            "(slower; -cpu-used 6, its own CRF scale)", "av1_encoder_libaom", wanted="libsvtav1", used="libaom-av1")
+            args = ["-c:v", "libaom-av1", "-crf", str(_clamped_crf("libaom-av1", crf, 63, crf)), "-b:v", "0", "-cpu-used", "6", "-row-mt", "1", "-pix_fmt", pix]
             args += hdr_tags if hdr else (_sdr_bt709("libaom-av1")[1] if keep_bt709 else [])
         else:
-            die("--codec av1 needs an AV1 encoder (libsvtav1 or libaom-av1) and this ffmpeg build has neither", kind="missing_tool",
-                hint="install an ffmpeg built with SVT-AV1 (most distribution builds are), or use --codec hevc")
+            _refuse_missing_encoder("av1", ["libsvtav1", "libaom-av1"], "an AV1 encoder (libsvtav1 or libaom-av1)",
+                                    "install an ffmpeg built with SVT-AV1 (most distribution builds are), or use --codec hevc")
         return args + ["-movflags", "+faststart"]
     if codec == "prores":
         if "prores_ks" not in ffmpeg_encoders():
-            die("--codec prores needs the prores_ks encoder and this ffmpeg build lacks it", kind="missing_tool")
+            _refuse_missing_encoder("prores", ["prores_ks"], "the prores_ks encoder", None)
         return ["-c:v", "prores_ks", "-profile:v", "3", "-vendor", "apl0", "-pix_fmt", "yuv422p10le"] + (hdr_tags if hdr else [])
     die(f"unknown --codec {codec!r} (one of {', '.join(CODECS)})")
     return []
+
+
+def _clamped_crf(encoder: str, value: int, top: int, requested: int) -> int:
+    """`value` capped at the encoder's maximum CRF, the cap recorded (`crf_clamped`) when it
+    bites: the HEVC HDR line asks x265 for CRF+2, so --quality 50 or 51 there is encoded at 51."""
+    if value <= top:
+        return value
+    warn(f"{encoder}: CRF {value} (from {requested}) is above the encoder's maximum {top}; encoded at CRF {top}",
+         "crf_clamped", encoder=encoder, requested=requested, asked=value, used=top)
+    return top
+
+
+def _refuse_missing_encoder(codec: str, encoders: List[str], what: str, hint: Optional[str]) -> None:
+    """--codec av1/prores with no encoder for it -- or with an encoder list that could not be read,
+    which proves nothing about the build and is refused under its own reason rather than as a
+    missing encoder (ffmpeg_list_error)."""
+    unread = ffmpeg_list_error("encoders")
+    if unread:
+        refuse("ffmpeg", "encoder_list_unreadable",
+               f"--codec {codec} needs {what}, and whether this ffmpeg build has one is unknown: its encoder list "
+               f"could not be read ({unread})",
+               hint="check that ffmpeg runs (python3 scripts/_contract.py doctor), then retry",
+               codec=codec, encoders=encoders, error=unread)
+    refuse("missing_tool", "encoder_missing", f"--codec {codec} needs {what} and this ffmpeg build has "
+           + ("neither" if len(encoders) > 1 else "none"), hint=hint, codec=codec, encoders=encoders)
 
 
 def _x264_raw(crf: int, preset: str, keep_bt709: bool = True) -> List[str]:
@@ -1159,17 +1192,22 @@ def normalise_filler_token(word: str) -> str:
 
 
 def filler_spans(words, wordlist, *, pad: float = FILLER_PAD, min_gap: float = FILLER_MIN_GAP,
-                 max_word: float = FILLER_MAX_WORD) -> "List[Dict[str, Any]]":
+                 max_word: float = FILLER_MAX_WORD, stats: "Optional[Dict[str, int]]" = None) -> "List[Dict[str, Any]]":
     """Time spans to remove, from measured word timings. Pure: no subprocess, no I/O.
 
     `words` is [{"word", "start", "end"}] as whisper emits. A word is removed only when its
     normalised form is in `wordlist` AND it carries a real start < end pair AND its length is
     <= max_word. Adjacent spans closer than min_gap merge. Returns [{"start", "end", "word"}]
     sorted and non-overlapping.
+
+    `stats`, when given, receives the listed words that were kept anyway, so the caller can say
+    so: `matched_untimed` (no usable start < end: nothing to cut on) and `matched_too_long`
+    (longer than max_word: a held vowel someone meant).
     """
     listed = {normalise_filler_token(w) for w in (wordlist or set())}
     listed.discard("")
     hits = []
+    untimed = too_long = 0
     for entry in words or []:
         if not isinstance(entry, dict):
             continue
@@ -1179,8 +1217,13 @@ def filler_spans(words, wordlist, *, pad: float = FILLER_PAD, min_gap: float = F
         try:
             start, end = float(entry["start"]), float(entry["end"])
         except (KeyError, TypeError, ValueError):
+            untimed += 1
             continue     # no measured timing: nothing to cut
-        if not (end > start) or (end - start) > max_word:
+        if not (end > start):
+            untimed += 1
+            continue
+        if (end - start) > max_word:
+            too_long += 1
             continue
         hits.append({"start": max(0.0, start - pad), "end": end + pad, "word": token})
     hits.sort(key=lambda h: (h["start"], h["end"]))
@@ -1194,6 +1237,9 @@ def filler_spans(words, wordlist, *, pad: float = FILLER_PAD, min_gap: float = F
     for m in merged:
         m["start"] = round(m["start"], 4)
         m["end"] = round(m["end"], 4)
+    if stats is not None:
+        stats["matched_untimed"] = untimed
+        stats["matched_too_long"] = too_long
     return merged
 
 

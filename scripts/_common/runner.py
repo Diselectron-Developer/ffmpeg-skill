@@ -71,10 +71,26 @@ PROBE_TIMEOUT = 120.0
 
 
 def _env_timeout() -> float:
+    return _read_env_timeout()[0]
+
+
+def _read_env_timeout() -> "Tuple[float, Optional[str]]":
+    """(the per-call limit FFMPEG_SKILL_TIMEOUT sets, why its value was not taken as written or
+    None). Unset or blank is the default with nothing to say. A value that is not a number (or is
+    NaN) is the default, and a negative one is 0 (no limit) as it always was; both used to pass
+    without a word, and apply_common() now records them (`timeout_env_invalid`)."""
+    raw = os.environ.get("FFMPEG_SKILL_TIMEOUT")
+    if raw is None or not raw.strip():
+        return DEFAULT_TIMEOUT, None
     try:
-        return max(0.0, float(os.environ.get("FFMPEG_SKILL_TIMEOUT", DEFAULT_TIMEOUT)))
+        value = float(raw)
+        if value != value:
+            raise ValueError("NaN")
     except ValueError:
-        return DEFAULT_TIMEOUT
+        return DEFAULT_TIMEOUT, f"FFMPEG_SKILL_TIMEOUT={raw!r} is not a number of seconds; using the default {DEFAULT_TIMEOUT:g} s"
+    if value < 0:
+        return 0.0, f"FFMPEG_SKILL_TIMEOUT={raw!r} is negative; read as 0, which means no time limit"
+    return value, None
 
 
 # None of the four kinds above are retryable in practice: an "input"/"missing_tool" failure is
@@ -330,6 +346,10 @@ def apply_common(args: "argparse.Namespace") -> None:
     STATE.overwrite = bool(getattr(args, "overwrite", False))
     if getattr(args, "timeout", None) is not None:
         STATE.timeout = max(0.0, float(args.timeout))
+    else:
+        env_limit, env_problem = _read_env_timeout()
+        if env_problem:
+            warn(env_problem, "timeout_env_invalid", value=os.environ.get("FFMPEG_SKILL_TIMEOUT"), timeout=env_limit)
     if STATE.fast and getattr(args, "preset", None) in X264_PRESETS:
         args.preset = "veryfast"
     STATE.codec = getattr(args, "codec", None) or None
@@ -1031,7 +1051,10 @@ def run(cmd: Sequence[str], *, quiet: bool = False, check: bool = True, ctx: "Op
                 return proc, ran
             retry = _odd_dimension_retry(ran, proc.stderr or "")
             if retry is not None:
-                info("source has odd dimensions; scaling to even before encoding (yuv420p needs it)")
+                # recorded, not only said: the output's frame is a pixel narrower or shorter than
+                # the source's, which a caller comparing sizes has to be able to read
+                record_fallback("source has odd dimensions; scaling to even before encoding (yuv420p needs it)",
+                                "odd_dimensions_scaled_even", ctx=ctx, output=cmd[-1], scale=EVEN_SCALE)
                 ctx.commands[-1] = _cmdline(retry[:-1] + [cmd[-1]])
                 return _execute(retry), retry
             if "not divisible by 2" in (proc.stderr or ""):
@@ -1130,10 +1153,12 @@ def run_analysis(cmd: Sequence[str], *, check: bool = True, text: bool = True, r
 def dry_run_input_pending(path: str) -> bool:
     """True when a measurement cannot run because its input does not exist yet under --dry-run:
     in a render.py/batch.py plan each stage's input is the previous stage's output, which a dry
-    run never wrote. The measurement is then skipped (with a note) rather than failing the plan;
-    on a real file the measurement runs even under --dry-run."""
+    run never wrote. The measurement is then skipped rather than failing the plan, and the skip is
+    recorded (`diagnostics.skipped`, `measurement_input_pending`, once per path) beside its stderr
+    line; on a real file the measurement runs even under --dry-run."""
     if STATE.dry_run and not os.path.exists(path):
-        info(f"[dry-run] {path} does not exist yet (an earlier dry-run stage would write it); measurement skipped")
+        record_skip(f"[dry-run] {path} does not exist yet (an earlier dry-run stage would write it); measurement skipped",
+                    "measurement_input_pending", path=path)
         return True
     return False
 
@@ -1196,9 +1221,19 @@ def run_keeping_subtitles(cmd: List[str], output: str) -> bool:
     (e.g. a container change) makes that first attempt fail; retry the same command without the
     extra maps rather than let a tool that never touched subtitles start hard-failing because of
     them. `cmd` is the full argv *without* the output path. Returns True only when the
-    retry-without-subtitles path was actually needed (i.e. subtitle/data streams were dropped)."""
-    if run(cmd + ["-map", "0:s?", "-map", "0:d?", "-c:s", "copy", "-c:d", "copy", output], check=False).returncode == 0:
+    retry-without-subtitles path was actually needed (i.e. subtitle/data streams were dropped).
+
+    The retry is recorded with the first attempt's error (`diagnostics.fallbacks`,
+    `non_av_streams_dropped`): the caller's `dropped_non_av_streams` says that streams went, the
+    record says why, which is the only way to tell a container that cannot hold them from a first
+    attempt that failed for another reason and happened to succeed the second time."""
+    first = run(cmd + ["-map", "0:s?", "-map", "0:d?", "-c:s", "copy", "-c:d", "copy", output], check=False)
+    if first.returncode == 0:
         return False
+    error = " | ".join([ln.strip() for ln in (first.stderr or "").splitlines() if ln.strip()][-3:])[-500:]
+    record_fallback(f"the subtitle/data streams could not be copied into {os.path.basename(output)} "
+                    f"({error or 'ffmpeg exit ' + str(first.returncode)}); encoding again without them",
+                    "non_av_streams_dropped", output=output, returncode=first.returncode, error=error)
     run(cmd + [output])
     return True
 
@@ -1459,39 +1494,68 @@ def ffmpeg_encoders() -> set:
     ffmpeg_version(). That is the one case for ffprobe. On a mixed install (a Homebrew ffprobe next
     to a static ffmpeg) its list is another build's, so a real run never uses it: the AV1/ProRes
     refusals and the VideoToolbox check must describe the binary that encodes, and a plan that
-    read ffprobe's list is re-decided against ffmpeg's when it runs."""
+    read ffprobe's list is re-decided against ffmpeg's when it runs.
+
+    An empty list is not "this build has none": when the list could not be read (the binary did
+    not run, timed out, exited non-zero, or printed nothing a list is made of), the reason is kept
+    (ffmpeg_list_error("encoders")) and recorded once as a `ffmpeg_list_unreadable` warning, so a
+    refusal or a CPU note built on the empty set names the read failure, not a missing encoder."""
     global _ENCODERS
     if _ENCODERS is None:
-        _ENCODERS = set()
-        tool = "ffprobe" if STATE.dry_run else "ffmpeg"
-        # --timeout bounds this read too: on Apple Silicon every CPU re-encode asks for the list
-        # (#314), so a deadlocked ffmpeg must not outlive the limit the caller set before the encode
-        limit = min(PROBE_TIMEOUT, STATE.timeout) if STATE.timeout else PROBE_TIMEOUT
-        try:
-            out = subprocess.run([ffmpeg_exe(tool)[0] or tool, "-hide_banner", "-encoders"], stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=limit).stdout
-            _ENCODERS = set(re.findall(r"^\s*[VAS][.\w]{5}\s+(\S+)", out, re.M))
-        except (OSError, subprocess.SubprocessError):
-            pass
+        _ENCODERS = _read_ff_list("-encoders", r"^\s*[VAS][.\w]{5}\s+(\S+)")
     return _ENCODERS
 
 
 def ffmpeg_bsfs() -> set:
-    """Names from `ffmpeg -bsfs`, read once, empty when it cannot be read; from ffprobe under
-    --dry-run, for the reason ffmpeg_encoders() gives. color.py --retag rewrites an H.264/HEVC
-    stream's colour description with h264_metadata/hevc_metadata only when the build has it."""
+    """Names from `ffmpeg -bsfs`, read once, empty when it cannot be read (the reason is kept and
+    recorded as ffmpeg_encoders() keeps it); from ffprobe under --dry-run, for the reason
+    ffmpeg_encoders() gives. color.py --retag rewrites an H.264/HEVC stream's colour description
+    with h264_metadata/hevc_metadata only when the build has it."""
     global _BSFS
     if _BSFS is None:
-        _BSFS = set()
-        tool = "ffprobe" if STATE.dry_run else "ffmpeg"
-        limit = min(PROBE_TIMEOUT, STATE.timeout) if STATE.timeout else PROBE_TIMEOUT
-        try:
-            out = subprocess.run([ffmpeg_exe(tool)[0] or tool, "-hide_banner", "-bsfs"], stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", timeout=limit).stdout
-            _BSFS = set(re.findall(r"^\s*([a-z0-9_]+)\s*$", out, re.M))
-        except (OSError, subprocess.SubprocessError):
-            pass
+        _BSFS = _read_ff_list("-bsfs", r"^\s*([a-z0-9_]+)\s*$")
     return _BSFS
+
+
+# why the last read of a capability list came back empty: "-encoders"/"-bsfs" -> reason
+_LIST_ERRORS: Dict[str, str] = {}
+
+
+def ffmpeg_list_error(flag: str) -> Optional[str]:
+    """Why `ffmpeg -encoders` / `-bsfs` (flag "encoders" or "bsfs") could not be read, or None when
+    it was read (or not yet asked for). Only while the cached list is empty: a list a test or a
+    later read filled in has nothing to explain."""
+    flag = "-" + flag.lstrip("-")
+    cache = _ENCODERS if flag == "-encoders" else _BSFS if flag == "-bsfs" else None
+    return None if cache else _LIST_ERRORS.get(flag)
+
+
+def _read_ff_list(flag: str, pattern: str) -> set:
+    tool = "ffprobe" if STATE.dry_run else "ffmpeg"
+    # --timeout bounds this read too: on Apple Silicon every CPU re-encode asks for the list
+    # (#314), so a deadlocked ffmpeg must not outlive the limit the caller set before the encode
+    limit = min(PROBE_TIMEOUT, STATE.timeout) if STATE.timeout else PROBE_TIMEOUT
+    _LIST_ERRORS.pop(flag, None)
+    names: set = set()
+    why = None
+    try:
+        proc = subprocess.run([ffmpeg_exe(tool)[0] or tool, "-hide_banner", flag], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=limit)
+        names = set(re.findall(pattern, proc.stdout or "", re.M))
+        if not names:
+            tail = [ln.strip() for ln in (proc.stderr or "").splitlines() if ln.strip()][-1:]
+            why = (f"{tool} {flag} exited {proc.returncode}" if proc.returncode else f"{tool} {flag} listed nothing") + \
+                (f": {tail[0][:200]}" if tail else "")
+    except subprocess.TimeoutExpired:
+        why = f"{tool} {flag} did not answer within {limit:g} s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        why = f"{tool} {flag} could not run: {exc}"
+    if why:
+        _LIST_ERRORS[flag] = why
+        what = "encoder" if flag == "-encoders" else "bitstream filter"
+        warn(f"could not read this ffmpeg build's {what} list ({why}); nothing that needs it can be confirmed, which is not the same as the build lacking it",
+             "ffmpeg_list_unreadable", list=flag.lstrip("-"), tool=tool, error=why)
+    return names
 
 
 def read_text_or_die(path: str, flag: str) -> str:
@@ -1518,4 +1582,4 @@ def read_text_or_die(path: str, flag: str) -> str:
 # emit needs runner's Context/STATE/ERROR_CODE, so the two form a cycle that has to be cut
 # somewhere: by the time this line runs every name emit reads from runner above is defined, and
 # every name runner reads from emit is only ever read inside a function body, never at import.
-from _common.emit import _plan_at_exit, audit, die, hw_report, info, record_fallback, refuse, warn  # noqa: E402
+from _common.emit import _plan_at_exit, audit, die, hw_report, info, record_fallback, record_skip, refuse, warn  # noqa: E402

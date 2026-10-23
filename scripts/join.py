@@ -40,6 +40,7 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from _common import STATE, AUDIO_MEDIA_EXT, draws_chroma, drawn_chain, label_chain, matrix_chain, video_args, aac_args, add_common, apply_common, audio_codec_for, default_output, die, dry_run_input_pending, emit, ffmpeg_base, info, measured_level_dbfs, is_audio_output, probe, require_tool, run, validate_color, X264_PRESETS, fmt_secs
+from _common.emit import warn
 
 TRANSITIONS = ["fade", "dissolve", "wipeleft", "wiperight", "wipeup", "wipedown", "slideleft", "slideright",
                "circleopen", "circleclose", "fadeblack", "fadewhite", "smoothleft", "smoothright", "radial", "none"]
@@ -113,7 +114,7 @@ def note_short_segments(paths: List[str], metas: List[dict], minimum: float, uni
         STATE_SHORT.append({"index": k, "path": p, "duration": round(dur, 4)})
     if STATE_SHORT:
         listing = ", ".join(f"#{s['index'] + 1} {s['path']} ({s['duration']:g}s)" for s in STATE_SHORT)
-        info(f"warning: {len(STATE_SHORT)} input(s) shorter than {unit}: {listing}")
+        warn(f"{len(STATE_SHORT)} input(s) shorter than {unit}: {listing}", "short_inputs", count=len(STATE_SHORT))
         STATE_NOTES.append(f"{len(STATE_SHORT)} input(s) are shorter than {unit} and were joined anyway: {listing}")
 
 
@@ -361,7 +362,8 @@ def main() -> int:
     STATE_SILENT[:] = sorted(intended + (silent if args.on_silent == "warn" else []), key=lambda s: s["index"])
     if silent and args.on_silent == "warn":
         listing = ", ".join(f"#{s['index'] + 1} {s['path']} (peak {s['peak_db']:.1f} dBFS)" for s in silent)
-        info(f"warning: {len(silent)} input(s) silent at or below {args.silence_threshold:g} dBFS, joined anyway: {listing}")
+        warn(f"{len(silent)} input(s) silent at or below {args.silence_threshold:g} dBFS, joined anyway: {listing}",
+             "silent_inputs", count=len(silent))
         STATE_NOTES.append(f"{len(silent)} input(s) have no audible sound (peak at or below {args.silence_threshold:g} dBFS) "
                            f"and were joined anyway: {listing}; pass --on-silent fail or skip to refuse or drop them")
     STATE_SKIPPED[:] = skipped
@@ -373,7 +375,7 @@ def main() -> int:
     STATE_DUPES[:] = dupes
     if dupes:
         listing = "; ".join(f"{dd['path']} at #" + ", #".join(str(i + 1) for i in dd["indices"]) for dd in dupes)
-        info(f"warning: input(s) listed more than once: {listing}")
+        warn(f"input(s) listed more than once: {listing}", "duplicate_inputs", count=len(dupes))
         STATE_NOTES.append(f"{len(dupes)} input(s) are listed more than once and joined each time: {listing}; "
                            "fine if the repeat is intended")
     STATE_PENDING[:] = pending

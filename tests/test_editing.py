@@ -909,6 +909,11 @@ class EditingTests(MediaFixtures):
         proc = script("sequence.py", "--dir", frames_dir, "--pattern", "frame_%04d.png", "--fps", "5",
                       "-o", OUT / "seq_gap.mp4")
         self.assertIn("frame_0002.png is missing; 2 later frame(s)", proc.stderr)
+        # the gap reaches the document too, not only stderr
+        proc = script("sequence.py", "--dir", frames_dir, "--pattern", "frame_%04d.png", "--fps", "5",
+                      "-o", OUT / "seq_gap_plan.mp4", "--dry-run", "--json")
+        gap = json.loads(proc.stdout)["diagnostics"]["warnings"][0]
+        self.assertEqual((gap["code"], gap["missing"], gap["frames_left_out"]), ("sequence_gap", "frame_0002.png", 2))
 
     def test_sequence_glob_pattern(self):
         frames_dir = OUT / "seqframes_glob"

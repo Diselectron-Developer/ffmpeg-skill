@@ -11,20 +11,21 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-from _common.emit import die, info
+from _common.emit import die, info, record_fallback, warn
 from _common.emoji import _is_emoji_char
 
 
 def default_font_file(font_name: str) -> Optional[str]:
     """Resolve `font_name` to a concrete on-disk font file, so a caller can tell drawtext
-    `fontfile=<path>` instead of `font=<name>`, when possible.
+    `fontfile=<path>` instead of `font=<name>`, when possible (resolve_font()'s `file`).
 
     On some real Windows ffmpeg builds (winget's gyan.dev 9.x), drawtext's own fontconfig
     resolution crashes with an access violation whenever it has to resolve a font by family name
     -- with or without a valid fonts.conf on FONTCONFIG_FILE. `fontfile=` is the only form
-    confirmed not to crash (#100), since it never touches fontconfig at all. `font_name` itself is
-    ignored on Windows for that reason: a fixed, near-universally-present system font is used
-    instead of trying to resolve the requested family (which would crash the same way).
+    confirmed not to crash (#100), since it never touches fontconfig at all. On Windows the
+    requested family is looked for by file name in the Fonts folder; a family that is not there
+    falls back to a CJK system font (for a CJK-looking request) or Arial, a near-universally-present
+    system font, instead of trying to resolve the requested family (which would crash the same way).
 
     On Linux/macOS this is best-effort and uses the real requested family: `fc-match` reports the
     same file fontconfig would resolve `font_name` to anyway, so a caller gets the identical font,
@@ -35,6 +36,23 @@ def default_font_file(font_name: str) -> Optional[str]:
     Returns None when nothing could be resolved (fc-match missing/unavailable, or no well-known
     Windows font file present); the caller falls back to font=<font_name>, the prior behaviour.
     """
+    return resolve_font(font_name)["file"]
+
+
+# generic fontconfig aliases: resolving one to a concrete family is what they are for, not a substitution
+_GENERIC_FAMILIES = {"sans", "sansserif", "serif", "mono", "monospace", "cursive", "fantasy", "systemui", "emoji"}
+
+
+def _family_key(name: "Optional[str]") -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def resolve_font(font_name: str) -> "Dict[str, object]":
+    """default_font_file() with what it found: {file, family, substituted, via}. `substituted` is
+    True when the file is not the requested family -- a Windows machine without it (a CJK system
+    font or Arial instead), or fc-match answering with another family (fontconfig always answers
+    something). `via` is windows_fonts or fc-match; file and family are None when nothing resolved."""
+    none: "Dict[str, object]" = {"file": None, "family": None, "substituted": False, "via": None}
     if platform.system() == "Windows":
         windir = os.environ.get("WINDIR", "C:\\Windows")
         fonts = Path(windir) / "Fonts"
@@ -42,33 +60,78 @@ def default_font_file(font_name: str) -> Optional[str]:
         # removed (Noto Sans CJK JP -> NotoSansCJKjp-Regular.otf, Meiryo -> meiryo.ttc), then the
         # common CJK system fonts when the request looks CJK (so Japanese text does not render as
         # boxes in Arial), and Arial only as the last resort.
-        wanted = re.sub(r"[^a-z0-9]", "", (font_name or "").lower())
+        wanted = _family_key(font_name)
         try:
             files = sorted(fonts.iterdir()) if fonts.is_dir() else []
         except OSError:
             files = []
         if wanted:
             for f in files:
-                stem = re.sub(r"[^a-z0-9]", "", f.stem.lower())
+                stem = _family_key(f.stem)
                 if f.suffix.lower() in (".ttf", ".otf", ".ttc") and stem.startswith(wanted):
-                    return str(f)
+                    return {"file": str(f), "family": font_name, "substituted": False, "via": "windows_fonts"}
         if any(k in wanted for k in ("cjk", "gothic", "mincho", "meiryo", "yugoth", "msgothic", "malgun", "simhei", "simsun", "jp", "kr", "sc", "tc")):
             for name in ("NotoSansCJKjp-Regular.otf", "NotoSansCJK-Regular.ttc", "meiryo.ttc", "YuGothM.ttc", "msgothic.ttc", "malgun.ttf", "msyh.ttc"):
                 if (fonts / name).exists():
-                    return str(fonts / name)
+                    return {"file": str(fonts / name), "family": Path(name).stem, "substituted": bool(wanted), "via": "windows_fonts"}
         candidate = fonts / "arial.ttf"
-        return str(candidate) if candidate.exists() else None
+        if candidate.exists():
+            return {"file": str(candidate), "family": "Arial",
+                    "substituted": bool(wanted) and wanted != "arial" and wanted not in _GENERIC_FAMILIES, "via": "windows_fonts"}
+        return none
     exe = shutil.which("fc-match")
     if not exe:
-        return None
+        return none
     try:
-        proc = subprocess.run([exe, "--format=%{file}\n", font_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=5)
+        proc = subprocess.run([exe, "--format=%{file}\n%{family}\n", font_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=5)
     except (subprocess.TimeoutExpired, OSError):
-        return None
+        return none
     if proc.returncode != 0:
-        return None
-    path = proc.stdout.splitlines()[0].strip() if proc.stdout.strip() else ""
-    return path if path and os.path.exists(path) else None
+        return none
+    lines = proc.stdout.splitlines()
+    path = lines[0].strip() if lines else ""
+    if not (path and os.path.exists(path)):
+        return none
+    # fontconfig lists a face's family names comma-separated (localised names included); the
+    # request is met when one of them is the requested family, or the request names a style of it
+    families = [f.strip() for f in (lines[1] if len(lines) > 1 else "").split(",") if f.strip()]
+    wanted = _family_key(font_name)
+    met = (not wanted or wanted in _GENERIC_FAMILIES or not families
+           or any(_family_key(f) and (wanted.startswith(_family_key(f)) or _family_key(f).startswith(wanted)) for f in families))
+    return {"file": path, "family": families[0] if families else None, "substituted": not met, "via": "fc-match"}
+
+
+def font_choice(asked: "Optional[str]", *, font_file: "Optional[str]" = None, script_file: "Optional[str]" = None,
+                script_family: "Optional[str]" = None, renderer: str = "drawtext") -> "Dict[str, object]":
+    """The font a text-drawing tool draws with, as its result's `font_used`: {asked, file, family,
+    how, substituted}. `how`: font_file (the caller's own file), script (a font picked to cover the
+    text's script, 1.12), resolved (the asked family resolved to a file: fc-match, or the Windows
+    Fonts folder), by_name (no file resolved; ffmpeg/libass look the family up themselves, so the
+    file is not known here). For libass (`renderer="libass"`) a resolved file is the one fontconfig
+    picks for the family, which is what libass loads through fontconfig; on Windows libass is
+    given the family by name, so nothing is resolved for it."""
+    if font_file:
+        return {"asked": font_file, "file": font_file, "family": None, "how": "font_file", "substituted": False}
+    if script_file:
+        return {"asked": asked, "file": script_file, "family": script_family, "how": "script", "substituted": False}
+    if renderer == "libass" and platform.system() == "Windows":
+        return {"asked": asked, "file": None, "family": asked, "how": "by_name", "substituted": False}
+    found = resolve_font(asked or "")
+    if not found["file"]:
+        return {"asked": asked, "file": None, "family": asked, "how": "by_name", "substituted": False}
+    return {"asked": asked, "file": found["file"], "family": found["family"], "how": "resolved",
+            "substituted": bool(found["substituted"]), "via": found["via"]}
+
+
+def record_font_choice(choice: "Dict[str, object]") -> "Dict[str, object]":
+    """Record a substituted font (`diagnostics.fallbacks`, `font_substituted`) and return `choice`
+    for the result's `font_used`: fontconfig answers every request with some font, and drawtext and
+    libass draw with it and exit 0, so without this the only trace was the picture."""
+    if choice.get("substituted"):
+        record_fallback(f"font: '{choice['asked']}' is not installed here; drawing with {choice.get('family') or '?'} "
+                        f"({choice['file']}) instead", "font_substituted",
+                        asked=choice["asked"], file=choice["file"], family=choice.get("family"), via=choice.get("via"))
+    return choice
 
 
 # --------------------------------------------------------------------------- script detection
@@ -399,14 +462,14 @@ def script_font_for_text(text: str, *, lang: "Optional[str]" = None, font: "Opti
 
     Returns (script, None, None) when the caller's own choice stands: Latin text, an explicit
     --font-file, an explicit --font (which is kept even when fontconfig says it does not cover
-    the script -- with one info line saying so, because overriding a user's stated font silently
-    is worse than a warning), or a --fonts-dir that does carry the script. Otherwise the resolved
+    the script -- with one recorded warning saying so, `font_lacks_script`, because overriding a
+    user's stated font silently is worse than a warning), or a --fonts-dir that does carry the script. Otherwise the resolved
     file is returned with ONE info line naming it.
 
     A script fontconfig says nothing covers is a failed job (tofu is not a delivery). A machine
     with no working fontconfig at all answers "unknown", not "missing": the job continues with
-    the caller's font -- libass and drawtext still have their own font backends -- and one info
-    line says the coverage could not be verified.
+    the caller's font -- libass and drawtext still have their own font backends -- and one recorded
+    warning (`font_coverage_unverified`) says the coverage could not be verified.
     """
     script = detect_script(text or "", lang)
     if script == "latin":
@@ -415,24 +478,26 @@ def script_font_for_text(text: str, *, lang: "Optional[str]" = None, font: "Opti
         return script, None, None
     if font_explicit and font:
         if not font_covers_script(font, script):
-            info(f"font: '{font}' does not cover {LANGUAGE_NAMES[script]} text on this machine; keeping it as asked "
-                 f"(drop --font, or {FONT_FLAG_HINT}, to pick one by script automatically)")
+            warn(f"font: '{font}' does not cover {LANGUAGE_NAMES[script]} text on this machine; keeping it as asked "
+                 f"(drop --font, or {FONT_FLAG_HINT}, to pick one by script automatically)", "font_lacks_script",
+                 font=font, script=script)
         return script, None, None
     if fonts_dir:
         covered = fonts_dir_covers_script(fonts_dir, script)
         if covered:
             return script, None, None
         if covered is None:
-            info(f"font: could not verify that {fonts_dir} covers {LANGUAGE_NAMES[script]} text "
-                 "(no fc-scan on this machine); using it as given")
+            warn(f"font: could not verify that {fonts_dir} covers {LANGUAGE_NAMES[script]} text "
+                 "(no fc-scan on this machine); using it as given", "font_coverage_unverified", fonts_dir=fonts_dir, script=script)
             return script, None, None
-        info(f"font: no face in {fonts_dir} covers {LANGUAGE_NAMES[script]} text; "
-             "picking one by script instead (the directory is still searched first)")
+        record_fallback(f"font: no face in {fonts_dir} covers {LANGUAGE_NAMES[script]} text; "
+                        "picking one by script instead (the directory is still searched first)", "fonts_dir_lacks_script",
+                        fonts_dir=fonts_dir, script=script)
     entry = _script_font_entry(script)
     if entry is FC_UNKNOWN:
-        info(f"font: could not verify that this machine can render {LANGUAGE_NAMES[script]} text "
+        warn(f"font: could not verify that this machine can render {LANGUAGE_NAMES[script]} text "
              "(no working fontconfig); rendering with the font as given -- "
-             "doctor --json .fonts.scripts reports what is known")
+             "doctor --json .fonts.scripts reports what is known", "font_coverage_unverified", script=script)
         return script, None, None
     if not entry:
         die(f"no installed font covers {LANGUAGE_NAMES[script]} text on this machine — {FONT_INSTALL_HINT}", kind="input")

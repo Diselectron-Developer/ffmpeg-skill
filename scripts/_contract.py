@@ -425,6 +425,76 @@ ERROR_REASONS = {
     "plan_unknown_tool": "render.py PLAN: the plan names no tool render.py can run; details: {plan, plan_sha256, checked_at, tool, audit_log}",
     "plan_cwd_missing": "render.py PLAN: the directory the plan was made in is gone; details: {plan, plan_sha256, checked_at, cwd, audit_log}",
     "plan_argv_invalid": "render.py PLAN: argv is not a list; details: {plan, plan_sha256, checked_at, argv_type, audit_log}",
+    "encoder_missing": "--codec av1/prores: the build's encoder list was read and has no encoder for the codec (kind missing_tool); details: {codec, encoders}",
+    "encoder_list_unreadable": "--codec av1/prores: the build's encoder list could not be read, so whether it has the encoder is unknown (kind ffmpeg); details: {codec, encoders, error}",
+}
+
+# The codes of the collector's records (docs/design-decisions.md, "Nothing happens silently"):
+# code -> (bucket, what it records). Every warn()/record_fallback()/record_skip() literal under
+# scripts/ is listed here under its bucket (a test reads the sources), so a caller can switch on
+# a code the contract publishes.
+DIAGNOSTIC_CODES = {
+    # infrastructure (part 1)
+    "stale_lock_taken_over": ("fallbacks", "a dead or past-deadline writer's output lock was taken over; {lock, output, pid, pid_alive, deadline, why}"),
+    "output_unlocked": ("warnings", "no output lock could be created and the run went on without one; {lock, output, error}"),
+    "lock_deadline_unset": ("warnings", "the lock's deadline (its mtime) could not be set; {lock, error}"),
+    "audit_log_unwritable": ("warnings", "an audit record could not be appended; never fails the run; {path, event, error}"),
+    "plan_unbound_inputs": ("warnings", "render.py PLAN: inputs that did not exist when the plan was made, so were not checked; {paths}"),
+    # the runner
+    "odd_dimensions_scaled_even": ("fallbacks", "an encode that failed on odd dimensions was run again scaled to even ones (the frame loses a row or column); {output, scale}"),
+    "measurement_input_pending": ("skipped", "--dry-run: a measurement skipped because its input is an earlier stage's output that does not exist yet; {path}"),
+    "non_av_streams_dropped": ("fallbacks", "the subtitle/data streams could not be copied, so the encode ran again without them (dropped_non_av_streams: true); {output, returncode, error: the first attempt's last stderr lines}"),
+    "ffmpeg_list_unreadable": ("warnings", "`ffmpeg -encoders` / `-bsfs` could not be read; what needs the list says so instead of 'the build lacks it'; {list, tool, error}"),
+    "timeout_env_invalid": ("warnings", "FFMPEG_SKILL_TIMEOUT was not a number (the default was used) or was negative (read as 0, no limit); {value, timeout}"),
+    # encoder decisions
+    "av1_encoder_libaom": ("fallbacks", "--codec av1 on a build without libsvtav1: libaom-av1 encoded instead; {wanted, used}"),
+    "crf_clamped": ("warnings", "the CRF handed to the encoder was above its maximum and was capped (the HEVC HDR line adds 2); {encoder, requested, asked, used}"),
+    # fonts and text
+    "font_substituted": ("fallbacks", "the asked font family is not installed: fontconfig or the Windows Fonts folder gave another (font_used names it); {asked, file, family, via}"),
+    "font_lacks_script": ("warnings", "an explicit --font does not cover the text's script and is kept as asked; {font, script}"),
+    "font_coverage_unverified": ("warnings", "whether a font covers the text's script could not be checked (no fontconfig / fc-scan); {script, fonts_dir?}"),
+    "fonts_dir_lacks_script": ("fallbacks", "no face in --fonts-dir covers the text's script, so one was picked by script; {fonts_dir, script}"),
+    "emoji_monochrome": ("warnings", "emoji drawn by the text font (monochrome at best): no colour path here"),
+    "emoji_stripped": ("warnings", "overlay.py --emoji none: emoji removed from the drawn text; {mode}"),
+    "emoji_assets_missing": ("warnings", "--emoji-assets has no PNG for these clusters; the text font draws them; {missing}"),
+    "drawtext_newline_glyph": ("warnings", "graphics.py --text-render drawtext on FFmpeg 8.0-8.0.1/8.1.0: a box is drawn at each line break of a multi-line label; {text_render}"),
+    "timeline_parse_failed": ("warnings", "render.py --export-timeline: the written file does not read back as its format (the parse step is ok: false); {path, format, error}"),
+    # captions
+    "ass_lines_unshifted": ("warnings", "caption.py --ass --offset: Dialogue lines whose timestamps could not be read were copied unshifted; {path, count, offset}"),
+    "ass_lines_malformed": ("warnings", "caption.py --ass: Dialogue lines that could not be read (fields or start/end) are not counted as cues; {path, count}"),
+    "cues_outside_video": ("warnings", "caption.py: cues wholly outside the video are not drawn; {count, duration}"),
+    "asr_language_assumed": ("warnings", "--transcribe: the language was assumed (English) and the transcript is wrong if it is not"),
+    # analysis
+    "drift_correction_skipped": ("skipped", "sync.py --fix-drift not applied for a source (drift_skipped_reason); {path, reason: too_short | low_confidence, ...}"),
+    "sync_low_confidence": ("warnings", "sync.py: a source's offset has a correlation confidence below 0.1; {path, confidence}"),
+    "cropdetect_windows_failed": ("warnings", "cropdetect.py: sampled windows ffmpeg could not decode (windows_failed); {failed, windows, starts}"),
+    "filler_words_untimed": ("warnings", "silence.py --filler: listed words in the transcript with no usable timing were not removed (filler.matched_untimed); {count}"),
+    "filler_removal_caution": ("warnings", "silence.py --filler: a removed word that is often an ordinary word, or a discourse marker added with --filler-extra (also in filler.warnings)"),
+    # media and defaults
+    "silent_track_mixed": ("warnings", "audio.py --on-silent warn: a silent track was mixed anyway; {tracks}"),
+    "silent_inputs": ("warnings", "join.py --on-silent warn: silent inputs joined anyway (silent); {count}"),
+    "silent_input": ("warnings", "waveform.py: the input audio is silent and the visualisation is a flat line; {path, peak_db}"),
+    "short_inputs": ("warnings", "join.py: inputs shorter than two frames joined anyway (short_segments); {count}"),
+    "duplicate_inputs": ("warnings", "join.py: an input listed more than once is joined each time (duplicates); {count}"),
+    "sequence_gap": ("warnings", "sequence.py: a frame is missing from the numbering and the frames after it are not in the video; {missing, frames_left_out, first_left_out}"),
+    "memory_heavy": ("warnings", "reverse.py / loop.py --boomerang hold every decoded frame in memory and this input is large"),
+    "dovi_not_detected": ("warnings", "color.py --strip-dovi on a stream with no Dolby Vision metadata: unregistered SEI removed anyway"),
+    "frame_from_export_preset": ("warnings", "render.py: frame.width/height taken from the export preset for a frame given only an aspect; {preset, width, height}"),
+    "normalize_on_by_default": ("warnings", "render.py: a platform export preset with no loudness stage got export.py --normalize by default; {preset}"),
+}
+
+
+# `font_used` on the tools that draw text: which font the text was drawn with, so a run that
+# drew with a substitute says so (with a font_substituted fallback)
+FONT_USED_SCHEMA = {
+    "type": "object",
+    "description": "the font the text was drawn with: {asked, file, family, how, substituted, via?, fonts_dir?}. how: font_file (the "
+                   "caller's file), script (picked to cover the text's script), resolved (the asked family resolved to a file by "
+                   "fc-match or the Windows Fonts folder; for libass, the file fontconfig picks for the family), by_name (no file "
+                   "resolved: ffmpeg/libass look the family up themselves, file null), fonts_dir (caption.py: the family looked up "
+                   "in --fonts-dir first), ass_styles (caption.py --ass: the file's own styles name the fonts). substituted: the "
+                   "file is not the asked family (also a diagnostics.fallbacks entry, font_substituted). overlay.py: with --text; "
+                   "grid.py: with --label auto",
 }
 
 
@@ -451,7 +521,7 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
                  "checks": {"type": "array", "items": {"type": "object", "properties": {"check": {"type": "string", "description": "row name; --content adds black, frozen and silence; audio FAILs when the track is present but silent (peak <= -50 dBFS)"}, "status": {"enum": ["PASS", "WARN", "FAIL"]}, "value": {}, "expected": {}, "fix": {"type": "string"}, "kind": {"enum": ["format", "judgement"]}}}}}
     elif name == "caption":
         extra = {"transcription": {"type": "object", "description": "with --transcribe: {engine, model, language, routing (why auto chose it), detected_language when auto detected it}; when auto ran the English-only Parakeet model on English assumed, notes says so"},
-                 "caption": {"type": "object", "description": "cue layout: shifted / wrapped / rebalanced / split / extended / dropped counts, plus wrap ('phrase' or 'measured'), phrase_breaks (1.16), broken_inside_word -- atoms hard-sliced at the column edge because they did not fit alone even at the size floor (1.18.4) -- and overlong -- now residual: a single character alone wider than the column. Burn mode: cues_burned -- non-blank cues that overlap [0, duration] and are drawn -- and cues_outside -- non-blank cues wholly outside it (2.2.6); a burn with no visible cue is refused, kind input"},
+                 "caption": {"type": "object", "description": "cue layout: shifted / wrapped / rebalanced / split / extended / dropped counts, plus wrap ('phrase' or 'measured'), phrase_breaks (1.16), broken_inside_word -- atoms hard-sliced at the column edge because they did not fit alone even at the size floor (1.18.4) -- and overlong -- now residual: a single character alone wider than the column. Burn mode: cues_burned -- non-blank cues that overlap [0, duration] and are drawn -- and cues_outside -- non-blank cues wholly outside it (2.2.6); a burn with no visible cue is refused, kind input. --ass: ass_malformed -- Dialogue lines that could not be read and are not counted -- and with --offset ass_shifted / ass_unshifted -- lines moved, and lines whose timestamps could not be read, copied as they were (each count above 0 is also a diagnostics.warnings entry)"},
                  "tracks": {"type": "array", "description": "--mode mux: one entry per subtitle stream in the output ({index, file, language, title, codec, default, cues, kept_from_input}); a stream the input already carried has file null and kept_from_input true (1.16)"},
                  "subtitle_tracks": {"type": "integer", "description": "--mode mux: how many subtitle streams the output carries"},
                  "emoji": {"type": "object", "description": "how the emoji in the text were drawn (mode, overlays, missing)"},
@@ -473,11 +543,12 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
     elif name == "silence":
         extra = {"silences": {"type": "array"}, "keep": {"type": "array"}, "input_duration": {"type": "number"}, "kept_duration": {"type": "number"}, "removed_seconds": {"type": "number"},
                  "speech_aware": {"type": "object", "description": "--speech-aware (1.18): {min_silence, floor, breaths_kept, breaths_kept_seconds, breaths}"},
-                 "filler": {"type": "object", "description": "--filler: {lang, source (whisper-json:FILE | whisper:ENGINE | parakeet:ENGINE), engine, transcription (with --transcribe: {engine, model, language, routing}), removed, removed_count, ...}"},
+                 "filler": {"type": "object", "description": "--filler: {lang, source (whisper-json:FILE | whisper:ENGINE | parakeet:ENGINE), engine, transcription (with --transcribe: {engine, model, language, routing}), removed, removed_count, matched_untimed (listed words in the transcript with no usable timing, not removed), matched_too_long (listed words longer than a filler, kept), ...}"},
                  "notes": {"type": "array", "items": {"type": "string"}, "description": "--filler --transcribe under --engine auto: present when the English-only Parakeet model ran on English assumed (no --filler-lang, no language detected, no Whisper engine installed or none that succeeded); the transcript is wrong if the speech is not English"}}
     elif name == "sync":
         extra = {"reference": {"type": "string"}, "second": {"type": "string"}, "offset_seconds": {"type": "number"}, "confidence": {"type": "number"}, "meaning": {"type": "string"}, "drift": {"type": "object"},
-                 "sources": {"type": "array", "description": "1.18: [{path, offset_s, confidence, drift_ppm}], one per SOURCE; the only per-source shape once more than one SOURCE is given"}}
+                 "sources": {"type": "array", "description": "1.18: [{path, offset_s, confidence, drift_ppm}], one per SOURCE; the only per-source shape once more than one SOURCE is given; with --fix-drift each also carries drift_skipped_reason"},
+                 "drift_skipped_reason": {"type": ["string", "null"], "enum": ["too_short", "low_confidence", None], "description": "--fix-drift, one SOURCE: why the drift correction was not applied (too_short: no tail window far enough from the head; low_confidence: the tail did not correlate), null when it was; also a diagnostics.skipped entry, drift_correction_skipped"}}
     elif name == "look":
         extra = {"outputs": {"type": "array", "items": {"type": "string"}}}
     elif name == "render":
@@ -555,6 +626,11 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
                  "silent": {"type": "array", "description": "--on-silent warn (default), only when a track was silent: [{flag, path, peak_db}] for each --music/--replace/--effects file, or under --duck the voice (flag \"input\"), whose whole-file peak is at or below --silence-threshold (default -50 dBFS); it was mixed anyway. --on-silent fail refuses instead, reason \"silent (peak X dBFS)\" in problems"},
                  "notes": {"type": "array", "items": {"type": "string"}, "description": "present with `silent`: which tracks were silent and how to refuse them"},
                  "audio": {"type": "object", "description": "what the mix was built from: voice (null | light | medium | strong), stereo_widen, effects/effects_volume, and with --music the music_volume plus duck (null when --duck was not given, else the threshold in dB and linear, ratio, attack_ms, release_ms, amount_db actually used)"}}
+    if name in ("overlay", "graphics", "caption", "grid"):
+        extra["font_used"] = FONT_USED_SCHEMA
+    if name == "cropdetect":
+        extra.update({"windows": {"type": "integer", "description": "sampled windows (--samples)"},
+                      "windows_failed": {"type": "integer", "description": "windows ffmpeg could not decode and that were skipped (a cropdetect_windows_failed warning when > 0); every window failing is a kind ffmpeg failure"}})
     props = dict(base)
     props.update(extra)
     notes = props.get("notes")
@@ -1733,6 +1809,7 @@ def build(detect: bool = True) -> Dict[str, Any]:
                                   "details": "optional, with reason: an object of the facts behind the refusal (paths, expected and actual values)"},
                         "diagnostics": DIAGNOSTICS_SCHEMA["description"]},
             "error_reasons": ERROR_REASONS,
+            "diagnostic_codes": {code: {"bucket": bucket, "meaning": meaning} for code, (bucket, meaning) in DIAGNOSTIC_CODES.items()},
             "audit_log": {"format": "JSON lines, appended: {ts, tool, event, pid, plan_sha256 (plan events), details}",
                           "events": {"plan_rejected": "render.py refused a plan (details: the refusal's error.details plus reason)",
                                      "lock_takeover": "a stale output lock was taken over (details: lock, output, pid, pid_alive, deadline, why)",

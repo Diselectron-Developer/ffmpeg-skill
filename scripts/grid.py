@@ -25,8 +25,9 @@ import argparse
 import os
 import sys
 
-from _common import add_common, apply_common, aac_args, cfr_args, default_font_file, default_output, die, emit, X264_PRESETS, fmt_secs, \
+from _common import add_common, apply_common, aac_args, cfr_args, default_output, die, emit, X264_PRESETS, fmt_secs, \
     draws_chroma, drawn_chain, escape_drawtext, escape_filter_path, ffmpeg_base, info, label_chain, matrix_chain, probe, run, validate_color, video_args
+from _common.fonts import font_choice, record_font_choice
 
 LABEL_MARGIN = 10
 
@@ -84,7 +85,10 @@ def main() -> int:
     durations = [m.get("duration") or 0.0 for m in metas]
     target_duration = max(durations) if args.pad else min(durations)
 
-    font_file = default_font_file(args.font)
+    font_used = font_choice(args.font)  # the label font, reported as `font_used` when labels are drawn
+    font_file = font_used["file"]
+    if args.label == "auto":
+        record_font_choice(font_used)
     output = args.output or default_output(args.inputs[0], "grid")
 
     cmd = ffmpeg_base()
@@ -157,7 +161,7 @@ def main() -> int:
     v = result["video"]
     info(f"wrote {output} ({fmt_secs(result['duration'])}, {v['width']}x{v['height']}, {args.cols}x{args.rows} grid, "
          f"{n} clips, {'padded to longest' if args.pad else 'stopped at shortest'})")
-    emit(output, cols=args.cols, rows=args.rows, clips=n)
+    emit(output, cols=args.cols, rows=args.rows, clips=n, **({"font_used": font_used} if args.label == "auto" else {}))
     return 0
 
 

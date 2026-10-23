@@ -74,7 +74,10 @@ def _record(bucket: str, msg: str, code: str, ctx: "Optional[Context]", data: Di
     ctx = ctx or STATE
     entry: Dict[str, Any] = {"code": code, "message": msg}
     entry.update(data)
-    getattr(ctx, bucket).append(entry)
+    # once per run: a decision taken for every encode of a job (an AV1 encoder fallback, a CRF
+    # clamp) is one record, though its stderr line is printed each time it is taken
+    if entry not in getattr(ctx, bucket):
+        getattr(ctx, bucket).append(entry)
     sys.stderr.write(f"{prefix}{msg}\n")
     return entry
 
@@ -82,7 +85,8 @@ def _record(bucket: str, msg: str, code: str, ctx: "Optional[Context]", data: Di
 def warn(msg: str, code: str, *, ctx: "Optional[Context]" = None, **data: Any) -> Dict[str, Any]:
     """Say something went other than asked, on stderr AND in the document
     (`diagnostics.warnings`: {code, message, ...data}). Use it where a bare info("warning: ...")
-    would leave the caller of --json nothing to read."""
+    would leave the caller of --json nothing to read (a source test refuses that spelling).
+    Every code is listed in the contract (`json_output.diagnostic_codes`)."""
     return _record("warnings", msg, code, ctx, data, "warning: ")
 
 

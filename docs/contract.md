@@ -376,7 +376,9 @@ limit (`check.py` reports it instead). `_platforms.resolve()` is the one alias m
 New in the same release, all additive: `export.py --preset tiktok|shorts|linkedin|facebook`
 (real presets, not aliases of `reels`/`youtube`), `--preset youtube-hdr` (HEVC Main10 keeping
 the source's HDR tags; `kind: input` on an SDR source) and `--preset youtube-av1`
-(`kind: missing_tool` when the build has neither SVT-AV1 nor libaom); `caption.py --platform`
+(`kind: missing_tool`, `error.reason: encoder_missing`, when the build has neither SVT-AV1 nor
+libaom; `kind: ffmpeg`, `encoder_list_unreadable`, when its encoder list could not be read at all,
+which says nothing about the build); `caption.py --platform`
 and `graphics.py --platform` / `--margin` and `overlay.py --platform` (margins from the safe
 zone, an explicit `--margin`/`--position` wins); `look.py --safe NAME`; `fit.py --fit blur`; `report.py --pack`;
 `graphics.py --template sticker|hook|meme`; and `render.py --template NAME INPUT`
@@ -546,7 +548,7 @@ the script, `missing` means fontconfig knows none, `unknown` means there is no w
 ask (no `fc-list` on PATH, or it failed). `caption.py`, `graphics.py` and `overlay.py --text` resolve
 a font by script automatically and fail with `kind: input` rather than render boxes **only for
 `missing`**: `unknown` is not `missing` here any more than anywhere else in this document — the job
-runs with the font as given and one info line says the coverage could not be verified. So a
+runs with the font as given and a `font_coverage_unverified` warning says the coverage could not be verified. So a
 `missing` script here is a job that will not run until a font is installed — but, like the default
 font, it never affects `ok` or any tool's
 `usable` (the tool works, this machine just has no glyphs for that language). The plain-text
@@ -676,6 +678,16 @@ Per-tool keys added after 2.2.2, all additive:
 | `vfr_check` | `cut.py` (a video input that could still stream-copy) | the sampled frame timing, `{heuristic: true, measured, method: "sampled", guard, windows, deltas}`; `measured` is `sampled_cfr`, `vfr` or `inconclusive`. `--vfr-guard average` (the default) keeps the 2.x guard: a source whose nominal and average frame rates differ (`variable_frame_rate_suspected`) re-encodes as `--accurate` (reason `vfr`, stderr says "variable-frame-rate"), and only then is the timing sampled and reported, with a `notes` line naming `--vfr-guard sampled` when it measured `sampled_cfr`; the key is absent otherwise. `--vfr-guard sampled` samples before every copy and re-encodes on `vfr` (reason `vfr`) or `inconclusive` (fewer than 20 intervals; `vfr_inconclusive`); `--vfr-guard off` samples and keeps the copy, with a `notes` line. Absent for audio-only input or output, `--accurate`, `--codec` and a pending `--dry-run` input |
 | `join_check`, `segment_end_snap_seconds` | `cut.py --segments` | `join_check`: a video stream-copy join measured by demuxing, `{packets, expected_packets, max_step_seconds, audio_offset_ms, audio_parts_checked, ok}`. `expected_packets` counts the source's video packets from each part's start keyframe to its end (or the end of the video); `max_step_seconds` is the largest presentation step, `null` when `vfr_check` measured anything but `sampled_cfr` (a `--vfr-guard off` join of variable timing: count only), and each step at a join must be the step its parts predict within 1 ms. `audio_offset_ms`: per part, its sound's shift minus its picture's in ms (+ = sound late), from audio packets matched by CRC32 to the source stream shaped like the joined audio (FFmpeg's default selection may copy one other than `a:0`; an MPEG-TS source's AAC is hashed without its ADTS headers); `null` for a part with no unique match (digital silence, a periodic tone), and as a whole when the source has no audio or the video check failed. `audio_parts_checked` counts the measured parts. `ok` is the conjunction (count, steps, every measured part within 5 ms); `ok: false` means the join was re-cut (`concat_fallback`) and this is the failed measurement. `null` for a single segment, audio, `--dry-run`, any re-encode forced for every segment, a segment that re-encoded, or a join re-cut before a copy was tried (open GOPs, a later B-frame segment starting between keyframes, parts that differ, a concat error). `segment_end_snap_seconds`: per segment, the signed seconds its end moved to the keyframe the copied part stops at, the first at or after the requested end (`null` for a part that reaches the end of the video, a part of a source with no B-frames, cut to its requested end as in 2.5.1, or a Matroska/MPEG-TS part, which is not snapped); `null` as a whole unless the output is those copied parts |
 
+Per-tool keys added after 2.10.11 ("nothing happens silently"), all additive:
+
+| key | tool | what it holds |
+|---|---|---|
+| `font_used` | `overlay.py --text`, `graphics.py`, `caption.py` burn mode, `grid.py --label auto` | the font the text was drawn with: `{asked, file, family, how, substituted, via?, fonts_dir?}`. `how`: `font_file` (the caller's file), `script` (picked to cover the text's script), `resolved` (the asked family resolved to a file by `fc-match` or the Windows Fonts folder; for libass, the file fontconfig picks for the family), `by_name` (no file resolved: ffmpeg or libass look the family up themselves, `file` null), `fonts_dir` (`caption.py`: the family is looked up in `--fonts-dir` first), `ass_styles` (`caption.py --ass`: the file's own styles name the fonts). `substituted: true` -- the file is not the asked family (a Windows machine without it gets a CJK system font or Arial; fontconfig answers every name) -- is also a `font_substituted` fallback |
+| `windows`, `windows_failed` | `cropdetect.py` | the sampled windows and how many ffmpeg could not decode (skipped; a `cropdetect_windows_failed` warning when above 0). Every window failing stays a `kind: ffmpeg` failure |
+| `drift_skipped_reason` | `sync.py --fix-drift` (top level for one SOURCE, and in each `sources` entry) | why the drift correction was not applied: `too_short` (no tail window far enough from the head) or `low_confidence` (the tail did not correlate); `null` when it was. Also a `drift_correction_skipped` entry under `diagnostics.skipped` |
+| `ass_shifted`, `ass_unshifted`, `ass_malformed` | `caption.py --ass` (inside `caption`) | with `--offset`: the Dialogue lines moved, and those whose timestamps could not be read (copied as they were); every run: Dialogue lines that could not be read (too few fields, an unreadable start/end) and are not counted as cues. A count above 0 is a warning |
+| `matched_untimed`, `matched_too_long` | `silence.py --filler` (inside `filler`) | listed words that were not cut: no usable timing in the transcript (also a `filler_words_untimed` warning), or longer than a filler (`FILLER_MAX_WORD`, a held vowel) |
+
 `caption.py --transcribe` and `silence.py --filler --transcribe`: when a local speech engine ran
 and produced no cue, the refusal is `"<engine> found no speech in <input>"` with `kind: input`,
 `reason: "no_speech"` and `engine` in the failure document — distinct from the "no local
@@ -741,8 +753,9 @@ here claims otherwise until real exit-code/stderr sniffing exists to back that u
 
 A refusal also carries `error.reason`, a stable snake_case code for *why*
 (`contract --json` → `json_output.error_reasons` lists them: `output_exists`, `output_is_input`,
-`output_is_directory`, `output_dir_missing`, `output_dir_not_writable`, `output_locked`, and
-`render.py`'s `plan_*` reasons), and `error.details`, the facts the message is written from, so a
+`output_is_directory`, `output_dir_missing`, `output_dir_not_writable`, `output_locked`,
+`render.py`'s `plan_*` reasons, and `--codec av1`/`prores`'s `encoder_missing` and
+`encoder_list_unreadable`), and `error.details`, the facts the message is written from, so a
 caller never parses the prose:
 
 ```
@@ -759,9 +772,20 @@ A tool that runs another (`render.py` stages and plans) forwards the child's `re
 skipped -- is recorded as it happens (a stderr line too) and lands in the document as
 `diagnostics: {warnings, fallbacks, skipped}`, each entry `{code, message, ...facts}`; it is
 present on success and failure documents alike, only when one list is not empty, and an entry a
-`render.py` stage reported carries `stage`. Codes today: `stale_lock_taken_over` (fallbacks),
-`output_unlocked`, `lock_deadline_unset`, `audit_log_unwritable` and `plan_unbound_inputs`
-(warnings).
+`render.py` stage reported carries `stage`. `contract --json` → `json_output.diagnostic_codes`
+lists every code with its bucket and meaning (a test reads every `warn()`/`record_fallback()`/
+`record_skip()` call against it). Among them: the runner's `odd_dimensions_scaled_even` (an encode
+re-run with an even scale; the frame loses a row or column), `non_av_streams_dropped` (with the
+first attempt's error beside `dropped_non_av_streams`), `measurement_input_pending` (skipped: a
+dry-run measurement of an earlier stage's output), `ffmpeg_list_unreadable` (`ffmpeg -encoders` or
+`-bsfs` could not be read; what needed it names the read failure, not a missing encoder) and
+`timeout_env_invalid` (an `FFMPEG_SKILL_TIMEOUT` that is not a number, or is negative);
+`av1_encoder_libaom` and `crf_clamped`; `font_substituted` (with `font_used`); `drift_correction_skipped`
+(with `drift_skipped_reason`); `cropdetect_windows_failed` (with `windows_failed`);
+`ass_lines_unshifted` / `ass_lines_malformed`; `timeline_parse_failed`; and every `warning:` line a
+tool used to print to stderr only (emoji fallbacks, silent or short inputs, memory-heavy jobs,
+`--strip-dovi` without Dolby Vision, `render.py`'s frame-from-preset and `--normalize` defaults).
+Every one of them still prints its stderr line; the record is additive.
 
 **Audit log.** Events a later reader must be able to reconstruct are appended as JSON lines,
 `{ts, tool, event, pid, plan_sha256, details}` (`plan_sha256` on plan events): `plan_rejected`,
@@ -844,7 +868,12 @@ returns one user-role text message naming the actual command lines to run and wh
 afterward -- the same facts SKILL.md's own request table states, addressed by workflow instead of
 by request phrasing. A missing required argument is a JSON-RPC error (`prompts/get` never guesses
 a path or a platform); an unknown prompt name is a JSON-RPC error too, distinct from "method not
-found" since `prompts/get` itself is a real method. These are recipes, not new tool calls: every
+found" since `prompts/get` itself is a real method.
+
+A line on stdin that is not JSON is answered with a JSON-RPC parse error (`-32700`, `id: null`)
+rather than dropped, so a client whose request was mangled does not wait for an answer that
+never comes; a JSON value that is not an object, and a notification, still get no response.
+An unknown method is `-32601`, any other handler error `-32000`. These are recipes, not new tool calls: every
 command line a prompt names is one `tools/call` (or the CLI) can already run.
 
 ## Consuming the contract from an agent

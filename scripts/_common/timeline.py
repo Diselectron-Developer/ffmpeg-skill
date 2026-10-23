@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape as _xml_escape
 
 from _common.decision import MissingFpsError, aspect_ratio, frame_size, parse_time
+from _common.emit import warn
 
 FORMATS = {".edl": "edl", ".fcpxml": "fcpxml", ".otio": "otio"}
 # Common NTSC rates are stored as the exact ratio an editor expects, not as 29.97.
@@ -482,17 +483,32 @@ WRITERS = {"edl": to_edl, "fcpxml": to_fcpxml, "otio": to_otio}
 
 
 def parses(path: str, fmt: str) -> bool:
-    """The verification step: the written file reads back as what it claims to be."""
+    """The verification step: the written file reads back as what it claims to be. A file that
+    does not is recorded with the reason (`diagnostics.warnings`, `timeline_parse_failed`: the
+    exception, or what was read instead), beside the step's `ok: false`."""
+    why = parse_error(path, fmt)
+    if why:
+        warn(f"{path} does not read back as {fmt}: {why}", "timeline_parse_failed", path=path, format=fmt, error=why)
+    return why is None
+
+
+def parse_error(path: str, fmt: str) -> Optional[str]:
+    """Why `path` does not read back as `fmt`, or None when it does (parses() without the record)."""
     try:
         text = Path(path).read_text(encoding="utf-8")
         if fmt == "fcpxml":
             import xml.etree.ElementTree as ET
-            return ET.fromstring(text.encode("utf-8")).tag == "fcpxml"
+            tag = ET.fromstring(text.encode("utf-8")).tag
+            return None if tag == "fcpxml" else f"the root element is <{tag}>, not <fcpxml>"
         if fmt == "otio":
-            return json.loads(text).get("OTIO_SCHEMA") == "Timeline.1"
-        return text.startswith("TITLE:") and any(line[:3].isdigit() for line in text.splitlines())
-    except (OSError, ValueError, SyntaxError):
-        return False
+            doc = json.loads(text)
+            schema = doc.get("OTIO_SCHEMA") if isinstance(doc, dict) else None
+            return None if schema == "Timeline.1" else f"OTIO_SCHEMA is {schema!r}, not 'Timeline.1'"
+        if not text.startswith("TITLE:"):
+            return "the first line is not TITLE:"
+        return None if any(line[:3].isdigit() for line in text.splitlines()) else "no numbered event line"
+    except (OSError, ValueError, SyntaxError) as exc:
+        return f"{type(exc).__name__}: {exc}"
 
 
 def summary(tl: Dict[str, Any], fmt: str) -> Dict[str, Any]:
