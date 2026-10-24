@@ -3201,6 +3201,25 @@ class ContractTests(unittest.TestCase):
         doc = json.loads(tool("speedramp", self.src, "--segment", "0-6:2", "-o", self.out("policy_ramp_plain.mp4"), "--json", "--fast").stdout)
         self.assertFalse(doc["dropped_non_av_streams"])
 
+    def test_look_sheet_timecode_counts_from_the_seek(self):
+        """A contact sheet starts reading at half a slice (-ss before -i), which resets pts to 0 at
+        the seek point: the burned-in labels were half a slice early (8 s, 3x2: a tile showing
+        0.667 s labelled 0.000). The timecode now adds the seek back; a sheet that starts at 0
+        (a clip with only a handful of frames) keeps the plain pts."""
+        doc = json.loads(tool("look", self.src, "--tiles", "3x2", "--dry-run", "--json",
+                              "-o", self.out("tc_sheet.png")).stdout)
+        cmd = doc["commands"][0]
+        seek = re.search(r"-ss (\d+\.\d+) ", cmd).group(1)
+        self.assertGreater(float(seek), 0)
+        self.assertIn(f"pts\\:hms\\:{seek}", cmd)
+        one = self.out("tc_one_frame.mp4")
+        ffmpeg("-f", "lavfi", "-i", "testsrc2=size=64x64:rate=30", "-frames:v", "1", "-c:v", "libx264",
+               "-preset", "veryfast", "-pix_fmt", "yuv420p", one)
+        cmd = json.loads(tool("look", one, "--tiles", "2x2", "--dry-run", "--json",
+                              "-o", self.out("tc_one.png")).stdout)["commands"][0]
+        self.assertIn("-ss 0.000000 ", cmd)
+        self.assertIn("pts\\:hms}", cmd)
+
     def test_boundary_sweep_p3_regressions(self):
         """Sweep P3s: export's HDR warning reaches --json (F11); graphics refuses a frame too small
         for its templates (F16); insert refuses a video where it wants a still (F17); look builds
