@@ -2134,12 +2134,12 @@ class PictureTests(MediaFixtures):
         """A layer whose video starts a second after its audio (and so after the file's 0): `0-1`
         is its first second of picture, not the second of silence before it."""
         main = OUT / "place_late_main.mp4"
-        layer = OUT / "place_late_layer.ts"   # MPEG-TS keeps the late start (an MP4 edit list would hide it)
+        layer = OUT / "place_late_layer.mkv"   # Matroska keeps the late start (an MP4 edit list would hide it)
         sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=160x90:r=30:d=4",
            "-c:v", "libx264", "-pix_fmt", "yuv420p", main)
         sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=160x90:r=30:d=2",
            "-f", "lavfi", "-i", "sine=d=3", "-vf", "setpts=PTS+1/TB",
-           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mpegts", layer)
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", layer)
         out = OUT / "place_late.mp4"
         script("overlay.py", main, "--video", layer, "--position", "0,0", "--margin", "0",
                "--place", "0-1@1", "-o", out)
