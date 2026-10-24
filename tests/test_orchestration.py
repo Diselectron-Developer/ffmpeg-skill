@@ -1046,6 +1046,12 @@ class OrchestrationTests(MediaFixtures):
         used, x264_copy = presets(copy_proj)
         self.assertIsNone(used)
         self.assertEqual(set(x264_copy), {"medium"}, "a copy export keeps the stages' encode")
+        # a project whose only encode is the export: nothing received the preset, so null
+        bare = OUT / "ip_project_bare.json"
+        bare.write_text(json.dumps({"clips": [{"src": str(self.src)}], "export": {"preset": "youtube"},
+                                    "output": str(OUT / "ip_bare.mp4")}), encoding="utf-8")
+        used, x264_bare = presets(bare)
+        self.assertIsNone(used, x264_bare)
         # a pack runs one render per destination: each gets the caller's choice
         pack = json.loads(script("render.py", self.src, "--template", "reels,shorts", "--cues", self.cues,
                                  "--intermediate-preset", "medium", "-o", OUT / "ip_pack" / "x.mp4",

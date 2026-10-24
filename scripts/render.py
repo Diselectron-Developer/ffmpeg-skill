@@ -549,6 +549,10 @@ def sh(script: str, *argv: Any, extra: List[str] = None, stage: str = None) -> s
     if (INTERMEDIATE["preset"] and script in _X264_STAGES
             and "--preset" not in [str(a) for a in argv] + (extra or [])):
         extra = (extra or []) + ["--preset", INTERMEDIATE["preset"]]
+        if not INTERMEDIATE["applied"]:
+            info(f"intermediate stages: preset {INTERMEDIATE['preset']} (the export re-encodes them; "
+                 "--intermediate-preset medium for the stages' own default)")
+        INTERMEDIATE["applied"] = True
     full = [str(a) for a in argv] + (extra or [])
     dest = full[full.index("-o") + 1] if "-o" in full[:-1] else None
     key = None
@@ -638,7 +642,13 @@ CACHE: Dict[str, Any] = _fresh_cache()
 # `veryfast` at the same CRF encodes in about half the time (SSIM 0.997 against `medium`) and
 # the export, still `medium`, sets the delivered quality. `--intermediate-preset medium` restores it.
 _X264_STAGES = frozenset({"cut.py", "fit.py", "join.py", "silence.py", "caption.py", "graphics.py", "overlay.py", "waveform.py"})
-INTERMEDIATE: Dict[str, Optional[str]] = {"preset": None}
+INTERMEDIATE: Dict[str, Any] = {"preset": None, "applied": False}
+
+
+def _intermediate_used() -> Optional[str]:
+    """The preset `intermediate_preset` reports: only once a stage actually received it (a project
+    whose only encode is the export reports null)."""
+    return INTERMEDIATE["preset"] if INTERMEDIATE["applied"] else None
 
 
 def _content_hash(path: str) -> str:
@@ -1199,8 +1209,6 @@ def main() -> int:
     if (ex_preset and "copy" not in PRESETS.get(ex_preset, {}).get("video", [])
             and args.stop_after in (None, "export") and args.intermediate_preset != "medium" and not STATE.fast):
         INTERMEDIATE["preset"] = args.intermediate_preset
-        info(f"intermediate stages: preset {args.intermediate_preset} (export.py {ex_preset} re-encodes them; "
-             "--intermediate-preset medium for the stages' own default)")
     stages_done: List[str] = []
     # what the caption stage reported (wrapped/split counts and the fit-size keys), so a caller
     # reading render.py's JSON can see whether the type was shrunk to fit or a cue was split.
@@ -1332,7 +1340,7 @@ def main() -> int:
         stages_done.append("audiogram")
 
     if args.stop_after == "clips":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- join
@@ -1348,7 +1356,7 @@ def main() -> int:
         sh("join.py", *argv, stage="join")
         stages_done.append("join")
     if args.stop_after == "join":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- silence
@@ -1363,7 +1371,7 @@ def main() -> int:
         current = nxt
         stages_done.append("silence")
     if args.stop_after == "silence":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- fit (duration and/or frame)
@@ -1400,7 +1408,7 @@ def main() -> int:
         current = nxt
         stages_done.append("fit")
     if args.stop_after == "fit":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- captions
@@ -1429,7 +1437,7 @@ def main() -> int:
         current = nxt
         stages_done.append("captions")
     if args.stop_after == "captions":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- graphics
@@ -1448,7 +1456,7 @@ def main() -> int:
         if "graphics" not in stages_done:
             stages_done.append("graphics")
     if args.stop_after == "graphics":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- overlays
@@ -1479,7 +1487,7 @@ def main() -> int:
         if "overlays" not in stages_done:
             stages_done.append("overlays")
     if args.stop_after == "overlays":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- audio
@@ -1516,7 +1524,7 @@ def main() -> int:
         current = nxt
         stages_done.append("audio")
     if args.stop_after == "audio":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- loudness
@@ -1532,7 +1540,7 @@ def main() -> int:
         current = nxt
         stages_done.append("loudness")
     if args.stop_after == "loudness":
-        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
+        emit(current, stages=stages_done, intermediate_preset=_intermediate_used())
         return 0
 
     # ---- export
@@ -1638,7 +1646,7 @@ def main() -> int:
         snap_report = dict(snap_reports[0])
         snap_report["clips"] = snap_reports
     emit(output, stages=stages_done, check=check_result, snap=snap_report, cache=cache_report,
-         caption=caption_report, intermediate_preset=INTERMEDIATE["preset"],
+         caption=caption_report, intermediate_preset=_intermediate_used(),
          verification=[{"step": "check", "ok": True, "platform": ck.get("platform")}] if check_result else [])
     return 0
 
