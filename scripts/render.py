@@ -640,7 +640,11 @@ CACHE: Dict[str, Any] = _fresh_cache()
 # re-encodes their output, so their own `medium` pass bought nothing the delivery keeps. Measured
 # on a 30 s 1080p reels render (4 cores): fit 18 s and captions 27 s of a 70 s run at `medium`;
 # `veryfast` at the same CRF encodes in about half the time (SSIM 0.997 against `medium`) and
-# the export, still `medium`, sets the delivered quality. `--intermediate-preset medium` restores it.
+# the export, still `medium`, sets the delivered quality. 2.16: `superfast` (the default since): on
+# FFmpeg 8.0.1 the same render took 30 s instead of 33 s with veryfast, SSIM against a lossless
+# reference 0.9868 vs 0.9863 (the export decides what is kept); on 6.1 the two took the same time.
+# `ultrafast` was faster still (26 s) but measurably worse (0.9814). `--intermediate-preset medium`
+# restores the stages' own default.
 _X264_STAGES = frozenset({"cut.py", "fit.py", "join.py", "silence.py", "caption.py", "graphics.py", "overlay.py", "waveform.py"})
 INTERMEDIATE: Dict[str, Any] = {"preset": None, "applied": False}
 
@@ -1066,8 +1070,8 @@ def main() -> int:
                     help="append the audit records of this run (a refused plan, a lock taken over, ...) to FILE as JSON lines; "
                          "default for a refused plan: <plan>.audit.jsonl next to it. A record that cannot be written is a "
                          "warning, never a failure")
-    ap.add_argument("--intermediate-preset", default="veryfast", choices=X264_PRESETS,
-                    help="x264/x265 preset of the stages before an encoding export (default veryfast: the export "
+    ap.add_argument("--intermediate-preset", default="superfast", choices=X264_PRESETS,
+                    help="x264/x265 preset of the stages before an encoding export (default superfast: the export "
                          "re-encodes them, and its own preset sets the delivered quality); medium = the stages' own default. "
                          "Not used without an export stage, with --stop-after before it, with --fast, or for a copy export")
     ap.add_argument("--stop-after", choices=["clips", "join", "silence", "fit", "captions", "graphics", "overlays", "audio", "loudness", "export"], help="stop after this stage (for iterating)")
