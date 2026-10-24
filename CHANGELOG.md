@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.16.0
+
+_Automated release: version and notes generated from pull requests merged since 2.15.0._
+
 ### Changed
 
 - **`render.py --intermediate-preset` defaults to `superfast`** (was `veryfast` in 2.15). On FFmpeg 8.0.1 a 30 s 1080p reels render took 30 s instead of 33 s, with SSIM against a lossless reference of 0.9868 vs 0.9863; on 6.1 the two took the same time. `ultrafast` was measured too: 26 s, but SSIM 0.9814, so it is not the default. `--intermediate-preset veryfast` restores 2.15's choice.
+- render.py: --intermediate-preset defaults to superfast (#356)
 
 ## 2.15.0
 
