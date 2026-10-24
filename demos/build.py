@@ -1015,6 +1015,17 @@ def demo_greenscreen(ctx):
     return before, after
 
 
+def demo_overlay_place(ctx):
+    """overlay.py --place: two ranges of one layer, each shown at its own time on the main
+    timeline; the main picture is untouched between them."""
+    before = FIX / "motion.mp4"
+    after = ctx.path("after.mp4")
+    ctx.script("overlay.py", before, "--video", FIX / "mandel.mp4", "--position", "bottom-right",
+               "--scale", "480", "--place", "0-1.5@0.5", "--place", "4-5.5@3.5",
+               "--preset", "veryfast", "-o", after)
+    return before, after
+
+
 def demo_color_lut(ctx):
     before = FIX / "motion.mp4"
     after = ctx.path("after.mp4")
@@ -1576,6 +1587,9 @@ _ROWS = [
     ("greenscreen", PICTURE, "Green screen onto a generated background",
      "background.py draws the gradient plate from nothing (there is no input file), then overlay.py keys the chroma green out of the subject and composites it on top.",
      demo_greenscreen, "video", None),
+    ("overlay_place", PICTURE, "Pieces of one layer at their own times",
+     "overlay.py --place lays two ranges of the fractal clip on the test pattern: its first 1.5 s at 0.5 s, its 4-5.5 s at 3.5 s. Between them the layer is hidden and the main picture is untouched -- one pass, no full-length mostly-transparent layer to render first.",
+     demo_overlay_place, "video", None),
     ("color_lut", PICTURE, "Apply a .cube LUT",
      "A 3D LUT applied at full strength: highlights warm, shadows cool. The same flag takes a camera vendor's Log-to-709 transform or a creative look -- the file decides, the tool does not.",
      demo_color_lut, "video", None),
