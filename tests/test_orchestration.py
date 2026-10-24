@@ -1013,7 +1013,7 @@ class OrchestrationTests(MediaFixtures):
 
     def test_render_intermediate_stages_use_veryfast_only_before_an_encoding_export(self):
         """2.15: the x264 stages before an encoding export run at --intermediate-preset (default
-        veryfast): export.py re-encodes them and its own preset sets the delivered quality. Kept
+        superfast since 2.16): export.py re-encodes them and its own preset sets the delivered quality. Kept
         at the stages' medium when nothing re-encodes after them: --stop-after before the
         export, a copy export, or --intermediate-preset medium. --fast still wins."""
         proj = OUT / "ip_project.json"
@@ -1026,9 +1026,9 @@ class OrchestrationTests(MediaFixtures):
             return doc.get("intermediate_preset"), x264
 
         used, x264 = presets(proj)
-        self.assertEqual(used, "veryfast")
+        self.assertEqual(used, "superfast")
         self.assertEqual(x264[-1], "medium", "the export keeps its preset")
-        self.assertTrue(x264[:-1] and set(x264[:-1]) == {"veryfast"}, x264)
+        self.assertTrue(x264[:-1] and set(x264[:-1]) == {"superfast"}, x264)
         self.assertEqual(presets(proj, "--intermediate-preset", "medium"), (None, ["medium"] * len(x264)))
         used, x264_fast = presets(proj, "--fast")
         self.assertIsNone(used, "--fast decides every stage's preset, not --intermediate-preset")

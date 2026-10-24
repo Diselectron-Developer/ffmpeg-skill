@@ -45,6 +45,7 @@ exists. When a decision changes, edit the entry in the same PR.
 - [2.11.0–2.12.0 — nothing happens silently](#21102120--nothing-happens-silently)
 - [2.14.0 — the FFmpeg 5.x deprecation](#2140--the-ffmpeg-5x-deprecation)
 - [2.15.0 — render.py's intermediate stages encode with veryfast](#2150--renderpys-intermediate-stages-encode-with-veryfast)
+- [2.16.0 — intermediates at superfast, not ultrafast](#2160--intermediates-at-superfast-not-ultrafast)
 <!-- contents:end -->
 
 ## Time limits
@@ -2082,3 +2083,13 @@ What was decided there:
   preset is part of each stage's arguments, so a `--cache` entry made at `medium` is not reused
   for a `veryfast` run. Code: `render.sh()`, `INTERMEDIATE`. Test:
   `test_render_intermediate_stages_use_veryfast_only_before_an_encoding_export`.
+
+## 2.16.0 — intermediates at superfast, not ultrafast
+
+- **`superfast` is the default intermediate preset; `ultrafast` is not.** Measured on a 30 s
+  1080p reels render, with SSIM against a lossless reference of the same frame and captions:
+  veryfast 33 s / 0.9863, superfast 30 s / 0.9868, ultrafast 26 s / 0.9814 (FFmpeg 8.0.1; on 6.1
+  veryfast and superfast took the same time). superfast loses nothing the export keeps.
+  ultrafast's last 4 s cost a visible step in quality, which the export cannot win back.
+  Test: `test_render_intermediate_stages_use_veryfast_only_before_an_encoding_export` (its name
+  is from 2.15; it asserts the current default).
