@@ -1190,7 +1190,10 @@ def main() -> int:
     # unchanged -- it never gets a --platform it did not ask for.
     dest = str(((proj.get("check") or {}).get("platform") or "")) if proj.get("template") else ""
     platform_args: List[str] = ["--platform", dest] if dest in PLATFORMS and PLATFORMS[dest].get("frame") else []
-    ex_preset = str((proj.get("export") or {}).get("preset") or "")
+    ex_cfg = proj.get("export")
+    # a malformed "export" is refused by the export stage with its own message; here it only means
+    # "no encoding export", never a traceback before that refusal
+    ex_preset = str(ex_cfg.get("preset") or "") if isinstance(ex_cfg, dict) else ""
     if (ex_preset and "copy" not in PRESETS.get(ex_preset, {}).get("video", [])
             and args.stop_after in (None, "export") and args.intermediate_preset != "medium"):
         INTERMEDIATE["preset"] = args.intermediate_preset
