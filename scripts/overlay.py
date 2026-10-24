@@ -144,21 +144,26 @@ def per_line_drawtext(lines: List[str], x: str, y: str, font_opt: str, args: arg
     return ",".join(filters)
 
 
-def parse_placements(specs: List[str], fps: Optional[float]) -> List[tuple]:
+# one time inside --place: seconds, mm:ss, hh:mm:ss.ms or hh:mm:ss:ff with an optional @fps
+# suffix (the time grammar's own); times are never negative, so '-' only separates the range
+_PLACE_TIME = r"[^@\-]+(?:@[0-9.]+)?"
+
+
+def parse_placements(specs: List[str], main_fps: Optional[float], layer_fps: Optional[float]) -> List[tuple]:
     """--place SRC_START-SRC_END@AT -> [(src_start, src_end, at)], refusing empty, negative or
-    overlapping placements (two pieces on screen at once would stack in an order nobody asked for)."""
+    overlapping placements (two pieces on screen at once would stack in an order nobody asked for).
+    SRC_START/SRC_END are positions in the layer, so an hh:mm:ss:ff timecode there counts the
+    layer's frames; AT is a position on the main timeline and counts the main video's."""
     out = []
     for spec in specs:
-        m = re.fullmatch(r"\s*([^@]+?)-([^@]+?)@(.+?)\s*", spec)
+        m = re.fullmatch(rf"\s*({_PLACE_TIME})-({_PLACE_TIME})@({_PLACE_TIME})\s*", spec)
         if not m:
-            die(f"--place {spec!r}: use SRC_START-SRC_END@AT, e.g. 0-2.5@12")
-        a = time_arg(m.group(1), "--place", fps)
-        b = time_arg(m.group(2), "--place", fps)
-        at = time_arg(m.group(3), "--place", fps)
+            die(f"--place {spec!r}: use SRC_START-SRC_END@AT, e.g. 0-2.5@12 (times are not negative)")
+        a = time_arg(m.group(1), "--place", layer_fps)
+        b = time_arg(m.group(2), "--place", layer_fps)
+        at = time_arg(m.group(3), "--place", main_fps)
         if b <= a:
             die(f"--place {spec!r}: the layer range ends before it starts")
-        if a < 0 or at < 0:
-            die(f"--place {spec!r}: times cannot be negative")
         out.append((a, b, at))
     spans = sorted((at, at + (b - a)) for a, b, at in out)
     for (s1, e1), (s2, _e2) in zip(spans, spans[1:]):
@@ -335,10 +340,9 @@ def main() -> int:
         die("--chromakey-similarity must be within (0, 1]")
     if not 0 <= args.chromakey_blend <= 1:
         die("--chromakey-blend must be within 0..1")
-    placements = parse_placements(args.place, fps) if args.place else []
-    if placements and not args.video:
+    if args.place and not args.video:
         die("--place needs --video")
-    if placements and (args.start or args.end or args.fade):
+    if args.place and (args.start or args.end or args.fade):
         die("--place sets when each piece shows: drop --start / --end / --fade")
 
     output = args.output or default_output(args.input, "overlay")
@@ -391,9 +395,17 @@ def main() -> int:
         pip_meta = probe(args.video)
         if not pip_meta.get("video"):
             die(f"--video {args.video} has no video stream")
-        layer_dur, main_dur = pip_meta.get("duration"), meta.get("duration")
+        layer_fps = pip_meta["video"].get("fps")
+        placements = parse_placements(args.place, fps, layer_fps) if args.place else []
+        # bounds from the video streams (a longer audio track would let a range run past the last
+        # picture); the container duration only when a stream has none
+        layer_dur = pip_meta["video"].get("duration") or pip_meta.get("duration")
+        main_dur = meta["video"].get("duration") or meta.get("duration")
+        # half a layer frame of slack absorbs a hand-typed end that rounds the last frame's end
+        # (2.033 for 61 frames at 30 fps); anything longer asks for pictures the layer does not have
+        slack = 0.5 / layer_fps if layer_fps else 0.02
         for a, b, at in placements:
-            if layer_dur and b > layer_dur + 0.05:
+            if layer_dur and b > layer_dur + slack:
                 die(f"--place {a:g}-{b:g}@{at:g}: the layer is only {layer_dur:.3f} s long")
             if main_dur and at >= main_dur:
                 die(f"--place {a:g}-{b:g}@{at:g}: starts after the main video ends ({main_dur:.3f} s)")

@@ -1557,8 +1557,11 @@ the layer is hidden and the main picture is untouched. One pass lays several
 pieces of one layer at their own times -- e.g. graphics rendered back to back
 (only the seconds that have graphics) and placed where each belongs:
 `--video cues.mov --position 0,0 --margin 0 --place 0-2.5@12 --place 2.5-6@40`.
+An `hh:mm:ss:ff` timecode counts the layer's frames in `SRC_START-SRC_END` and
+the main video's in `AT` (an `@fps` suffix names the rate explicitly).
 Refused (`kind: input`): a range that ends before it starts, negative times,
-two pieces overlapping on the main timeline, a range past the layer's end, a
+two pieces overlapping on the main timeline, a range past the layer's last
+picture (by more than half a frame), a
 piece starting after the main video ends, `--place` without `--video`, and
 `--place` with `--start`/`--end`/`--fade` (the placements already say when).
 
