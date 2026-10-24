@@ -405,6 +405,10 @@ def main() -> int:
         # (2.033 for 61 frames at 30 fps); anything longer asks for pictures the layer does not have
         slack = 0.5 / layer_fps if layer_fps else 0.02
         for a, b, at in placements:
+            if layer_dur and a >= layer_dur:
+                # the slack below is for an end rounded past the last frame; a start there selects
+                # no picture at all and the "placed" piece would silently never show
+                die(f"--place {a:g}-{b:g}@{at:g}: starts at or after the layer's end ({layer_dur:.3f} s)")
             if layer_dur and b > layer_dur + slack:
                 die(f"--place {a:g}-{b:g}@{at:g}: the layer is only {layer_dur:.3f} s long")
             if main_dur and at >= main_dur:
@@ -434,7 +438,9 @@ def main() -> int:
             # each placed piece: its range of the layer, re-timed to start at AT; eof_action=pass shows
             # the main picture untouched once a piece ends (the default would freeze its last frame)
             pieces = len(placements)
-            fc = f"[1:v]{pip}{','.join(chain)},split={pieces}" + "".join(f"[p{i}]" for i in range(pieces)) + ";"
+            # trim selects by timestamp: start the layer's at 0 so SRC_START/SRC_END count from its
+            # first picture even when its video stream starts later than the file (audio first)
+            fc = f"[1:v]setpts=PTS-STARTPTS,{pip}{','.join(chain)},split={pieces}" + "".join(f"[p{i}]" for i in range(pieces)) + ";"
             for i, (a, b, at) in enumerate(placements):
                 fc += f"[p{i}]trim=start={a:.6f}:end={b:.6f},setpts=PTS-STARTPTS+{at:.6f}/TB[q{i}];"
             prev = f"[0:v]{base}null[m]" if base else None
