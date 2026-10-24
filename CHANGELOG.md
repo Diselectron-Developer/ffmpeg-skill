@@ -6,7 +6,7 @@
 
 ### Changed
 
-- **`render.py` encodes the stages before an encoding export with x264 `veryfast`** (`--intermediate-preset`, default `veryfast`; `medium` restores the old behaviour). export.py re-encodes them and its own preset sets the delivered quality, so a 30 s 1080p reels render took 41.7 s instead of 51.8 s on FFmpeg 8.0.1, with SSIM 0.997 between the two deliveries. Not applied without an export stage, with `--stop-after` before it, with `--fast`, or for a `copy` export; the result reports `intermediate_preset`.
+- **`render.py` encodes the stages before an encoding export with x264/x265 `veryfast`** (`--intermediate-preset`, default `veryfast`; `medium` restores the old behaviour). export.py re-encodes them and its own preset sets the delivered quality, so a 30 s 1080p reels render took 41.7 s instead of 51.8 s on FFmpeg 8.0.1, with SSIM 0.997 between the two deliveries. Not applied without an export stage, with `--stop-after` before it, with `--fast`, or for a `copy` export; the result reports `intermediate_preset`.
 
 ## 2.14.0
 

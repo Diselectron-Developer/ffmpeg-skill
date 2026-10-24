@@ -717,12 +717,12 @@ render.py project.json [--fast] [--dry-run] [--stop-after STAGE] [--work DIR --k
 render.py project.json --cache DIR [--from STAGE]    # reuse identical stages from a previous run
 render.py plan.json [--audit-log FILE]       # execute a plan written by <tool> --plan plan.json
 render.py project.json --export-timeline edit.fcpxml|edit.edl|edit.otio   # the cut for an editor, nothing rendered
-render.py project.json --intermediate-preset medium   # the stages' own x264 preset instead of veryfast
+render.py project.json --intermediate-preset medium   # the stages' own encoder preset instead of veryfast
 ```
 `--intermediate-preset` (2.15, default `veryfast`): when the project has an export stage that
 re-encodes (any preset but `copy`) and the run goes that far (no `--stop-after` before it), the
-x264 stages before it (clips, fit, join, silence, captions, graphics, overlays, audiogram)
-encode with this preset instead of `medium`. export.py re-encodes their output and its own
+stages before it that encode with x264 or x265 (clips, fit, join, silence, captions, graphics,
+overlays, audiogram; x265 on the HDR path) encode with this preset instead of `medium`. export.py re-encodes their output and its own
 preset sets the delivered quality, so the earlier `medium` passes cost time the file does not
 keep: a 30 s 1080p reels render took 41.7 s instead of 51.8 s on FFmpeg 8.0.1 (SSIM 0.997
 between the two deliveries). `medium` restores the stages' default; `--fast` still overrides

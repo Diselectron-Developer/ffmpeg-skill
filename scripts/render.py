@@ -631,7 +631,8 @@ def _fresh_cache() -> "Dict[str, Any]":
 # inherit each other's hit/miss lists.
 CACHE: Dict[str, Any] = _fresh_cache()
 
-# The stages whose x264 encode is an intermediate when an encoding export follows: export.py
+# The stages whose x264 encode (x265 on the HDR path, which takes the same --preset) is an
+# intermediate when an encoding export follows: export.py
 # re-encodes their output, so their own `medium` pass bought nothing the delivery keeps. Measured
 # on a 30 s 1080p reels render (4 cores): fit 18 s and captions 27 s of a 70 s run at `medium`;
 # `veryfast` at the same CRF encodes in about half the time (SSIM 0.997 against `medium`) and
@@ -1056,7 +1057,7 @@ def main() -> int:
                          "default for a refused plan: <plan>.audit.jsonl next to it. A record that cannot be written is a "
                          "warning, never a failure")
     ap.add_argument("--intermediate-preset", default="veryfast", choices=X264_PRESETS,
-                    help="x264 preset of the stages before an encoding export (default veryfast: the export "
+                    help="x264/x265 preset of the stages before an encoding export (default veryfast: the export "
                          "re-encodes them, and its own preset sets the delivered quality); medium = the stages' own default. "
                          "Not used without an export stage, with --stop-after before it, with --fast, or for a copy export")
     ap.add_argument("--stop-after", choices=["clips", "join", "silence", "fit", "captions", "graphics", "overlays", "audio", "loudness", "export"], help="stop after this stage (for iterating)")
@@ -1198,7 +1199,7 @@ def main() -> int:
     if (ex_preset and "copy" not in PRESETS.get(ex_preset, {}).get("video", [])
             and args.stop_after in (None, "export") and args.intermediate_preset != "medium" and not STATE.fast):
         INTERMEDIATE["preset"] = args.intermediate_preset
-        info(f"intermediate stages: x264 {args.intermediate_preset} (export.py {ex_preset} re-encodes them; "
+        info(f"intermediate stages: preset {args.intermediate_preset} (export.py {ex_preset} re-encodes them; "
              "--intermediate-preset medium for the stages' own default)")
     stages_done: List[str] = []
     # what the caption stage reported (wrapped/split counts and the fit-size keys), so a caller

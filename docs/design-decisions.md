@@ -2071,7 +2071,8 @@ What was decided there:
 
 ## 2.15.0 — render.py's intermediate stages encode with veryfast
 
-- **Only a stage whose output an encoding export re-encodes gets the faster preset.** What a
+- **Only a stage whose output an encoding export re-encodes gets the faster preset.** (x265 on
+  the HDR path takes the same `--preset` and the same reasoning.) What a
   caller keeps is export.py's encode, at its own preset; an x264 stage before it at `medium`
   spent about twice the time for detail the export re-encodes anyway. Measured on a 30 s 1080p
   reels render: 51.8 s → 41.7 s on FFmpeg 8.0.1, SSIM 0.997 between the two deliveries. Without
