@@ -545,7 +545,7 @@ def sh(script: str, *argv: Any, extra: List[str] = None, stage: str = None) -> s
     cache instead of re-encoded. `stages_done` is unchanged either way: a cached stage is still
     a stage that happened.
     """
-    if (INTERMEDIATE["preset"] and script in _X264_STAGES and not STATE.fast
+    if (INTERMEDIATE["preset"] and script in _X264_STAGES
             and "--preset" not in [str(a) for a in argv] + (extra or [])):
         extra = (extra or []) + ["--preset", INTERMEDIATE["preset"]]
     full = [str(a) for a in argv] + (extra or [])
@@ -1195,7 +1195,7 @@ def main() -> int:
     # "no encoding export", never a traceback before that refusal
     ex_preset = str(ex_cfg.get("preset") or "") if isinstance(ex_cfg, dict) else ""
     if (ex_preset and "copy" not in PRESETS.get(ex_preset, {}).get("video", [])
-            and args.stop_after in (None, "export") and args.intermediate_preset != "medium"):
+            and args.stop_after in (None, "export") and args.intermediate_preset != "medium" and not STATE.fast):
         INTERMEDIATE["preset"] = args.intermediate_preset
         info(f"intermediate stages: x264 {args.intermediate_preset} (export.py {ex_preset} re-encodes them; "
              "--intermediate-preset medium for the stages' own default)")

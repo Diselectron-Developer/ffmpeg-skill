@@ -1031,6 +1031,7 @@ class OrchestrationTests(MediaFixtures):
         self.assertTrue(x264[:-1] and set(x264[:-1]) == {"veryfast"}, x264)
         self.assertEqual(presets(proj, "--intermediate-preset", "medium"), (None, ["medium"] * len(x264)))
         used, x264_fast = presets(proj, "--fast")
+        self.assertIsNone(used, "--fast decides every stage's preset, not --intermediate-preset")
         self.assertEqual(set(x264_fast), {"veryfast"})
         used, x264_stop = presets(proj, "--stop-after", "captions")
         self.assertIsNone(used)
