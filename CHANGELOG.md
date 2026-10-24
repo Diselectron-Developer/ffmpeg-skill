@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.14.0
+
+_Automated release: version and notes generated from pull requests merged since 2.13.0._
+
 ### Deprecated
 
 - **Running on FFmpeg 5.x.** It still works in 2.x: `requirements.ffmpeg` stays `>=5.0` and CI keeps its 5.1.1 job. 3.0.0 requires FFmpeg 6.1. On a 5.x build, `doctor` and the `npx` installer print one stderr warning, and `contract --json`'s `deprecated` lists it.
+- Deprecate FFmpeg 5.x: doctor and the installer warn; 3.0 requires 6.1 (#354)
 
 ## 2.13.0
 
