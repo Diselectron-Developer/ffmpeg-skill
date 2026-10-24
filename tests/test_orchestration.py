@@ -1033,6 +1033,8 @@ class OrchestrationTests(MediaFixtures):
         used, x264_fast = presets(proj, "--fast")
         self.assertIsNone(used, "--fast decides every stage's preset, not --intermediate-preset")
         self.assertEqual(set(x264_fast), {"veryfast"})
+        doc_stop = json.loads(script("render.py", proj, "--dry-run", "--json", "--stop-after", "captions").stdout)
+        self.assertIn("intermediate_preset", doc_stop, "an early stop reports the key too, as null")
         used, x264_stop = presets(proj, "--stop-after", "captions")
         self.assertIsNone(used)
         self.assertEqual(set(x264_stop), {"medium"}, "a --stop-after output is what the caller keeps")

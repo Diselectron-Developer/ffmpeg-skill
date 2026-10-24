@@ -1332,7 +1332,7 @@ def main() -> int:
         stages_done.append("audiogram")
 
     if args.stop_after == "clips":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- join
@@ -1348,7 +1348,7 @@ def main() -> int:
         sh("join.py", *argv, stage="join")
         stages_done.append("join")
     if args.stop_after == "join":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- silence
@@ -1363,7 +1363,7 @@ def main() -> int:
         current = nxt
         stages_done.append("silence")
     if args.stop_after == "silence":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- fit (duration and/or frame)
@@ -1400,7 +1400,7 @@ def main() -> int:
         current = nxt
         stages_done.append("fit")
     if args.stop_after == "fit":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- captions
@@ -1429,7 +1429,7 @@ def main() -> int:
         current = nxt
         stages_done.append("captions")
     if args.stop_after == "captions":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- graphics
@@ -1448,7 +1448,7 @@ def main() -> int:
         if "graphics" not in stages_done:
             stages_done.append("graphics")
     if args.stop_after == "graphics":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- overlays
@@ -1479,7 +1479,7 @@ def main() -> int:
         if "overlays" not in stages_done:
             stages_done.append("overlays")
     if args.stop_after == "overlays":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- audio
@@ -1516,7 +1516,7 @@ def main() -> int:
         current = nxt
         stages_done.append("audio")
     if args.stop_after == "audio":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- loudness
@@ -1532,7 +1532,7 @@ def main() -> int:
         current = nxt
         stages_done.append("loudness")
     if args.stop_after == "loudness":
-        emit(current, stages=stages_done)
+        emit(current, stages=stages_done, intermediate_preset=INTERMEDIATE["preset"])
         return 0
 
     # ---- export
