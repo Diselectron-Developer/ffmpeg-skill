@@ -576,6 +576,9 @@ def output_schema(name: str, meta: Dict[str, Any], hw: bool = False) -> Dict[str
     elif name == "render":
         extra = {"stages": {"type": "array", "items": {"type": "string"}}, "check": {"type": ["object", "null"], "description": "check.py's document for a \"check\" stage with a platform, \"content\": true, or both; when check.py printed none, a failure document with error.reason check_output_unparsed"},
                  "cache": {"type": ["object", "null"], "description": "--cache: {dir, ffmpeg, hits, misses, miss_reasons: [{stage, reason: not_cached|sidecar_missing|artifact_missing|sidecar_corrupt|artifact_truncated|no_output_path, ...}], saved_seconds, entries, would_hit (--dry-run)}"},
+                 "caption": {"type": ["object", "null"], "description": "the caption stage's own block, forwarded verbatim from caption.py (cue-layout counts and fit-size keys); null without a caption stage"},
+                 "snap": {"type": ["object", "null"], "description": "a project's \"snap\": cut.py's snap block for the first snapped clip, with every clip's in clips; null when nothing was snapped"},
+                 "intermediate_preset": {"type": ["string", "null"], "description": "2.15: the x264/x265 preset the stages before an encoding export ran at (--intermediate-preset, default superfast since 2.16); null when no stage received it (no encoding export reached, --fast, --stop-after before the export, a copy export, or nothing but the export encoded)"},
                  "notes": {"type": "array", "items": {"type": "string"}, "description": "each stage's own notes, prefixed with its tool (\"export: loudness ... is outside x's ...\")"},
                  "plan": {"type": "string", "description": "when the argument was a plan.json (written by <tool> --plan): its path"},
                  "plan_sha256": {"type": ["string", "null"], "description": "plan execution: sha256 of the plan file as executed"},

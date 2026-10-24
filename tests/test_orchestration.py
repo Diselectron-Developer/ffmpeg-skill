@@ -1011,6 +1011,19 @@ class OrchestrationTests(MediaFixtures):
         self.assertEqual(plan["status"], "completed")
         self.assertIn("export", plan["stages"])
 
+    def test_render_result_keys_are_declared_in_the_contract(self):
+        """Every key a render result carries is in contract --json's render output_schema (the
+        contract is the authority on result fields): a full template run and an early stop."""
+        sys.path.insert(0, str(SCRIPTS))
+        import _contract
+        tool = [t for t in _contract.build(detect=False)["tools"] if t["name"] == "render"][0]
+        declared = set(tool["output_schema"]["properties"])
+        for extra in ([], ["--stop-after", "fit"]):
+            with self.subTest(extra=extra):
+                doc = json.loads(script("render.py", self.src, "--template", "reels", "--cues", self.cues,
+                                        "-o", OUT / "rk_out.mp4", "--dry-run", "--json", *extra).stdout)
+                self.assertEqual(sorted(set(doc) - declared), [])
+
     def test_render_intermediate_stages_use_veryfast_only_before_an_encoding_export(self):
         """2.15: the x264 stages before an encoding export run at --intermediate-preset (default
         superfast since 2.16): export.py re-encodes them and its own preset sets the delivered quality. Kept
