@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Fixed
+
+- **`contract --json` declares every key a `render.py` result carries.** `intermediate_preset` (2.15), `caption` and `snap` were in docs/contract.md but missing from render's `output_schema`. A test now runs a template render, both whole and with an early `--stop-after`, and fails on any result key the contract does not declare.
 
 ## 2.16.0
 
