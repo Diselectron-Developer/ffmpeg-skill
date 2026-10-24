@@ -448,6 +448,16 @@ python3 scripts/overlay.py demos/out/greenscreen_plate.mp4 --video demos/out/fix
 
 **Look for:** background.py draws the gradient plate from nothing (there is no input file), then overlay.py keys the chroma green out of the subject and composites it on top.
 
+### Pieces of one layer at their own times
+
+![Pieces of one layer at their own times](demos/overlay_place.gif)
+
+```bash
+python3 scripts/overlay.py demos/out/fixtures/motion.mp4 --video demos/out/fixtures/mandel.mp4 --position bottom-right --scale 480 --place 0-1.5@0.5 --place 4-5.5@3.5 --preset veryfast -o demos/out/overlay_place_after.mp4
+```
+
+**Look for:** overlay.py --place lays two ranges of the fractal clip on the test pattern: its first 1.5 s at 0.5 s, its 4-5.5 s at 3.5 s. Between them the layer is hidden and the main picture is untouched -- one pass, no full-length mostly-transparent layer to render first.
+
 ### Apply a .cube LUT
 
 ![Apply a .cube LUT](demos/color_lut.gif)

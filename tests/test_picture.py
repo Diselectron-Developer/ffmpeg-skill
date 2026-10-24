@@ -2102,6 +2102,88 @@ class PictureTests(MediaFixtures):
         self.assertGreater(px(out, 10, 10)[0], 100, "keyed-out green should show the red background through it")
         self.assertGreater(min(px(out, 45, 45)), 100, "the white square inside the green should be unaffected")
 
+    def test_overlay_place_lays_layer_ranges_at_their_times(self):
+        """--place SRC_START-SRC_END@AT shows only that range of the layer, from AT on the main
+        timeline, and the main picture untouched elsewhere: a 4 s layer whose first half is blue and
+        second half green, placed 2-3@1 (green at 1-2 s) and 0-1@4 (blue at 4-5 s) on a 6 s red main."""
+        main = OUT / "place_main.mp4"
+        layer = OUT / "place_layer.mov"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=160x90:r=30:d=6",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", main)
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=160x90:r=30:d=2",
+           "-f", "lavfi", "-i", "color=c=0x00ff00:s=160x90:r=30:d=2", "-filter_complex", "[0][1]concat=n=2:v=1:a=0",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", layer)
+        out = OUT / "placed.mp4"
+        doc = json.loads(script("overlay.py", main, "--video", layer, "--position", "0,0", "--margin", "0",
+                                "--place", "2-3@1", "--place", "0-1@4", "--json", "-o", out).stdout)
+        self.assertEqual(doc["status"], "completed")
+        self.assertAlmostEqual(probe(str(out))["duration"], 6.0, delta=0.1)
+
+        def rgb_at(t):
+            r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(t), "-i", str(out),
+                                "-vf", "crop=4:4:40:40", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return tuple(r.stdout[:3])
+
+        def dominant(t):
+            return "rgb"[max(range(3), key=lambda i: rgb_at(t)[i])]
+
+        self.assertEqual([dominant(t) for t in (0.5, 1.5, 2.5, 4.5, 5.5)], ["r", "g", "r", "b", "r"])
+
+    def test_overlay_place_counts_from_the_layer_s_first_picture(self):
+        """A layer whose video starts a second after its audio (and so after the file's 0): `0-1`
+        is its first second of picture, not the second of silence before it."""
+        main = OUT / "place_late_main.mp4"
+        layer = OUT / "place_late_layer.mkv"   # Matroska keeps the late start (an MP4 edit list would hide it)
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=160x90:r=30:d=4",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", main)
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=160x90:r=30:d=2",
+           "-f", "lavfi", "-i", "sine=d=3", "-vf", "setpts=PTS+1/TB",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", layer)
+        out = OUT / "place_late.mp4"
+        script("overlay.py", main, "--video", layer, "--position", "0,0", "--margin", "0",
+               "--place", "0-1@1", "-o", out)
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", "1.5", "-i", str(out),
+                            "-vf", "crop=4:4:40:40", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertGreater(r.stdout[2], r.stdout[0], "the layer's first second (blue) should show at 1-2 s")
+
+    def test_overlay_place_refusals(self):
+        layer = OUT / "place_ref_layer.mp4"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=30:d=2",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", layer)
+        long_audio = OUT / "place_ref_long_audio.mp4"   # 2 s of picture, 4 s of sound
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=30:d=2",
+           "-f", "lavfi", "-i", "sine=d=4", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", long_audio)
+        for args in (["--video", layer, "--place", "0-1@1", "--place", "0.5-1.5@1.5"],
+                     ["--video", long_audio, "--place", "0-3@0"],                         # past the layer's picture   # overlap on the main timeline
+                     ["--video", layer, "--place", "0-5@0"],                              # past the layer's end
+                     ["--video", layer, "--place", "2-2.01@1"],                           # starts at the layer's end
+                     ["--video", layer, "--place", "0-2.04@0"],                           # 0.04 s past it: over half a frame
+                     ["--video", layer, "--place", "1-0.5@0"],                            # backwards range
+                     ["--video", layer, "--place", "0-1"],                                # no @AT
+                     ["--video", layer, "--place", "0-1@0", "--start", "1"],              # with --start
+                     ["--image", self.logo, "--place", "0-1@0"]):                         # without --video
+            with self.subTest(args=args):
+                proc = script("overlay.py", self.src, *args, "--json", "-o", OUT / "place_ref.mp4", expect_fail=True)
+                self.assertEqual(json.loads(proc.stdout)["error"]["kind"], "input")
+
+    def test_overlay_place_timecodes_count_each_timeline_s_frames(self):
+        """SRC_START/SRC_END are layer positions, so hh:mm:ss:ff there counts the layer's frames;
+        AT counts the main video's. An @fps suffix in any of the three names its rate explicitly."""
+        layer = OUT / "place_24.mp4"
+        sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:r=24:d=3",
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", layer)
+        main_fps = probe(str(self.src))["video"]["fps"]
+        for spec, want in (("00:00:00:12-00:00:01:00@00:00:00:00", "trim=start=0.500000:end=1.000000"),
+                           ("00:00:00:12@25-2@1", "trim=start=0.480000:end=2.000000"),
+                           ("0-1@00:00:00:15@30", "setpts=PTS-STARTPTS+0.500000/TB")):
+            with self.subTest(spec=spec):
+                doc = json.loads(script("overlay.py", self.src, "--video", layer, "--place", spec, "--dry-run",
+                                        "--json", "-o", OUT / "place_tc.mp4").stdout)
+                self.assertIn(want, doc["commands"][0])
+        self.assertNotEqual(round(main_fps), 24, "the main fixture must not share the layer's rate")
+
     def test_overlay_chromakey_without_video_refused(self):
         script("overlay.py", self.src, "--chromakey", "green", expect_fail=True)
 

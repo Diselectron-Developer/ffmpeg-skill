@@ -8,6 +8,15 @@
 
 - **Running on FFmpeg 5.x.** It still works in 2.x: `requirements.ffmpeg` stays `>=5.0` and CI keeps its 5.1.1 job. 3.0.0 requires FFmpeg 6.1. On a 5.x build, `doctor` and the `npx` installer print one stderr warning, and `contract --json`'s `deprecated` lists it.
 
+## 2.13.0
+
+_Automated release: version and notes generated from pull requests merged since 2.12.1._
+
+### Added
+
+- **`overlay.py --place SRC_START-SRC_END@AT`** (with `--video`, repeatable): show that range of the layer starting at `AT` on the main timeline, hidden elsewhere. One pass lays several pieces of one layer at their own times -- graphics rendered back to back (only the seconds that have any) placed where each belongs -- instead of a full-length mostly-transparent layer. Overlapping pieces, ranges past the layer's end, and `--start`/`--end`/`--fade` alongside are refused.
+- overlay.py --place: lay ranges of a video layer at chosen times in one pass (#353)
+
 ## 2.12.1
 
 _Automated release: version and notes generated from pull requests merged since 2.12.0._
