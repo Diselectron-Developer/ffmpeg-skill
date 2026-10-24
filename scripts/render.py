@@ -74,7 +74,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from export import PRESETS, PLATFORM_OF
 from _platforms import PLATFORMS, caption_defaults, resolve as resolve_platform
-from _common import STATE, add_common, aspect_ratio, brand_caption_style, load_brand, apply_common, child_args, die, emit, info, probe, require_tool, run, run_tool, place_output, refuse_output_is_input, _check_existing_output, _check_output_path, fingerprint, PLAN_VERSION, ffmpeg_version, ffmpeg_exe
+from _common import STATE, add_common, aspect_ratio, brand_caption_style, load_brand, apply_common, child_args, die, emit, info, probe, require_tool, run, run_tool, place_output, refuse_output_is_input, _check_existing_output, _check_output_path, fingerprint, PLAN_VERSION, ffmpeg_version, ffmpeg_exe, X264_PRESETS
 from _common.runner import HW_ENV, HW_FORCED_ENV, add_hw_orchestrator_args
 from _common.emit import absorb_stage, audit, record_fallback, record_skip, refuse, warn
 import subprocess
@@ -545,6 +545,9 @@ def sh(script: str, *argv: Any, extra: List[str] = None, stage: str = None) -> s
     cache instead of re-encoded. `stages_done` is unchanged either way: a cached stage is still
     a stage that happened.
     """
+    if (INTERMEDIATE["preset"] and script in _X264_STAGES and not STATE.fast
+            and "--preset" not in [str(a) for a in argv] + (extra or [])):
+        extra = (extra or []) + ["--preset", INTERMEDIATE["preset"]]
     full = [str(a) for a in argv] + (extra or [])
     dest = full[full.index("-o") + 1] if "-o" in full[:-1] else None
     key = None
@@ -626,6 +629,14 @@ def _fresh_cache() -> "Dict[str, Any]":
 # resets it on entry, so two renders in one process (a test session, an embedding caller) do not
 # inherit each other's hit/miss lists.
 CACHE: Dict[str, Any] = _fresh_cache()
+
+# The stages whose x264 encode is an intermediate when an encoding export follows: export.py
+# re-encodes their output, so their own `medium` pass bought nothing the delivery keeps. Measured
+# on a 30 s 1080p reels render (4 cores): fit 18 s and captions 27 s of a 70 s run at `medium`;
+# `veryfast` at the same CRF encodes in about half the time (SSIM 0.997 against `medium`) and
+# the export, still `medium`, sets the delivered quality. `--intermediate-preset medium` restores it.
+_X264_STAGES = frozenset({"cut.py", "fit.py", "join.py", "silence.py", "caption.py", "graphics.py", "overlay.py", "waveform.py"})
+INTERMEDIATE: Dict[str, Optional[str]] = {"preset": None}
 
 
 def _content_hash(path: str) -> str:
@@ -1043,6 +1054,10 @@ def main() -> int:
                     help="append the audit records of this run (a refused plan, a lock taken over, ...) to FILE as JSON lines; "
                          "default for a refused plan: <plan>.audit.jsonl next to it. A record that cannot be written is a "
                          "warning, never a failure")
+    ap.add_argument("--intermediate-preset", default="veryfast", choices=X264_PRESETS,
+                    help="x264 preset of the stages before an encoding export (default veryfast: the export "
+                         "re-encodes them, and its own preset sets the delivered quality); medium = the stages' own default. "
+                         "Not used without an export stage, with --stop-after before it, with --fast, or for a copy export")
     ap.add_argument("--stop-after", choices=["clips", "join", "silence", "fit", "captions", "graphics", "overlays", "audio", "loudness", "export"], help="stop after this stage (for iterating)")
     tpl = ap.add_argument_group("delivery templates (one command per destination)")
     tpl.add_argument("--template", metavar="NAME", help="render INPUT with a shipped template: " + ", ".join(template_names())
@@ -1175,6 +1190,12 @@ def main() -> int:
     # unchanged -- it never gets a --platform it did not ask for.
     dest = str(((proj.get("check") or {}).get("platform") or "")) if proj.get("template") else ""
     platform_args: List[str] = ["--platform", dest] if dest in PLATFORMS and PLATFORMS[dest].get("frame") else []
+    ex_preset = str((proj.get("export") or {}).get("preset") or "")
+    if (ex_preset and "copy" not in PRESETS.get(ex_preset, {}).get("video", [])
+            and args.stop_after in (None, "export") and args.intermediate_preset != "medium"):
+        INTERMEDIATE["preset"] = args.intermediate_preset
+        info(f"intermediate stages: x264 {args.intermediate_preset} (export.py {ex_preset} re-encodes them; "
+             "--intermediate-preset medium for the stages' own default)")
     stages_done: List[str] = []
     # what the caption stage reported (wrapped/split counts and the fit-size keys), so a caller
     # reading render.py's JSON can see whether the type was shrunk to fit or a cue was split.
@@ -1612,7 +1633,7 @@ def main() -> int:
         snap_report = dict(snap_reports[0])
         snap_report["clips"] = snap_reports
     emit(output, stages=stages_done, check=check_result, snap=snap_report, cache=cache_report,
-         caption=caption_report,
+         caption=caption_report, intermediate_preset=INTERMEDIATE["preset"],
          verification=[{"step": "check", "ok": True, "platform": ck.get("platform")}] if check_result else [])
     return 0
 

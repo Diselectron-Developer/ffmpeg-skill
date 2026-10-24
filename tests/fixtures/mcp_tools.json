@@ -915,6 +915,7 @@
    "hw",
    "image",
    "init",
+   "intermediate_preset",
    "json_brief",
    "keep",
    "list_templates",

@@ -301,7 +301,8 @@ the contact sheet (`--sheet`) before treating the picks as final.
 Anything chained by hand through three re-encodes should be one `render.py`
 project instead, so the plan is one file and the user can change one number.
 Re-encodes use x264 `medium`; for long files add `--preset veryfast` to
-intermediates and keep the default for the final export. On Apple Silicon,
+intermediates and keep the default for the final export. `render.py` does that by itself since
+2.15 when its project ends in an encoding export (`--intermediate-preset medium` turns it off). On Apple Silicon,
 `--hw` (or `FFMPEG_SKILL_HW=1` for the machine) moves h264/hevc/prores encodes to
 VideoToolbox: 2–7× faster, 1.1–2.9× the bytes at the same quality (1.9–3.5× on HDR). The variable
 leaves `export.py`'s delivery presets on the CPU, which is the usual split (GPU

@@ -44,6 +44,7 @@ exists. When a decision changes, edit the entry in the same PR.
 - [2.10.9 — doctor's FFmpeg advisory and the Python 3.9 deprecation](#2109--doctors-ffmpeg-advisory-and-the-python-39-deprecation)
 - [2.11.0–2.12.0 — nothing happens silently](#21102120--nothing-happens-silently)
 - [2.14.0 — the FFmpeg 5.x deprecation](#2140--the-ffmpeg-5x-deprecation)
+- [2.15.0 — render.py's intermediate stages encode with veryfast](#2150--renderpys-intermediate-stages-encode-with-veryfast)
 <!-- contents:end -->
 
 ## Time limits
@@ -2067,3 +2068,16 @@ What was decided there:
   reads 5.x, never a key in `doctor --json` and never a failure. A git snapshot's version is not a
   release number and gets no line, the same rule as the security advisory. Tests:
   `test_ffmpeg_5_is_deprecated_on_every_surface`, `test_doctor_prints_the_ffmpeg_5_warning_on_stderr_only`.
+
+## 2.15.0 — render.py's intermediate stages encode with veryfast
+
+- **Only a stage whose output an encoding export re-encodes gets the faster preset.** What a
+  caller keeps is export.py's encode, at its own preset; an x264 stage before it at `medium`
+  spent about twice the time for detail the export re-encodes anyway. Measured on a 30 s 1080p
+  reels render: 51.8 s → 41.7 s on FFmpeg 8.0.1, SSIM 0.997 between the two deliveries. Without
+  an export stage, with `--stop-after` before it, or with a `copy` export, a stage's output is
+  what the caller keeps, so it stays at the stage's own default. `--fast` (veryfast everywhere)
+  and a stage's own `--preset` still win, and `--intermediate-preset medium` turns it off. The
+  preset is part of each stage's arguments, so a `--cache` entry made at `medium` is not reused
+  for a `veryfast` run. Code: `render.sh()`, `INTERMEDIATE`. Test:
+  `test_render_intermediate_stages_use_veryfast_only_before_an_encoding_export`.
