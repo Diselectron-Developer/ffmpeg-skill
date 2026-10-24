@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.16.1
+
+_Automated release: version and notes generated from pull requests merged since 2.16.0._
+
 ### Fixed
 
 - **`contract --json` declares every key a `render.py` result carries.** `intermediate_preset` (2.15), `caption` and `snap` were in docs/contract.md but missing from render's `output_schema`. A test now runs a template render, both whole and with an early `--stop-after`, and fails on any result key the contract does not declare.
+- contract: render's output_schema declares intermediate_preset, caption and snap; README: remotion-ffmpeg-skill (#358)
 
 ## 2.16.0
 
