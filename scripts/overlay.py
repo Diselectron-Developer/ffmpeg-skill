@@ -7,7 +7,10 @@ bottom-right, or explicit "X,Y" pixels (negative counts from the far edge).
 
 --video composites a second VIDEO as a picture-in-picture layer (position,
 scale, opacity, time-range -- same knobs as --image), instead of a still
-image or text. Only the main input's audio is kept; the PiP layer's own
+image or text. --place SRC_START-SRC_END@AT (repeatable, with --video) shows only
+that range of the layer, starting at AT on the main timeline: one pass lays
+several pieces of a layer (say, graphics rendered back to back) at their own
+times, and the main picture shows untouched everywhere else. Only the main input's audio is kept; the PiP layer's own
 audio track, if any, is dropped -- mixing two audio tracks is a job for
 audio.py, not this tool. --chromakey COLOR (with --video) turns that colour
 transparent first (green-screen removal) before compositing.
@@ -19,6 +22,7 @@ Examples:
   python3 overlay.py input.mp4 --text "こんにちは" --font-file /path/NotoSansCJK-Bold.ttc --box
   python3 overlay.py input.mp4 --video webcam.mp4 --position bottom-right --scale 480 --opacity 0.9
   python3 overlay.py bg.mp4 --video greenscreen.mp4 --chromakey 0x00ff00 --chromakey-similarity 0.15
+  python3 overlay.py talk.mp4 --video cues.mov --position 0,0 --margin 0 --place 0-2.5@12 --place 2.5-6@40
 """
 import argparse
 import re
@@ -140,6 +144,29 @@ def per_line_drawtext(lines: List[str], x: str, y: str, font_opt: str, args: arg
     return ",".join(filters)
 
 
+def parse_placements(specs: List[str], fps: Optional[float]) -> List[tuple]:
+    """--place SRC_START-SRC_END@AT -> [(src_start, src_end, at)], refusing empty, negative or
+    overlapping placements (two pieces on screen at once would stack in an order nobody asked for)."""
+    out = []
+    for spec in specs:
+        m = re.fullmatch(r"\s*([^@]+?)-([^@]+?)@(.+?)\s*", spec)
+        if not m:
+            die(f"--place {spec!r}: use SRC_START-SRC_END@AT, e.g. 0-2.5@12")
+        a = time_arg(m.group(1), "--place", fps)
+        b = time_arg(m.group(2), "--place", fps)
+        at = time_arg(m.group(3), "--place", fps)
+        if b <= a:
+            die(f"--place {spec!r}: the layer range ends before it starts")
+        if a < 0 or at < 0:
+            die(f"--place {spec!r}: times cannot be negative")
+        out.append((a, b, at))
+    spans = sorted((at, at + (b - a)) for a, b, at in out)
+    for (s1, e1), (s2, _e2) in zip(spans, spans[1:]):
+        if s2 < e1 - 1e-6:
+            die(f"--place: pieces overlap on the main timeline ({s1:g}-{e1:g} s and from {s2:g} s)")
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
@@ -153,6 +180,10 @@ def main() -> int:
     src.add_argument("--text", help="text to draw (drawtext)")
     src.add_argument("--logo", action="store_true", help="composite the brand logo from --brand (position/scale/opacity from brand.json)")
     src.add_argument("--video", help="a second video to composite as a picture-in-picture layer")
+    ap.add_argument("--place", action="append", default=[], metavar="SRC_START-SRC_END@AT",
+                    help="with --video, repeatable: show this range of the layer starting at AT on the main "
+                         "timeline (e.g. 0-2.5@12); the layer is hidden outside its placed ranges. Times in "
+                         "seconds or HH:MM:SS. Not with --start/--end/--fade")
     ck = ap.add_argument_group("chroma key (with --video)")
     ck.add_argument("--chromakey", help="colour to key out (green-screen removal), e.g. 0x00ff00 or green")
     ck.add_argument("--chromakey-similarity", type=float, default=0.15, help="how close a pixel must be to --chromakey to become transparent, 0..1 (default 0.15)")
@@ -304,6 +335,11 @@ def main() -> int:
         die("--chromakey-similarity must be within (0, 1]")
     if not 0 <= args.chromakey_blend <= 1:
         die("--chromakey-blend must be within 0..1")
+    placements = parse_placements(args.place, fps) if args.place else []
+    if placements and not args.video:
+        die("--place needs --video")
+    if placements and (args.start or args.end or args.fade):
+        die("--place sets when each piece shows: drop --start / --end / --fade")
 
     output = args.output or default_output(args.input, "overlay")
     enable = enable_expr(start, end)
@@ -355,6 +391,12 @@ def main() -> int:
         pip_meta = probe(args.video)
         if not pip_meta.get("video"):
             die(f"--video {args.video} has no video stream")
+        layer_dur, main_dur = pip_meta.get("duration"), meta.get("duration")
+        for a, b, at in placements:
+            if layer_dur and b > layer_dur + 0.05:
+                die(f"--place {a:g}-{b:g}@{at:g}: the layer is only {layer_dur:.3f} s long")
+            if main_dur and at >= main_dur:
+                die(f"--place {a:g}-{b:g}@{at:g}: starts after the main video ends ({main_dur:.3f} s)")
         chain = []
         if args.scale_percent:
             chain.append(f"scale={int(vw * args.scale_percent / 100)}:-2")
@@ -376,8 +418,24 @@ def main() -> int:
         base, pip = matrix_chain(meta, meta), matrix_chain(pip_meta, meta)
         if base or pip:
             base, pip = base or label_chain(meta, meta), pip or label_chain(pip_meta, meta)
-        fc = (f"[1:v]{pip}{','.join(chain)}[ov];"
-              + (f"[0:v]{base}null[base];[base]" if base else "[0:v]") + f"[ov]{ov}[out]")
+        if placements:
+            # each placed piece: its range of the layer, re-timed to start at AT; eof_action=pass shows
+            # the main picture untouched once a piece ends (the default would freeze its last frame)
+            pieces = len(placements)
+            fc = f"[1:v]{pip}{','.join(chain)},split={pieces}" + "".join(f"[p{i}]" for i in range(pieces)) + ";"
+            for i, (a, b, at) in enumerate(placements):
+                fc += f"[p{i}]trim=start={a:.6f}:end={b:.6f},setpts=PTS-STARTPTS+{at:.6f}/TB[q{i}];"
+            prev = f"[0:v]{base}null[m]" if base else None
+            if prev:
+                fc += prev + ";"
+            cur = "[m]" if base else "[0:v]"
+            for i in range(pieces):
+                nxt = "[out]" if i == pieces - 1 else f"[m{i}]"
+                fc += f"{cur}[q{i}]{ov}:eof_action=pass{nxt}" + ("" if i == pieces - 1 else ";")
+                cur = nxt
+        else:
+            fc = (f"[1:v]{pip}{','.join(chain)}[ov];"
+                  + (f"[0:v]{base}null[base];[base]" if base else "[0:v]") + f"[ov]{ov}[out]")
         cmd += ["-filter_complex", fc, "-map", "[out]", "-map", f"0:a:{args.audio_stream}?"]
         if meta.get("duration"):
             # See the --image branch above: -t (exact, bounds only the main input) instead of

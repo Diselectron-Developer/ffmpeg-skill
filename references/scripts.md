@@ -1534,6 +1534,7 @@ stream selection would have picked.
 overlay.py INPUT --image PNG [--scale W | --scale-percent P] | --text "..." [--font-file F.ttf] [--font-size N] [--box]
                   [--emoji auto|mono|none] [--emoji-assets DIR]
                   | --video CLIP [--chromakey COLOR [--chromakey-similarity 0-1] [--chromakey-blend 0-1]]
+                    [--place SRC_START-SRC_END@AT ...]
            [--position top-right|bottom-left|center|X,Y] [--margin N] [--platform NAME] [--start T] [--end T] [--fade S] [--opacity 0-1] [-o OUT]
 ```
 `--platform NAME` (1.14) takes each edge's margin from that destination's safe zone
@@ -1549,6 +1550,17 @@ playing. `--scale` / `--scale-percent` set the width of an image, logo or
 (same position/scale/opacity/time-range knobs as `--image`); only the main
 input's audio is kept, the PiP layer's own audio is dropped. `--chromakey`
 (with `--video`) keys out that colour first for green-screen compositing.
+
+`--place SRC_START-SRC_END@AT` (with `--video`, repeatable) shows only that range
+of the layer, starting at `AT` on the main timeline; outside its placed ranges
+the layer is hidden and the main picture is untouched. One pass lays several
+pieces of one layer at their own times -- e.g. graphics rendered back to back
+(only the seconds that have graphics) and placed where each belongs:
+`--video cues.mov --position 0,0 --margin 0 --place 0-2.5@12 --place 2.5-6@40`.
+Refused (`kind: input`): a range that ends before it starts, negative times,
+two pieces overlapping on the main timeline, a range past the layer's end, a
+piece starting after the main video ends, `--place` without `--video`, and
+`--place` with `--start`/`--end`/`--fade` (the placements already say when).
 
 `--fade S` fades the overlay in at `--start` (or 0); the fade-out happens
 only at `--end`, so a logo with no `--end` stays to the last frame.

@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### Added
+
+- **`overlay.py --place SRC_START-SRC_END@AT`** (with `--video`, repeatable): show that range of the layer starting at `AT` on the main timeline, hidden elsewhere. One pass lays several pieces of one layer at their own times -- graphics rendered back to back (only the seconds that have any) placed where each belongs -- instead of a full-length mostly-transparent layer. Overlapping pieces, ranges past the layer's end, and `--start`/`--end`/`--fade` alongside are refused.
+
 ### Changed
 
 - **`docs/design-decisions.md` opens with a contents list** (by topic, then by release), built from its headings by `.github/scripts/design_decisions_index.py`; a test fails when it is stale. Eleven sections that still said "Unreleased" long after they shipped (2.3.0 to 2.12.0) carry their version, and the release workflow now renames such a heading to the version that ships it, as it does for CHANGELOG.md.
