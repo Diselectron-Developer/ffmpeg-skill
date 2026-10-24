@@ -8,10 +8,20 @@
 
 - **`overlay.py --place SRC_START-SRC_END@AT`** (with `--video`, repeatable): show that range of the layer starting at `AT` on the main timeline, hidden elsewhere. One pass lays several pieces of one layer at their own times -- graphics rendered back to back (only the seconds that have any) placed where each belongs -- instead of a full-length mostly-transparent layer. Overlapping pieces, ranges past the layer's end, and `--start`/`--end`/`--fade` alongside are refused.
 
+## 2.12.1
+
+_Automated release: version and notes generated from pull requests merged since 2.12.0._
+
+### Fixed
+
+- **`look.py` contact-sheet timecodes match the frames shown.** The sheet starts reading half a slice in (`-ss` before `-i`, so the first tile is not a black lead-in), which resets timestamps to 0 at that point: every burned-in label was half a slice early (an 8 s clip as 3x2 labelled a frame at 0.667 s `00:00:00.000`). The timecode now adds the seek back (`%{pts:hms:<seek>}`); a sheet that starts at 0 is unchanged.
+
 ### Changed
 
 - **`docs/design-decisions.md` opens with a contents list** (by topic, then by release), built from its headings by `.github/scripts/design_decisions_index.py`; a test fails when it is stale. Eleven sections that still said "Unreleased" long after they shipped (2.3.0 to 2.12.0) carry their version, and the release workflow now renames such a heading to the version that ships it, as it does for CHANGELOG.md.
 - **`npm run test:fast`** runs the contract suite alone (a few minutes, no real encodes); CONTRIBUTING.md says how to run one test group or one case while working on a tool.
+- look.py: contact-sheet timecodes add back the mid-slice seek (#352)
+- docs: a contents list for design-decisions, released section headings, npm run test:fast (#351)
 
 ## 2.12.0
 

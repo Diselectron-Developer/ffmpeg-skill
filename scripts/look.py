@@ -28,7 +28,12 @@ def fmt_hms(sec: float) -> str:
     return f"{int(h):02d}:{int(m):02d}:{s_:06.3f}"
 
 
-def timecode_filter(font_prefix: str) -> str:
+def timecode_filter(font_prefix: str, offset: float = 0.0) -> str:
+    """Burned-in timecode. `offset` is added to each frame's pts: an input-side -ss resets
+    timestamps to 0 at the seek point, so a sheet that starts reading mid-slice must add the seek
+    back or every tile is labelled `offset` seconds early (the contact sheet below seeks step/2)."""
+    if offset > 0:
+        return f"drawtext=text='%{{pts\\:hms\\:{offset:.6f}}}':{font_prefix}{FONT}"
     return f"drawtext=text='%{{pts\\:hms}}':{font_prefix}{FONT}"
 
 
@@ -256,10 +261,12 @@ def main() -> int:
         tile_w = max(2, (args.width // cols) // 2 * 2)
         out = args.output or os.path.join(outdir, f"{stem}_sheet.png")
         # sample at the middle of each slice so the first/last tiles are not black lead-in/out frames
-        vf = (f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{step * 0.98:.6f})',scale={tile_w}:-2{tc},"
-              f"tile={cols}x{rows}:padding=2:margin=2:color=0x202020")
         # with only a handful of frames a mid-slice seek skips past them all: start at 0 instead
         seek = 0.0 if frames_avail < 4 else step / 2
+        # the seek resets pts to 0, so the burned-in timecode gets the seek added back
+        tc_sheet = tc.replace(timecode_filter(font_prefix), timecode_filter(font_prefix, seek)) if seek else tc
+        vf = (f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{step * 0.98:.6f})',scale={tile_w}:-2{tc_sheet},"
+              f"tile={cols}x{rows}:padding=2:margin=2:color=0x202020")
         cmd = ffmpeg_base() + ["-ss", f"{seek:.6f}", "-i", args.input, "-vf", vf, "-frames:v", "1", out]
         run(cmd)
         outputs.append(out)
