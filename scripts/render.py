@@ -353,7 +353,8 @@ def render_pack(names: List[str], args) -> int:
         argv = [str(HERE / "render.py"), args.input, "--template", name, "-o", dest_out]
         for flag, value in (("--cues", args.cues), ("--srt", args.srt), ("--logo", args.logo),
                             ("--title", args.title), ("--brand", args.brand), ("--fit", args.fit),
-                            ("--chapters", args.chapters), ("--image", args.image)):
+                            ("--chapters", args.chapters), ("--image", args.image),
+                            ("--intermediate-preset", args.intermediate_preset)):
             if value:
                 argv += [flag, str(value)]
         info(f"→ pack: {name}")

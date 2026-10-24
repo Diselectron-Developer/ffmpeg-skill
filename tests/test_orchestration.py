@@ -1044,6 +1044,11 @@ class OrchestrationTests(MediaFixtures):
         used, x264_copy = presets(copy_proj)
         self.assertIsNone(used)
         self.assertEqual(set(x264_copy), {"medium"}, "a copy export keeps the stages' encode")
+        # a pack runs one render per destination: each gets the caller's choice
+        pack = json.loads(script("render.py", self.src, "--template", "reels,shorts", "--cues", self.cues,
+                                 "--intermediate-preset", "medium", "-o", OUT / "ip_pack" / "x.mp4",
+                                 "--dry-run", "--json").stdout)
+        self.assertEqual(set(re.findall(r"-preset (\w+)", " ".join(pack["commands"]))), {"medium"})
 
     # --------------------------------------------- 1.17.1: the template path fits the caption size
     def _cw1_cues(self):
