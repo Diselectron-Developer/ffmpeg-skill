@@ -35,7 +35,8 @@ PAGES = {
 }
 
 # ](target) in Markdown, and src= / href= / srcset= in the inline HTML the README uses.
-MD_LINK = re.compile(r"(\]\()([^)\s]+)(\))")
+MD_LINK = re.compile(r"""(\]\()([^)\s]+)((?:\s+(?:"[^"]*"|'[^']*'))?\))""")  # also [t](url "title")
+CODE_SPAN = re.compile(r"(``[^\n]*?``|`[^`\n]*`)")
 HTML_ATTR = re.compile(r"""(\b(?:src|href|srcset)=")([^"]+)(")""")
 EXTERNAL = re.compile(r"^(?:[a-z][a-z0-9+.-]*:|#|//)", re.I)
 
@@ -90,7 +91,9 @@ def _rewrite_prose(text: str, page_repo: str, assets: set) -> str:
             parts.append(" ".join([_rewrite(url, page_repo, assets)] + descriptor))
         return m.group(1) + ", ".join(parts) + m.group(3)
 
-    return HTML_ATTR.sub(attr, MD_LINK.sub(md, text))
+    # an inline code span is shown as written, like a fenced block
+    chunks = CODE_SPAN.split(text)
+    return "".join(c if i % 2 else HTML_ATTR.sub(attr, MD_LINK.sub(md, c)) for i, c in enumerate(chunks))
 
 
 def render(page_repo: str, assets: set) -> str:

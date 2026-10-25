@@ -243,6 +243,14 @@ class ContractTests(unittest.TestCase):
                                   capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue((out / "index.md").is_file())
+            # a titled link is rewritten; a link-shaped inline code span is left as written
+            sys.path.insert(0, str(ROOT / ".github" / "scripts"))
+            try:
+                import build_pages
+            finally:
+                sys.path.pop(0)
+            self.assertEqual(build_pages._rewrite_prose('[c](docs/contract.md "API") `](no.png)`', "README.md", set()),
+                             '[c](docs/contract.html "API") `](no.png)`')
             self.assertTrue((out / "_layouts" / "default.html").is_file())
             for page in out.rglob("*.md"):
                 text = page.read_text(encoding="utf-8")
