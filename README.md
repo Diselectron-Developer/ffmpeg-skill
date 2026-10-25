@@ -29,6 +29,7 @@ No cloud · No API keys · Python standard library</p>
   <a href="https://www.npmjs.com/package/ffmpeg-skill"><img src="https://img.shields.io/npm/v/ffmpeg-skill" alt="npm"></a>
   <a href="#ffmpeg-compatibility"><img src="https://img.shields.io/badge/ffmpeg-5.1%20%7C%206.1%20%7C%207.1%20%7C%208%20%7C%209%20tested-orange" alt="FFmpeg 5.1, 6.1, 7.1, 8 and 9 tested in CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT"></a>
+  <a href="https://github.com/sponsors/kajisho5"><img src="https://img.shields.io/badge/sponsor-%E2%9D%A4-ea4aaa?logo=githubsponsors" alt="Sponsor"></a>
 </p>
 
 ```bash
