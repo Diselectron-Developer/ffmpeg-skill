@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Documentation
+
+- **Measured on a one-hour recording.** README § "A one-hour recording" times the main tools on a 60-minute 1080p30 file. Every analysis tool and the stream-copy cut finished, the slowest being `check.py --content` at 308 s. A whole-hour `export.py --preset youtube` at the default preset hit the default 1800 s `--timeout` and failed cleanly with `kind: timeout`. The README's gotchas and SKILL.md's shared-flags line now say to pass `--timeout 0` or `--fast` for an hour-long re-encode.
 
 ## 2.17.1
 
