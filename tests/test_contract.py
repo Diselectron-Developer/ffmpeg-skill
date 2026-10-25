@@ -232,6 +232,26 @@ class ContractTests(unittest.TestCase):
         self.assertTrue(set(manifest) <= {"name", "version", "description", "author", "homepage", "repository", "license", "keywords"}, sorted(manifest))
         self.assertTrue(re.fullmatch(r"[a-z0-9-]+", manifest["name"]))
 
+    def test_pages_site_builds_with_no_dead_links(self):
+        """The GitHub Pages site (pages.yml) is assembled from the repo's own Markdown by
+        .github/scripts/build_pages.py, which refuses a relative link whose target does not
+        exist. Running it here means a renamed doc or a moved GIF fails CI instead of
+        publishing a dead link, and every image a page points to was copied next to it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "site"
+            proc = subprocess.run([sys.executable, str(ROOT / ".github" / "scripts" / "build_pages.py"), str(out)],
+                                  capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue((out / "index.md").is_file())
+            self.assertTrue((out / "_layouts" / "default.html").is_file())
+            for page in out.rglob("*.md"):
+                text = page.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("---\nlayout: default\n"), page)
+                for src in re.findall(r'(?:src|srcset)="([^"]+)"|!\[[^\]]*\]\(([^)\s]+)\)', text):
+                    url = (src[0] or src[1]).split()[0]
+                    if not re.match(r"^[a-z]+:", url):
+                        self.assertTrue((page.parent / url).is_file(), f"{page.relative_to(out)}: {url}")
+
     def test_claude_plugin_marketplace_lists_the_plugin_at_the_repo_root(self):
         """Without .claude-plugin/marketplace.json, `claude plugin install` and `claude plugin
         marketplace add kajisho5/ffmpeg-skill` both fail ("not found in any configured
