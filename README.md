@@ -392,6 +392,7 @@ The short list for humans. The agent-facing version, with the reasoning, is the 
 - **Sync results carry a confidence.** Below 0.3, or an offset near the edge of the analysis window, is probably wrong: enlarge `--analyze-seconds` or find a clap. Recordings over ten minutes from separate devices need `sync.py --fix-drift`.
 - **Outputs are never overwritten silently.** An existing output path is refused (`kind: input`, `error.reason: output_exists`, before anything runs); pass `--overwrite` where a replacement is intended.
 - **Nothing happens silently.** A refusal names its `error.reason` and `error.details`; a stale output lock taken over, a run without a lock, a plan input nobody could fingerprint, a fallback (an odd-sized frame scaled to even, a substituted font, libaom for SVT-AV1), a skipped step and every warning are recorded in `diagnostics` and on stderr (codes: `json_output.diagnostic_codes`); tools that draw text name the font they drew with (`font_used`). A refused plan and a lock takeover also append a line to an audit log (`<plan>.audit.jsonl`, or `render.py --audit-log FILE`). A degraded or partial result says so: `render.py`'s `verified` is every stage's, an unmeasured loudness or a report section that could not be built is a failing verification step, `export.py` reports `trimmed`, `multicam.py`'s `cuts` name the camera rendered, and `batch.py` rows carry the failing step's `error`, `verified`, and a row for every input after Ctrl-C.
+- **Long masters need a longer `--timeout`.** The default is 1800 s per ffmpeg call, which is there to catch a hang. A full re-encode of an hour of 1080p at the default preset ran past it on a 4-core machine (see [A one-hour recording](#a-one-hour-recording)). Pass `--timeout 0` or a larger value, or `--fast`. Analysis and stream-copy cuts are far below it.
 - **Long chains belong in a plan.** Three hand-chained re-encodes lose quality and are hard to change; `render.py` runs the whole edit from one JSON file, and `--dry-run` shows every ffmpeg command before anything is written.
 
 ## FAQ
@@ -484,6 +485,36 @@ python3 tests/bench_scenes.py
 ```
 
 Benchmarks live in `tests/bench_*.py`, agent evals in [evals/](evals/), results by iteration in `evals/results/`.
+
+### A one-hour recording
+
+Measured at 2.17.0 (2026-10-25) on one 60-minute 1080p30 H.264 file (4.3 GB, AAC mono 48 kHz,
+synthetic `testsrc2` picture and a tone). The machine was a 4-vCPU Xeon at 2.1 GHz with FFmpeg
+6.1.1 on Linux, and each tool ran alone. The analysis rows read the whole hour
+(`silence.py`, `scenes.py` and `check.py` report 3600 s). The edit and export rows used 10-minute segments cut from it with
+stream copy, and the last row is the whole hour.
+
+| Step | Wall time | Note |
+|---|---|---|
+| `probe.py` | 0.3 s | |
+| `silence.py --list` | 14 s | one audio decode |
+| `loudness.py --measure-only` | 66 s | |
+| `look.py` (contact sheet) | 97 s | |
+| `scenes.py` | 241 s | |
+| `check.py --platform youtube --content` | 308 s | the rows, `dropouts` included, cover the full hour |
+| `cut.py`, a 10-minute stream-copy segment | 2.4–4.4 s | no re-encode |
+| `join.py`, two 10-minute segments | 624 s | `join.py` always re-encodes, so it can crossfade and conform |
+| `export.py --preset youtube`, a 10-minute segment | 514 s | about 1.2× real time at the default `medium` preset |
+| `export.py --preset youtube --fast`, the same segment | 162 s | about 3.7× real time at `veryfast` |
+| `export.py --preset youtube`, the whole hour | killed at 1802 s | `kind: timeout` at the default `--timeout` of 1800 s (below) |
+
+**A full-length re-encode of an hour does not fit in the default `--timeout`.** The limit is
+1800 s per ffmpeg call. On this machine `export.py --preset youtube` on the whole hour was
+killed at 1802 s with `kind: timeout` (exit 124), and nothing was written. At the 10-minute
+segment's rate it would have needed about 50 minutes. A whole-hour `join.py` would land at the
+limit. The error message names the fix. For a long master, pass `--timeout 0` (no limit) or a
+larger value, or `--fast`, which at the measured rate takes about 16 minutes for the hour.
+Analysis tools and stream-copy cuts stay far below the limit.
 
 ## Install
 
