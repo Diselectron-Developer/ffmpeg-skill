@@ -218,8 +218,8 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(t["version"], pkg["version"])
 
     def test_claude_plugin_manifest_matches_package_and_skill(self):
-        """.claude-plugin/plugin.json makes the repo installable with `claude plugin install
-        kajisho5/ffmpeg-skill` (#142); a single-skill plugin may keep SKILL.md at its root. Its
+        """.claude-plugin/plugin.json makes the repo installable as a Claude Code plugin (#142,
+        listed by marketplace.json since 2.17.1); a single-skill plugin may keep SKILL.md at its root. Its
         version must track package.json (release.yml's auto-bump rewrites both), its name must
         equal SKILL.md's frontmatter name (the plugin namespaces the skill as name:name), and it
         must be valid JSON with only the documented top-level fields."""
@@ -231,6 +231,22 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(manifest["name"], skill_name)
         self.assertTrue(set(manifest) <= {"name", "version", "description", "author", "homepage", "repository", "license", "keywords"}, sorted(manifest))
         self.assertTrue(re.fullmatch(r"[a-z0-9-]+", manifest["name"]))
+
+    def test_claude_plugin_marketplace_lists_the_plugin_at_the_repo_root(self):
+        """Without .claude-plugin/marketplace.json, `claude plugin install` and `claude plugin
+        marketplace add kajisho5/ffmpeg-skill` both fail ("not found in any configured
+        marketplace" / "Marketplace file not found"), so the README's plugin install line could
+        never work. The marketplace lists exactly this plugin, by the manifest's name, from the
+        repository root, and the README installs it under that name."""
+        market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertTrue(re.fullmatch(r"[a-z0-9-]+", market["name"]))
+        self.assertTrue(market["owner"]["name"])
+        self.assertEqual([(p["name"], p["source"]) for p in market["plugins"]], [(manifest["name"], "./")])
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"/plugin install {manifest['name']} --marketplace kajisho5/ffmpeg-skill", readme)
+        self.assertIn(f"claude plugin install {manifest['name']}@{market['name']}", readme)
+        self.assertNotIn("claude plugin install kajisho5/ffmpeg-skill\n", readme)
 
     def test_docs_contract_example_version_matches_package_json(self):
         """docs/contract.md's illustrative JSON example of the Skill object hand-copies a

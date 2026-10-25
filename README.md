@@ -497,13 +497,15 @@ npx ffmpeg-skill --dir ./my-skills
 npx ffmpeg-skill --uninstall  # remove from the selected targets (--codex also clears the older ~/.codex/skills location)
 ```
 
-As a Claude Code plugin (no Node needed, updates with `claude plugin update`):
+As a Claude Code plugin (no Node needed, updates with `claude plugin update`). This repository is its own plugin marketplace:
 
 ```bash
-claude plugin install kajisho5/ffmpeg-skill
+/plugin install ffmpeg-skill --marketplace kajisho5/ffmpeg-skill      # in Claude Code 2.1.275 or later
+claude plugin marketplace add kajisho5/ffmpeg-skill                    # older versions: add the marketplace,
+claude plugin install ffmpeg-skill@ffmpeg-skill                        # then install from it
 ```
 
-The plugin namespaces the skill as `ffmpeg-skill:ffmpeg-skill`; the manifest is [.claude-plugin/plugin.json](.claude-plugin/plugin.json) and its version follows every release automatically.
+The plugin namespaces the skill as `ffmpeg-skill:ffmpeg-skill`. The manifests are [.claude-plugin/plugin.json](.claude-plugin/plugin.json), whose version follows every release automatically, and [.claude-plugin/marketplace.json](.claude-plugin/marketplace.json), which lists the plugin from the repository root. Before 2.17.1 the README's one-line `claude plugin install kajisho5/ffmpeg-skill` could not work, because there was no marketplace file.
 
 Without Node: clone this repository and copy `SKILL.md`, `scripts/`, `references/` and `mcp/` into your agent's skills directory.
 
