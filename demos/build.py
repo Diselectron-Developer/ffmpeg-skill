@@ -1662,6 +1662,10 @@ INSPECTION = [
     ("batch.py", "python3 scripts/batch.py ~/Footage --recipe batch.json --dry-run",
      "applies one recipe to a folder with a content-hash cache, printing what it would run, "
      "what it skipped as unchanged, and where each output lands."),
+    ("check.py --content", "python3 scripts/check.py final.mp4 --platform youtube --content",
+     "adds content rows to the platform check: black frames, frozen frames, the share of "
+     "silence, and short dropouts (digital silence for 20 ms to 1 s with sound on both sides, "
+     "the mark of lost audio at a join). Each row names its time ranges and a fix."),
     ("report.py", "python3 scripts/report.py --before raw.mov --after final.mp4 -o report.html",
      "a single self-contained HTML page: before/after contact sheets, loudness, the platform "
      "check table and the exact commands. It is a file to open, not a picture to embed here."),

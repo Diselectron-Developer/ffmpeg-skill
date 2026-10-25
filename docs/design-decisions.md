@@ -2102,7 +2102,9 @@ What was decided there:
   of a 6 s clip) passed. The new row counts gaps at or below -80 dBFS lasting 20 ms to 1 s,
   more than 50 ms from either end. -80 dB, far below the silence row's -50 dB, keeps a
   recording's own pauses (room tone at around -60 dB) out. A gap still open at the end is a
-  tail, and one at the very start is a lead-in. A noise gate does make such gaps on purpose,
+  tail, and one at the very start is a lead-in. The pass pads the audio with 2 s of zeros
+  first, because audio that ends before the video would otherwise close its silent tail at
+  its own EOF, inside the container's duration, and count as a dropout. A noise gate does make such gaps on purpose,
   which is why the row never FAILs and its fix says so. It costs one audio-only decode, because
   a second silencedetect in the main pass logs under the same name as the silence row's, and
   their lines could not be told apart. Code: `_common.probe._detect_dropouts()`. Test:

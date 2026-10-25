@@ -576,6 +576,7 @@ CONTENT_SILENCE_MIN = 0.5        # silencedetect minimum run, seconds
 CONTENT_DROPOUT_DB = -80.0
 CONTENT_DROPOUT_MIN, CONTENT_DROPOUT_MAX = 0.02, 1.0   # seconds
 CONTENT_DROPOUT_EDGE = 0.05      # a gap this close to the start or end is a lead-in/out, not a dropout
+CONTENT_DROPOUT_PAD = 2.0        # zeros appended before the dropout pass; > MAX, so a tail that runs into it never counts
 
 _BLACK_RE = re.compile(r"black_start:\s*([0-9.]+)\s+black_end:\s*([0-9.]+)")
 _FREEZE_RE = re.compile(r"lavfi\.freezedetect\.freeze_(start|end):\s*([0-9.]+)")
@@ -632,8 +633,12 @@ def detect_content(path: str, duration: float, *, video: bool = True, audio: boo
 def _detect_dropouts(path: str, end: float) -> "List[Tuple[float, float]]":
     """Short (near) digital-silence gaps inside the first audio stream: one audio-only pass
     (silencedetect at CONTENT_DROPOUT_DB). A second silencedetect in the main pass would log
-    under the same name as the silence row's, so its lines could not be told apart."""
+    under the same name as the silence row's, so its lines could not be told apart. The audio
+    is padded with CONTENT_DROPOUT_PAD s of zeros first: a silent tail of audio that ends before
+    the container does then runs into the pad and is too long to count, instead of closing at
+    the audio's EOF and passing the container-duration edge test."""
     proc = run_analysis([require_tool("ffmpeg"), "-hide_banner", "-nostdin", "-i", path, "-map", "0:a:0", "-af",
+                         f"apad=pad_dur={CONTENT_DROPOUT_PAD:g},"
                          f"silencedetect=noise={CONTENT_DROPOUT_DB:g}dB:d={CONTENT_DROPOUT_MIN}", "-f", "null", "-"],
                         check=False, record=True)
     if proc.returncode != 0:
@@ -647,7 +652,7 @@ def _detect_dropouts(path: str, end: float) -> "List[Tuple[float, float]]":
             s, e = start, float(val)
             start = None
             inside = s > CONTENT_DROPOUT_EDGE and (not end or e < end - CONTENT_DROPOUT_EDGE)
-            if inside and CONTENT_DROPOUT_MIN <= e - s < CONTENT_DROPOUT_MAX:
+            if inside and CONTENT_DROPOUT_MIN <= e - s <= CONTENT_DROPOUT_MAX:
                 gaps.append((s, e))
     return gaps  # a gap still open at the end is a tail, never a dropout
 

@@ -314,8 +314,8 @@ class AnalysisTests(MediaFixtures):
     def test_check_content_dropouts_row(self):
         """2.17: a short run of digital silence with sound on both sides (lost audio at a join) is a
         dropouts WARN; the same gap holding -60 dB room tone is a recording's pause and PASSes, and
-        a silent lead-in or tail is not a dropout. The silence row (share below -50 dB) misses all
-        three: 0.2 s of 6 s is 3%."""
+        a silent lead-in or tail is not a dropout, also when the audio ends before the video. The
+        silence row (share below -50 dB) misses all three: 0.2 s of 6 s is 3%."""
         def clip(name, audio_graph):
             path = OUT / name
             if not path.exists():
@@ -327,12 +327,16 @@ class AnalysisTests(MediaFixtures):
         dropped = clip("dropout_gap.mp4", f"[1]{gap}[a]")
         room = clip("dropout_roomtone.mp4", f"[1]{gap}[t];[t][2]amix=inputs=2:normalize=0[a]")
         edges = clip("dropout_edges.mp4", "[1]volume='if(lt(t,0.5)+gt(t,5.5),0,1)':eval=frame[a]")
+        # audio 2 s shorter than the video, its last 0.2 s silent: silencedetect closes that tail at
+        # the audio's EOF, well inside the container's 6 s, so only the padded pass keeps it a tail
+        short = clip("dropout_short_audio.mp4", "[1]atrim=0:4,volume='if(gt(t,3.8),0,1)':eval=frame[a]")
         r = self._rows(dropped, "--content")
         self.assertEqual((r["silence"]["status"], r["dropouts"]["status"]), ("PASS", "WARN"), r)
         self.assertTrue(r["dropouts"]["value"].startswith("1: 2."), r["dropouts"])
         self.assertIn("join", r["dropouts"]["fix"])
         self.assertEqual(self._rows(room, "--content")["dropouts"]["status"], "PASS")
         self.assertEqual(self._rows(edges, "--content")["dropouts"]["status"], "PASS")
+        self.assertEqual(self._rows(short, "--content")["dropouts"]["status"], "PASS")
 
     def test_check_colour_row_reads_the_matrix_tag(self):
         """#325: the colour row decided "untagged" from primaries and transfer only, so a file whose
