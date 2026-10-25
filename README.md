@@ -490,8 +490,9 @@ Benchmarks live in `tests/bench_*.py`, agent evals in [evals/](evals/), results 
 
 Measured at 2.17.0 (2026-10-25) on one 60-minute 1080p30 H.264 file (4.3 GB, AAC mono 48 kHz,
 synthetic `testsrc2` picture and a tone). The machine was a 4-vCPU Xeon at 2.1 GHz with FFmpeg
-6.1.1 on Linux, and each tool ran alone. Every tool finished, and every report described the
-whole hour.
+6.1.1 on Linux, and each tool ran alone. The analysis rows read the whole hour
+(`silence.py`, `scenes.py` and `check.py` report 3600 s). The edit and export rows used 10-minute segments cut from it with
+stream copy, and the last row is the whole hour.
 
 | Step | Wall time | Note |
 |---|---|---|
@@ -505,6 +506,7 @@ whole hour.
 | `join.py`, two 10-minute segments | 624 s | `join.py` always re-encodes, so it can crossfade and conform |
 | `export.py --preset youtube`, a 10-minute segment | 514 s | about 1.2× real time at the default `medium` preset |
 | `export.py --preset youtube --fast`, the same segment | 162 s | about 3.7× real time at `veryfast` |
+| `export.py --preset youtube`, the whole hour | killed at 1802 s | `kind: timeout` at the default `--timeout` of 1800 s (below) |
 
 **A full-length re-encode of an hour does not fit in the default `--timeout`.** The limit is
 1800 s per ffmpeg call. On this machine `export.py --preset youtube` on the whole hour was
