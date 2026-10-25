@@ -4,9 +4,16 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.17.1
+
+_Automated release: version and notes generated from pull requests merged since 2.17.0._
+
 ### Fixed
 
 - **The Claude Code plugin can actually be installed.** The README's `claude plugin install kajisho5/ffmpeg-skill` failed with "not found in any configured marketplace": the repository shipped a plugin manifest but no marketplace. `.claude-plugin/marketplace.json` now lists the plugin from the repository root. The install is `/plugin install ffmpeg-skill --marketplace kajisho5/ffmpeg-skill`, or on older Claude Code `claude plugin marketplace add kajisho5/ffmpeg-skill` followed by `claude plugin install ffmpeg-skill@ffmpeg-skill`.
+- Claude Code plugin: add the marketplace the README's install line needed (#361)
 
 ## 2.17.0
 
