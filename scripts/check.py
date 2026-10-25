@@ -20,10 +20,12 @@ Examples:
   python3 check.py clip.mp4 --platform custom --max-duration 30 --aspect 1:1 --lufs -16
   python3 check.py final.mp4 --platform reels --content
 
---content (opt-in) adds three content rows from one decode pass: black (share of the
+--content (opt-in) adds content rows from one decode pass: black (share of the
 duration that is black: WARN > 10%, FAIL >= 95%), frozen (longest frozen span: WARN >
 max(3 s, 30% of the duration), FAIL when the whole video is frozen) and silence (share
-below -50 dBFS: WARN > 50%, FAIL >= 95%). Without it the row set is unchanged.
+below -50 dBFS: WARN > 50%, FAIL >= 95%); and, from one more audio-only pass (2.17),
+dropouts (gaps of digital silence, <= -80 dBFS for 20 ms to 1 s with sound on both sides:
+WARN when there is any). Without it the row set is unchanged.
 """
 import argparse
 import json
@@ -89,7 +91,7 @@ def main() -> int:
     ap.add_argument("--max-mb", type=float, help="override max file size in MB")
     ap.add_argument("--no-loudness", action="store_true", help="skip the loudness measurement (faster)")
     ap.add_argument("--content", action="store_true",
-                    help="also check the content (one decode pass): black, frozen and silence rows")
+                    help="also check the content (one decode pass, plus an audio-only one): black, frozen, silence and dropouts rows")
     add_common(ap)
     args = ap.parse_args()
     apply_common(args)
@@ -288,6 +290,14 @@ def main() -> int:
                 f"{share * 100:.0f}% silent", f"<= {SILENCE_WARN * 100:.0f}% below {SILENT_PEAK_DBFS:g} dBFS",
                 "silence.py to cut the gaps, or audio.py --replace when the track is empty",
                 reason="most of the running time has no audible sound")
+        if "dropouts" in cd:
+            gaps = cd["dropouts"]
+            at = ", ".join(f"{s:.2f}s ({(e - s) * 1000:.0f} ms)" for s, e in gaps[:5]) + (" ..." if len(gaps) > 5 else "")
+            row("dropouts", "WARN" if gaps else "PASS", f"{len(gaps)}" + (f": {at}" if gaps else ""),
+                "no digital-silence gap under 1 s with sound on both sides",
+                "listen at those times: a gap at a cut or join is lost audio (re-cut with cut.py --accurate, or join.py "
+                "again); a noise gate makes these on purpose" if gaps else "",
+                reason="a short stretch of digital silence in the middle of the sound is usually lost audio at a join or a glitched decode" if gaps else "")
 
     failed = [r for r in rows if r["status"] == "FAIL"]
     warned = [r for r in rows if r["status"] == "WARN"]

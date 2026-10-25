@@ -4,7 +4,9 @@
 
 ## Unreleased
 
-(nothing yet)
+### Added
+
+- **`check.py --content` reports audio dropouts.** A new `dropouts` row counts short gaps of digital silence with sound on both sides: at or below -80 dBFS, lasting 20 ms to 1 s. These come from lost audio at a join or a glitched decode, which the silence row (a share of the running time) did not catch. It WARNs when there is any gap, and never FAILs, because a noise gate makes such gaps on purpose. The check costs one extra audio-only pass.
 
 ## 2.16.1
 
