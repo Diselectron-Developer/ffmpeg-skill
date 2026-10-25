@@ -303,13 +303,36 @@ class AnalysisTests(MediaFixtures):
                "-f", "lavfi", "-i", tone + ",volume=enable='gte(t,2)':volume=0", "-t", "6",
                "-pix_fmt", "yuv420p", "-c:v", "libx264", "-c:a", "aac", mixed)
         r = self._rows(normal, "--content")
-        self.assertEqual([r[k]["status"] for k in ("black", "frozen", "silence")], ["PASS"] * 3, r)
+        self.assertEqual([r[k]["status"] for k in ("black", "frozen", "silence", "dropouts")], ["PASS"] * 4, r)
         self.assertEqual(self._rows(black, "--content")["black"]["status"], "FAIL")
         self.assertEqual(self._rows(frozen, "--content")["frozen"]["status"], "FAIL")
         self.assertEqual(self._rows(part, "--content")["frozen"]["status"], "WARN")
         self.assertEqual(self._rows(silent, "--content")["silence"]["status"], "FAIL")
         r = self._rows(mixed, "--content")
         self.assertEqual((r["black"]["status"], r["silence"]["status"]), ("WARN", "WARN"), r)
+
+    def test_check_content_dropouts_row(self):
+        """2.17: a short run of digital silence with sound on both sides (lost audio at a join) is a
+        dropouts WARN; the same gap holding -60 dB room tone is a recording's pause and PASSes, and
+        a silent lead-in or tail is not a dropout. The silence row (share below -50 dB) misses all
+        three: 0.2 s of 6 s is 3%."""
+        def clip(name, audio_graph):
+            path = OUT / name
+            if not path.exists():
+                sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=10:d=6",
+                   "-f", "lavfi", "-i", "sine=f=440:d=6", "-f", "lavfi", "-i", "anoisesrc=a=0.001:d=6",
+                   "-filter_complex", audio_graph, "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-c:a", "aac", "-t", "6", path)
+            return path
+        gap = "volume='if(between(t,2,2.2),0,1)':eval=frame"
+        dropped = clip("dropout_gap.mp4", f"[1]{gap}[a]")
+        room = clip("dropout_roomtone.mp4", f"[1]{gap}[t];[t][2]amix=inputs=2:normalize=0[a]")
+        edges = clip("dropout_edges.mp4", "[1]volume='if(lt(t,0.5)+gt(t,5.5),0,1)':eval=frame[a]")
+        r = self._rows(dropped, "--content")
+        self.assertEqual((r["silence"]["status"], r["dropouts"]["status"]), ("PASS", "WARN"), r)
+        self.assertTrue(r["dropouts"]["value"].startswith("1: 2."), r["dropouts"])
+        self.assertIn("join", r["dropouts"]["fix"])
+        self.assertEqual(self._rows(room, "--content")["dropouts"]["status"], "PASS")
+        self.assertEqual(self._rows(edges, "--content")["dropouts"]["status"], "PASS")
 
     def test_check_colour_row_reads_the_matrix_tag(self):
         """#325: the colour row decided "untagged" from primaries and transfer only, so a file whose

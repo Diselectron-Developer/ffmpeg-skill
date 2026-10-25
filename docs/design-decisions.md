@@ -46,6 +46,7 @@ exists. When a decision changes, edit the entry in the same PR.
 - [2.14.0 — the FFmpeg 5.x deprecation](#2140--the-ffmpeg-5x-deprecation)
 - [2.15.0 — render.py's intermediate stages encode with veryfast](#2150--renderpys-intermediate-stages-encode-with-veryfast)
 - [2.16.0 — intermediates at superfast, not ultrafast](#2160--intermediates-at-superfast-not-ultrafast)
+- [2.17.0 — check.py --content's dropouts row](#2170--checkpy---contents-dropouts-row)
 <!-- contents:end -->
 
 ## Time limits
@@ -2093,3 +2094,16 @@ What was decided there:
   ultrafast's last 4 s cost a visible step in quality, which the export cannot win back.
   Test: `test_render_intermediate_stages_use_veryfast_only_before_an_encoding_export` (its name
   is from 2.15; it asserts the current default).
+
+## 2.17.0 — check.py --content's dropouts row
+
+- **A dropout is a short gap of digital silence with sound on both sides, and it only WARNs.**
+  The silence row measures a share of the running time, so 0.2 s of lost audio at a join (3%
+  of a 6 s clip) passed. The new row counts gaps at or below -80 dBFS lasting 20 ms to 1 s,
+  more than 50 ms from either end. -80 dB, far below the silence row's -50 dB, keeps a
+  recording's own pauses (room tone at around -60 dB) out. A gap still open at the end is a
+  tail, and one at the very start is a lead-in. A noise gate does make such gaps on purpose,
+  which is why the row never FAILs and its fix says so. It costs one audio-only decode, because
+  a second silencedetect in the main pass logs under the same name as the silence row's, and
+  their lines could not be told apart. Code: `_common.probe._detect_dropouts()`. Test:
+  `test_check_content_dropouts_row`.

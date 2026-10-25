@@ -569,6 +569,13 @@ CONTENT_MIN_SPAN = 0.1           # blackdetect minimum run, seconds
 CONTENT_FREEZE_NOISE = "-60dB"   # freezedetect noise tolerance
 CONTENT_FREEZE_MIN = 0.5         # freezedetect minimum run, seconds
 CONTENT_SILENCE_MIN = 0.5        # silencedetect minimum run, seconds
+# 2.17: a dropout is a short run of (near) digital silence with sound on both sides -- a join
+# that lost its audio, a glitched decode. Far quieter than the silence row's -50 dB, so a
+# recording's own pauses (room tone) do not count; a noise gate does produce them, which is
+# why the row only ever WARNs.
+CONTENT_DROPOUT_DB = -80.0
+CONTENT_DROPOUT_MIN, CONTENT_DROPOUT_MAX = 0.02, 1.0   # seconds
+CONTENT_DROPOUT_EDGE = 0.05      # a gap this close to the start or end is a lead-in/out, not a dropout
 
 _BLACK_RE = re.compile(r"black_start:\s*([0-9.]+)\s+black_end:\s*([0-9.]+)")
 _FREEZE_RE = re.compile(r"lavfi\.freezedetect\.freeze_(start|end):\s*([0-9.]+)")
@@ -618,7 +625,31 @@ def detect_content(path: str, duration: float, *, video: bool = True, audio: boo
         if start is not None:
             sil.append((start, end))
         out["silence"] = sil
+        out["dropouts"] = _detect_dropouts(path, end)
     return out
+
+
+def _detect_dropouts(path: str, end: float) -> "List[Tuple[float, float]]":
+    """Short (near) digital-silence gaps inside the first audio stream: one audio-only pass
+    (silencedetect at CONTENT_DROPOUT_DB). A second silencedetect in the main pass would log
+    under the same name as the silence row's, so its lines could not be told apart."""
+    proc = run_analysis([require_tool("ffmpeg"), "-hide_banner", "-nostdin", "-i", path, "-map", "0:a:0", "-af",
+                         f"silencedetect=noise={CONTENT_DROPOUT_DB:g}dB:d={CONTENT_DROPOUT_MIN}", "-f", "null", "-"],
+                        check=False, record=True)
+    if proc.returncode != 0:
+        die(f"dropout detection failed:\n{proc.stderr.strip()[-800:]}", kind="ffmpeg")
+    gaps: "List[Tuple[float, float]]" = []
+    start = None
+    for kind, val in SIL_RE.findall(proc.stderr):
+        if kind == "start":
+            start = float(val)
+        elif start is not None:
+            s, e = start, float(val)
+            start = None
+            inside = s > CONTENT_DROPOUT_EDGE and (not end or e < end - CONTENT_DROPOUT_EDGE)
+            if inside and CONTENT_DROPOUT_MIN <= e - s < CONTENT_DROPOUT_MAX:
+                gaps.append((s, e))
+    return gaps  # a gap still open at the end is a tail, never a dropout
 
 
 SCORE_RE = re.compile(r"frame:(\d+)\s+pts:\d+\s+pts_time:([0-9.]+)")

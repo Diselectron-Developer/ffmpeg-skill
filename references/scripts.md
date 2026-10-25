@@ -1042,7 +1042,10 @@ pass when `--no-loudness` (or a spec with no loudness target) skips it.
 `--content` (opt-in, one decode pass) adds three rows: `black` (share of the duration that is
 black: WARN > 10%, FAIL >= 95%), `frozen` (longest frozen span: WARN > max(3 s, 30% of the
 duration), FAIL when it covers >= 95%, i.e. the whole video) and `silence` (share below
--50 dBFS: WARN > 50%, FAIL >= 95%). A render project enables it with `"check": {"platform":
+-50 dBFS: WARN > 50%, FAIL >= 95%); since 2.17 one more audio-only pass adds `dropouts`
+(gaps of digital silence, <= -80 dBFS for 20 ms to 1 s with sound on both sides -- lost audio
+at a join, a glitched decode; WARN when there is any, never FAIL, because a noise gate makes
+them on purpose). A render project enables it with `"check": {"platform":
 "reels", "content": true}`.
 
 ### batch.py — same recipe over a folder, cached
