@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`cut.py --segments` joins no longer click.** Every join the re-encode makes now fades the sound 20 ms on each side. Before, two cuts butted together left a step in the waveform that played as a click: on a 440 Hz tone the step was 14x the tone's own largest. `--declick-ms` sets the length, `--no-declick` restores the butt join, and the result reports `declick_ms`. A stream-copy join copies the sound and is not faded.
+
 ### Documentation
 
 - **A project site on GitHub Pages.** `pages.yml` publishes https://kajisho5.github.io/ffmpeg-skill/ on every push to `main` that touches the docs. `.github/scripts/build_pages.py` assembles the site from the repository's own Markdown: the README, the demo gallery, the contract, the design decisions, the roadmap and this changelog. It rewrites relative links and copies the images they use, so nothing on the site is written by hand. A relative link to a file that does not exist fails the build, and `test_pages_site_builds_with_no_dead_links` runs the same build in CI.

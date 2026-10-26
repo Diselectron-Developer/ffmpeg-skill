@@ -48,6 +48,7 @@ Examples:
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -908,6 +909,11 @@ def cut_one(src: str, start: float, end: float, dst: str, reencode: bool, crf: i
 # The most segments one fallback ffmpeg call opens: every segment is its own input (a file handle,
 # a demuxer and a decoder each), and macOS shells default to 256 open files.
 JOIN_CHUNK = 32
+# Seconds of fade on each side of every --segments join the re-encode makes (--declick-ms / --no-declick).
+# Butting two cuts together leaves a step in the waveform wherever they were not both at zero, which
+# plays as a click: measured on a 440 Hz tone, the step at the join was 14x the tone's own largest
+# sample-to-sample change. A 20 ms fade is too short to hear as a dip and long enough to remove it.
+DECLICK_S = 0.02
 # how far before a segment the fallback seeks, so a start inside the B-frame reorder delay before a
 # keyframe still decodes from the keyframe BEFORE it
 SEEK_MARGIN = 1.0
@@ -1017,7 +1023,8 @@ def _grid_at_or_after(t: float, v0: float, rate: float) -> float:
 
 
 def _join_chunk(src: str, segments: List[Tuple[float, float]], dst: str, meta: dict, crf: int, preset: str,
-                has_v: bool, intermediate: bool = False, vend=None, hold=frozenset(), first: int = 0) -> List[str]:
+                has_v: bool, intermediate: bool = False, vend=None, hold=frozenset(), first: int = 0,
+                total=None) -> List[str]:
     """Re-cut `segments` from the source into one file through the concat filter, returning the codec
     arguments it encoded with. Each segment is
     its own seeked input, so both of its streams start at the segment's origin (0); neither is
@@ -1072,8 +1079,16 @@ def _join_chunk(src: str, segments: List[Tuple[float, float]], dst: str, meta: d
             graph.append(f"[{i}:v:0]{pad}trim=start={a - half:.6f}:end={b - half:.6f},setpts=PTS-{a:.6f}/TB[v{i}]")
             pads += f"[v{i}]"
         if has_a:
+            # fade only the sides that meet another segment: the file's own start and end stay as cut
+            n = first + i
+            fade = min(DECLICK_S, (b - a) / 2)
+            fades = ""
+            if fade > 0 and n > 0:
+                fades += f",afade=t=in:st=0:d={fade:.6f}"
+            if fade > 0 and n < (len(segments) if total is None else total) - 1:
+                fades += f",afade=t=out:st={b - a - fade:.6f}:d={fade:.6f}"
             graph.append(f"[{i}:a:0]atrim=start={a:.6f}:end={b:.6f},asetpts=PTS-{a:.6f}/TB,"
-                         f"aresample=async=1:first_pts=0[a{i}]")
+                         f"aresample=async=1:first_pts=0{fades}[a{i}]")
             pads += f"[a{i}]"
     outs = ("[v]" if has_v else "") + ("[a]" if has_a else "")
     graph.append(f"{pads}concat=n={len(segments)}:v={int(has_v)}:a={int(has_a)}{outs}")
@@ -1120,7 +1135,7 @@ def join_from_source(src: str, segments: List[Tuple[float, float]], dst: str, me
         for k in range(0, len(segments), JOIN_CHUNK):
             chunk = os.path.join(tmp, f"chunk{k // JOIN_CHUNK:03d}.mkv")
             args = _join_chunk(src, segments[k:k + JOIN_CHUNK], chunk, meta, crf, preset, has_v, intermediate=True,
-                               vend=vend, hold=hold, first=k) or []
+                               vend=vend, hold=hold, first=k, total=len(segments)) or []
             if "-tag:v" in args:
                 tag[:] = args[args.index("-tag:v"):args.index("-tag:v") + 2]
             out.append(chunk)
@@ -1287,6 +1302,7 @@ def _join_workspace():
 
 
 def main() -> int:
+    global DECLICK_S
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input")
     ap.add_argument("-o", "--output", help="output file (default: <name>_cut.<ext>)")
@@ -1306,6 +1322,11 @@ def main() -> int:
     ap.add_argument("--tolerance", type=float, default=0.5, help="max seconds a lossless cut may deviate before re-encoding kicks in (default 0.5, -1 = never for a "
                          "keyframe snap; a --segments join is still re-cut for open GOPs, a later B-frame .mp4/.mov "
                          "segment starting between keyframes, or a failed join check)")
+    dc = ap.add_mutually_exclusive_group()
+    dc.add_argument("--declick-ms", type=float, default=DECLICK_S * 1000,
+                    help="--segments: fade the sound this many ms on each side of every join the re-encode makes, so "
+                         "butted cuts do not click (default %(default)g; a stream-copy join is not faded)")
+    dc.add_argument("--no-declick", action="store_true", help="--segments: butt the joins with no fade")
     snap = ap.add_argument_group("beat snapping")
     snap.add_argument("--snap", choices=["none", "beats"], default="none",
                       help="move each in/out point to the nearest measured beat (default none)")
@@ -1456,6 +1477,9 @@ def main() -> int:
             args.accurate = True
             forced.append("vfr" if measured == "vfr" else "vfr_inconclusive")
 
+    if not math.isfinite(args.declick_ms) or args.declick_ms < 0:
+        die(f"--declick-ms must be a finite number of ms, 0 or more, got {args.declick_ms:g}")
+    DECLICK_S = 0.0 if args.no_declick else args.declick_ms / 1000
     outcomes: List[dict] = []
     join_reencoded = False
     join_check = None
@@ -1665,6 +1689,9 @@ def main() -> int:
          segment_precision=report["segment_precision"],
          edit_list=bool(single.get("edit_list")), stored_preroll_seconds=stored, av_start_skew_seconds=skew,
          join_check=join_check, segment_end_snap_seconds=end_snaps,
+         # the joins were faded only where the concat filter re-encoded them
+         declick_ms=(DECLICK_S * 1000 if len(segments) > 1 and (join_reencoded or args.accurate) and meta.get("audio")
+                     else None),
          notes=notes, **({"vfr_check": vfr_check} if vfr_check else {}),
          nearest_keyframes=sorted(NEAREST_KEYFRAMES) if NEAREST_KEYFRAMES else None,
          # the trade the caller can offer instead of a re-encode (eval e02: "without losing quality")

@@ -47,6 +47,7 @@ exists. When a decision changes, edit the entry in the same PR.
 - [2.15.0 — render.py's intermediate stages encode with veryfast](#2150--renderpys-intermediate-stages-encode-with-veryfast)
 - [2.16.0 — intermediates at superfast, not ultrafast](#2160--intermediates-at-superfast-not-ultrafast)
 - [2.17.0 — check.py --content's dropouts row](#2170--checkpy---contents-dropouts-row)
+- [2.17.2 — cut.py fades the sound at every --segments join it re-encodes](#2172--cutpy-fades-the-sound-at-every---segments-join-it-re-encodes)
 <!-- contents:end -->
 
 ## Time limits
@@ -2109,3 +2110,18 @@ What was decided there:
   a second silencedetect in the main pass logs under the same name as the silence row's, and
   their lines could not be told apart. Code: `_common.probe._detect_dropouts()`. Test:
   `test_check_content_dropouts_row`.
+
+## 2.17.2 — cut.py fades the sound at every --segments join it re-encodes
+
+- **A re-encoded `--segments` join fades the sound 20 ms on each side, by default.** Two cuts
+  butted together leave a step in the waveform wherever the sound was not at zero on both sides,
+  and a step plays as a click. Measured on a 440 Hz tone, the step at the join was 14x the tone's
+  own largest sample-to-sample change. 20 ms is too short to hear as a dip and long enough to
+  remove the step. Only the sides that meet another segment are faded: the file's own start and
+  end stay as cut. A stream-copy join copies the sound and cannot fade it without re-encoding the
+  sound, which would make a lossless join lossy, so it is left as it was. The result's
+  `declick_ms` reports the fade (null when no join was re-encoded), and `--no-declick` restores
+  the butt join. `silence.py` is not changed: it cuts inside silence, where the sound is already
+  near zero on both sides. Code: `cut._join_chunk()`, `DECLICK_S`. Test:
+  `test_cut_segments_join_is_faded_so_it_does_not_click`.
+
