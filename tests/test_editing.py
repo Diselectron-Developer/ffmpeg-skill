@@ -50,6 +50,32 @@ class EditingTests(MediaFixtures):
         script("cut.py", self.src, "--segments", "1-3,6-9", "--accurate", "-o", out)
         self.assertClose(probe(str(out))["duration"], 5.0, 0.15)
 
+    def test_cut_segments_join_is_faded_so_it_does_not_click(self):
+        """Butting two cuts of a tone left a step in the waveform at the join 14x the tone's own
+        largest sample-to-sample change: an audible click. Every join the re-encode makes is now
+        faded (--declick-ms, 20 by default); --no-declick keeps the old butt join."""
+        tone = OUT / "declick_tone.wav"
+        if not tone.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+               "sine=f=440:d=4:sample_rate=48000", "-c:a", "pcm_s16le", tone)
+
+        def largest_step(path):
+            raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "s16le", "-ac", "1", "-"],
+                                 stdout=subprocess.PIPE, check=True).stdout
+            pcm = memoryview(raw).cast("h")
+            return max(abs(pcm[i + 1] - pcm[i]) for i in range(len(pcm) - 1))
+
+        own = largest_step(tone)
+        runs = {}
+        for name, extra in (("faded", ()), ("butted", ("--no-declick",))):
+            out = OUT / f"declick_{name}.wav"
+            runs[name] = json.loads(script("cut.py", tone, "--segments", "0-1.0011,2-3", "--accurate", *extra,
+                                           "-o", out, "--json").stdout)
+            runs[name]["step"] = largest_step(out)
+        self.assertEqual((runs["faded"]["declick_ms"], runs["butted"]["declick_ms"]), (20.0, 0.0))
+        self.assertLessEqual(runs["faded"]["step"], own * 1.1, runs)
+        self.assertGreater(runs["butted"]["step"], own * 2, runs)
+
     def test_cut_json_reports_requested_vs_actual_and_mode(self):
         # exact-second cut on a keyframe-aligned GOP: expect a clean lossless copy
         out = OUT / "cut_honest_copy.mp4"
