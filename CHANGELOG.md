@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+(nothing yet)
+
+## 2.17.2
+
+_Automated release: version and notes generated from pull requests merged since 2.17.1._
+
 ### Fixed
 
 - **`cut.py --segments` joins no longer click.** Every join the re-encode makes now fades the sound 20 ms on each side. Before, two cuts butted together left a step in the waveform that played as a click: on a 440 Hz tone the step was 14x the tone's own largest. `--declick-ms` sets the length, `--no-declick` restores the butt join, and the result reports `declick_ms`. A stream-copy join copies the sound and is not faded.
@@ -12,6 +18,9 @@
 
 - **A project site on GitHub Pages.** `pages.yml` publishes https://kajisho5.github.io/ffmpeg-skill/ on every push to `main` that touches the docs. `.github/scripts/build_pages.py` assembles the site from the repository's own Markdown: the README, the demo gallery, the contract, the design decisions, the roadmap and this changelog. It rewrites relative links and copies the images they use, so nothing on the site is written by hand. A relative link to a file that does not exist fails the build, and `test_pages_site_builds_with_no_dead_links` runs the same build in CI.
 - **Measured on a one-hour recording.** README § "A one-hour recording" times the main tools on a 60-minute 1080p30 file. Every analysis tool and the stream-copy cut finished, the slowest being `check.py --content` at 308 s. A whole-hour `export.py --preset youtube` at the default preset hit the default 1800 s `--timeout` and failed cleanly with `kind: timeout`. The README's gotchas and SKILL.md's shared-flags line now say to pass `--timeout 0` or `--fast` for an hour-long re-encode.
+- cut.py --segments: fade the sound at every join the re-encode makes (#364)
+- GitHub Pages: a project site generated from the repo's own Markdown (#363)
+- README: measured on a one-hour recording, and the --timeout a long master needs (#362)
 
 ## 2.17.1
 
