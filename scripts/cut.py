@@ -48,6 +48,7 @@ Examples:
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -1476,8 +1477,8 @@ def main() -> int:
             args.accurate = True
             forced.append("vfr" if measured == "vfr" else "vfr_inconclusive")
 
-    if args.declick_ms < 0:
-        die(f"--declick-ms must be 0 or more, got {args.declick_ms:g}")
+    if not math.isfinite(args.declick_ms) or args.declick_ms < 0:
+        die(f"--declick-ms must be a finite number of ms, 0 or more, got {args.declick_ms:g}")
     DECLICK_S = 0.0 if args.no_declick else args.declick_ms / 1000
     outcomes: List[dict] = []
     join_reencoded = False
@@ -1689,7 +1690,8 @@ def main() -> int:
          edit_list=bool(single.get("edit_list")), stored_preroll_seconds=stored, av_start_skew_seconds=skew,
          join_check=join_check, segment_end_snap_seconds=end_snaps,
          # the joins were faded only where the concat filter re-encoded them
-         declick_ms=(DECLICK_S * 1000 if len(segments) > 1 and (join_reencoded or args.accurate) else None),
+         declick_ms=(DECLICK_S * 1000 if len(segments) > 1 and (join_reencoded or args.accurate) and meta.get("audio")
+                     else None),
          notes=notes, **({"vfr_check": vfr_check} if vfr_check else {}),
          nearest_keyframes=sorted(NEAREST_KEYFRAMES) if NEAREST_KEYFRAMES else None,
          # the trade the caller can offer instead of a re-encode (eval e02: "without losing quality")

@@ -75,6 +75,17 @@ class EditingTests(MediaFixtures):
         self.assertEqual((runs["faded"]["declick_ms"], runs["butted"]["declick_ms"]), (20.0, 0.0))
         self.assertLessEqual(runs["faded"]["step"], own * 1.1, runs)
         self.assertGreater(runs["butted"]["step"], own * 2, runs)
+        # nothing to fade without sound, and a fade length that is not a number is refused
+        silent = OUT / "declick_silent.mp4"
+        if not silent.exists():
+            sh("ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+               "color=c=gray:s=160x120:r=30:d=4", "-c:v", "libx264", silent)
+        data = json.loads(script("cut.py", silent, "--segments", "0-1,2-3", "--accurate", "-o",
+                                 OUT / "declick_silent_out.mp4", "--json").stdout)
+        self.assertIsNone(data["declick_ms"])
+        refused = script("cut.py", tone, "--segments", "0-1,2-3", "--accurate", "--declick-ms=nan",
+                         "-o", OUT / "declick_nan.wav", expect_fail=True)
+        self.assertIn("finite", refused.stderr)
 
     def test_cut_json_reports_requested_vs_actual_and_mode(self):
         # exact-second cut on a keyframe-aligned GOP: expect a clean lossless copy
