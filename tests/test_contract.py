@@ -746,10 +746,10 @@ class ContractTests(unittest.TestCase):
     def test_visual_verification_metadata(self):
         picture = {"fit", "crop", "sphere", "insert", "background", "reverse", "stabilize", "sequence", "caption", "overlay", "graphics", "color", "join", "multicam", "render", "proxy",
                    "deinterlace", "denoise", "redact", "waveform", "straighten", "freeze", "pad", "speedramp", "loop", "grid", "broll"}
-        # join and waveform are the picture tools that also accept audio-only inputs (audio
-        # concat; audio-track visualization); look applies to their video output only, which
-        # SKILL.md states next to "Look: not needed"
-        both = {"join", "waveform"}
+        # join, waveform and render are the picture tools that also accept audio-only inputs (audio
+        # concat; audio-track visualization; render --template podcast/audiogram); look applies to
+        # their video output only, which SKILL.md states next to "Look: not needed"
+        both = {"join", "waveform", "render"}
         for t in self.contract["tools"]:
             self.assertEqual(t["requires_visual_verification"], t["name"] in picture, t["name"])
             if t["requires_visual_verification"]:

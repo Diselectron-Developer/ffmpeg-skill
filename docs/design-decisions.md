@@ -71,7 +71,8 @@ exists. When a decision changes, edit the entry in the same PR.
   ffmpeg/ffprobe to measure, because a plan built on a fake measurement is not a plan. So does
   `overlay` for a multi-line `--text` on FFmpeg 8.0, 8.0.1 and 8.1.0 (one drawtext on a generated
   frame; see "a multi-line `overlay.py --text`" below). The contract lists them as
-  `analysis_only`; every other tool runs nothing. Code:
+  `analysis_only`, except `probe`, which is `none` with the note that ffprobe still runs (it writes
+  nothing either way); every other tool runs nothing. Code:
   `_contract.DRY_RUN_ANALYSIS`. Tests: `test_dry_run_never_runs_ffmpeg_and_writes_nothing`,
   `test_dry_run_plans_rest_on_real_measurements`.
 - **When a measured input is an intermediate an earlier dry-run stage would have written**

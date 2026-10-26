@@ -1,5 +1,6 @@
 # Runs on every pull request and on pushes to main (workflow_dispatch stays for manual runs).
-# Three OSes give three FFmpeg majors today: Ubuntu 24.04 apt = 6.1, Homebrew and Chocolatey = 8.x.
+# The OSes give several FFmpeg majors: Ubuntu 24.04 apt = 6.1, Ubuntu 26.04 apt = 8.0.1, Homebrew = 8.x,
+# gyan.dev on Windows = 9.x (plus the 5.1.1 static and 7.1 Debian jobs below).
 # The "ffmpeg listings" artifact holds each runner's `ffmpeg -filters / -encoders / -bsfs` output
 # and `doctor --json`, so a parser regression on a new FFmpeg layout is visible in the log and the
 # capture can be copied into tests/fixtures/.
@@ -100,7 +101,7 @@ jobs:
         with:
           name: ffmpeg-listings-${{ matrix.os }}-py${{ matrix.python }}
           path: listings/
-      - run: python tests/test_all.py
+      - run: python tests/run_parallel.py   # test_all.py's modules, sharded across the runner's cores
       # A handful of tests here drive the tools through POSIX shell shims (fake ffmpeg on PATH)
       # to force specific FFmpeg 6/7/8/9 fixture layouts; those are individually skipIf'd on
       # Windows (not portable), not the whole file -- everything else (schema, reencodes_*,
@@ -175,7 +176,7 @@ jobs:
         with:
           name: ffmpeg-listings-ubuntu-latest-ffmpeg5
           path: listings/
-      - run: python tests/test_all.py
+      - run: python tests/run_parallel.py   # test_all.py's modules, sharded across the runner's cores
       - run: python tests/test_contract.py
         if: "!cancelled()"
 
@@ -210,7 +211,7 @@ jobs:
         with:
           name: ffmpeg-listings-debian-trixie-ffmpeg7
           path: listings/
-      - run: python3 tests/test_all.py
+      - run: python3 tests/run_parallel.py   # test_all.py's modules, sharded across the runner's cores
       - run: python3 tests/test_contract.py
         if: "!cancelled()"
 

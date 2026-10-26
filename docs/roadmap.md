@@ -16,6 +16,9 @@ minor and `fix` PRs into a patch, so each block below is one or two `feat` PRs p
 - **shipped, eval pending** — released, but no evals iteration has graded it yet.
 - **planned** — not released. Nothing below a *planned* heading exists in any published version;
   the feature lines are the intent, not a description of the code.
+- **planned theme, superseded** — a 1.x theme written before 1.x ended. Its version number was
+  later used for an unrelated release (the table above), and the items of it that did ship are
+  listed there under the release that shipped them.
 
 The released version today is **2.17.2** (notes in CHANGELOG.md); **2.2.1** — `render.py`, `caption.py --mode mux` and
 `sequence.py` now check every input before any work, as `join.py --list` (2.2.0) does: every
@@ -59,7 +62,7 @@ markers; everything else listed as `not_exported`), plus the eval-24 follow-up t
 | 1.24.0 | shipped, eval pending | MCP `prompts` capability with five workflow recipes (#272): `reel`, `podcast`, `multicam`, `delivery_check`, `hdr`. `initialize` advertises `capabilities.prompts`; `prompts/list`/`prompts/get` fill a template built from facts SKILL.md's own request table already states -- recipes, not new tool calls, every command line named is one `tools/call` (or the CLI) can already run. `feat:` release, hence the minor bump. Tool count still 42 |
 | 1.24.1 | shipped, evaluated (eval 23b) | `caption.py --karaoke-style word` (#276, #278): one ASS Dialogue event per word, active word scaled by `--karaoke-scale` (default 112%) and emboldened, past/upcoming words coloured -- not a colour-only sweep. `loudness.py`'s stream-copy branch gains `-movflags +faststart` (#277, #275), fixing a `render.py --template ... --normalize` delivery that lost faststart. Eval 23b's `kw1`/`ff1` prompts (`evals/results/iteration-23b.json`) confirm both for real: the generated ASS carries `\fscx112\fscy112` on the active word, and a loudness-normalised template-youtube delivery still has `moov` before `mdat`, with `check.py`'s loudness/true-peak rows PASS |
 | 1.25.0 | shipped, evaluated (eval 23b) | `chore:` release bump; closes the remaining mp4 stream-copy paths over to `-movflags +faststart` (#279). No script API change, tool count still 42. Covered by eval 23b alongside 1.24.1 -- same faststart code path, no regression found |
-| 2.0.0 | planned | — |
+| 2.0.0 | shipped | see "2.0.0 — the announced breaks" below |
 
 ## 1.8.0 — one-call delivery, quieter checks, encoder flags (shipped + evaluated, eval 8)
 
@@ -603,7 +606,7 @@ truth-up. No further action was needed there.
   open until an environment with that access runs Set B (whisper/TTS), Set D (the 55-prompt
   trigger judge), and an Opus/independent-model quality pass.
 
-## 1.19.0 — observability, portability (planned)
+## 1.19.0 — observability, portability (planned theme, superseded)
 
 - `--trace FILE` (common flag): one JSON line per ffmpeg run with wall time, encode fps,
   speed, exit code, bytes written; `result_v2.metrics` carries the same for the whole tool.
@@ -632,7 +635,7 @@ truth-up. No further action was needed there.
 - Eval 20 on the Windows and macOS runners; it also grades whether agents quote the metrics
   rather than re-probe.
 
-## 1.20.0 — agent ergonomics (planned)
+## 1.20.0 — agent ergonomics (planned theme, superseded)
 
 - SKILL.md rewritten from evals 8–20: **the request table regrouped by intent** (the clusters
   people actually ask in — shorten, reframe, caption, fix the audio, deliver, inspect — rather
@@ -644,7 +647,7 @@ truth-up. No further action was needed there.
 - Eval 21: trigger set doubled, plus "second-turn" prompts where the agent must continue an edit
   from a previous result document.
 
-## 1.21.0 — the 2.0 freeze (planned)
+## 1.21.0 — the 2.0 freeze (planned theme, superseded)
 
 - Everything 2.0 removes is announced (`deprecated` in the contract, `--help`, CHANGELOG) for
   at least one minor; `docs/migrating-2.0.md` maps every old spelling to the new one.

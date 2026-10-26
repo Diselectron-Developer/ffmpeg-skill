@@ -114,7 +114,7 @@ def step(name: str, argv: List[str], timeout: float) -> Dict:
         return r
     try:
         proc = subprocess.run([sys.executable, str(HERE / argv[0])] + argv[1:] + ["--json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, encoding="utf-8", errors="replace", timeout=timeout)
+                              text=True, encoding="utf-8", errors="replace", timeout=timeout or None)
     except subprocess.TimeoutExpired:
         msg = f"timeout after {timeout:.0f}s"
         return {"step": name, "ok": False, "seconds": round(time.time() - t0, 1), "error": msg,
@@ -149,7 +149,7 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="keep the outputs")
     ap.add_argument("--quick", action="store_true", help="probe, copy cut, fit, caption, export only")
     ap.add_argument("--seconds", type=float, default=6.0, help="length of the test cut taken from each file (default 6)")
-    ap.add_argument("--timeout", type=float, default=600.0, help="per-step timeout in seconds")
+    ap.add_argument("--timeout", type=float, default=600.0, help="per-step timeout in seconds (default 600; 0 = no limit, as everywhere else)")
     ap.add_argument("--report", help="write a Markdown report here")
     add_common(ap)
     args = ap.parse_args()
