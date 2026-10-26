@@ -73,7 +73,8 @@ def main() -> int:
     work = sorted(((n, k, SHARDS.get(n, 1)) for n in names for k in range(SHARDS.get(n, 1))),
                   key=lambda j: -ROUGH_SECONDS.get(j[0], 0) / j[2])
     jobs = args.jobs or min(os.cpu_count() or 1, len(work))
-    out_root = Path(os.environ.get("OUT", HERE / "out"))
+    # absolute: the children run with cwd=tests/, so a relative OUT would mean a different place there
+    out_root = Path(os.environ.get("OUT", HERE / "out")).resolve()
     t0 = time.time()
     failed, ran = [], 0
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
