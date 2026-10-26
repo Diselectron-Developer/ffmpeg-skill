@@ -18,6 +18,7 @@
   - `docs/design-decisions.md`: `probe` is `none` in the contract, not `analysis_only`.
   - `docs/roadmap.md`: 2.0.0 is shipped. The 1.19 to 1.21 themes are marked superseded.
   - SKILL.md: `references/scripts.md` holds most flags, and `--help` lists all. The description now states the FFmpeg floor next to Python's (FFmpeg 6.1+ and Python 3.10+, with 5.x and 3.9 deprecated).
+  - SKILL.md: three rules stated twice now appear once: `--overwrite` consent lives in step 7 only, "never report success without the output probe" in step 6 only, and a stray blank line is gone. 157 bytes and one line of headroom under the 30,000-byte and 220-line budgets.
 
 ### Tests
 
