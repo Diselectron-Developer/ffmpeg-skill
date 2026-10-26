@@ -96,6 +96,9 @@ An agent that "knows FFmpeg" still guesses: it assumes a frame rate, picks a cod
 ## Quick start
 
 ```bash
+# 0. FFmpeg itself, once (Ubuntu/Debian shown; macOS and Windows are in the Install table below)
+sudo apt install ffmpeg
+
 # 1. install the skill for Claude Code (Cursor: --cursor, Codex: --codex, all three: --all)
 npx ffmpeg-skill
 
@@ -105,6 +108,8 @@ npx ffmpeg-skill doctor
 # 3. (for agent frameworks) read the machine-readable contract
 npx ffmpeg-skill contract --json | head -40
 ```
+
+Captions from speech (`caption.py --transcribe`) need one local speech engine, installed separately. `pip install faster-whisper` is the simplest; the first run downloads its model, and the audio never leaves the machine. Without an engine, everything else works, `doctor` lists the engine as missing optional, and `--transcribe` refuses with the install line for each engine it supports.
 
 Already installed? re-run `npx ffmpeg-skill` to refresh `~/.claude/skills/ffmpeg-skill`. Copies are not updated automatically.
 
