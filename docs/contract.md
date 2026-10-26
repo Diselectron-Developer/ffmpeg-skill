@@ -920,7 +920,9 @@ A planning agent (for example video-production-agent's SkillRegistry) can:
 3. pick a tool by `role`, `inputs`/`outputs`, `video_required` and `audio_only`;
 4. build the call from `input_schema` and the argument mapping, plan with `--dry-run`;
 5. run, parse `output_schema`, then run `verification.tools`, adding `look` when
-   `requires_visual_verification` is true.
+   `requires_visual_verification` is true and the output has a video stream. The flag is
+   per tool, not per call: an audio-only `join` and `render --template podcast` write no
+   picture, and `look` is skipped for them (`Look: not needed`).
 
 The measurement documents (`probe`, `check`, `scenes`, `sync`) are ffmpeg-skill's own
 shapes, not another system's Observation model; convert them in the agent's adapter.
