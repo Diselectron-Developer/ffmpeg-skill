@@ -6,6 +6,12 @@
 
 (nothing yet)
 
+## 2.17.3
+
+_Automated release: version and notes generated from pull requests merged since 2.17.2._
+
+- Add Paper section linking the Verification-Driven Coding paper (DOI: 10.5281/zenodo.23720216)
+
 ## 2.17.2
 
 _Automated release: version and notes generated from pull requests merged since 2.17.1._
